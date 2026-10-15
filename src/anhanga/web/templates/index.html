@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anhangá // Spectral Edge & Latency Auditor</title>
+    <!-- TailwindCSS v3 CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        obsidian: '#0a0a0c',
+                        surface: '#121216',
+                        bordercolor: '#27272a',
+                        fire: {
+                            500: '#ef4444',
+                            600: '#dc2626',
+                            glow: '#f97316'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-obsidian text-zinc-100 min-h-screen font-mono selection:bg-fire-500 selection:text-white" x-data="anhangaApp()">
+
+    <!-- Header / Navbar -->
+    <header class="border-b border-bordercolor bg-surface/50 backdrop-blur sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <!-- Ícone Estilizado de Olhos de Fogo -->
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-fire-600 to-amber-600 flex items-center justify-center shadow-lg shadow-fire-600/20">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="font-bold text-lg tracking-wider text-white flex items-center gap-2">
+                        ANHANGÁ <span class="text-xs px-2 py-0.5 rounded bg-fire-500/10 text-fire-500 border border-fire-500/20">v0.1</span>
+                    </h1>
+                    <p class="text-xs text-zinc-400">Spectral Edge, TLS & Latency Auditor</p>
+                </div>
+            </div>
+
+            <div class="flex items-center space-x-4 text-sm">
+                <a href="/docs" target="_blank" class="text-zinc-400 hover:text-white transition flex items-center gap-1">
+                    <span>Swagger API</span>
+                </a>
+                <a href="/metrics" target="_blank" class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-bordercolor transition flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>/metrics</span>
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
+
+        <!-- Barramento de Diagnóstico On-Demand -->
+        <section class="bg-surface border border-bordercolor rounded-xl p-6 shadow-2xl relative overflow-hidden">
+            <div class="absolute -right-10 -bottom-10 w-40 h-40 bg-fire-500/5 rounded-full blur-3xl pointer-events-none"></div>
+
+            <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest mb-4">Inspeção Cirúrgica de Endpoint</h2>
+
+            <form @submit.prevent="runScan()" class="flex flex-col sm:flex-row gap-3">
+                <div class="relative flex-1">
+                    <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                        https://
+                    </div>
+                    <input type="text" x-model="targetUrl" placeholder="ex: github.com ou api.meusite.com.br"
+                           class="w-full bg-obsidian border border-bordercolor rounded-lg pl-24 pr-4 py-3 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-fire-500 transition">
+                </div>
+                <button type="submit" :disabled="loading"
+                        class="bg-gradient-to-r from-fire-600 to-amber-600 hover:from-fire-500 hover:to-amber-500 text-white font-medium px-6 py-3 rounded-lg text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-lg shadow-fire-600/20">
+                    <svg x-show="loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span x-text="loading ? 'Sondando Borda...' : 'Executar Anhangá'"></span>
+                </button>
+            </form>
+
+            <div x-show="errorMessage" x-cloak class="mt-4 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm" x-text="errorMessage"></div>
+        </section>
+
+        <!-- Painel de Resultado do Scan Ativo -->
+        <section x-show="result" x-cloak class="space-y-6">
+            <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-surface border border-bordercolor rounded-xl p-6">
+                <div>
+                    <div class="flex items-center gap-3">
+                        <span class="px-2.5 py-1 rounded text-xs font-bold uppercase"
+                              :class="result?.is_up ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'"
+                              x-text="result?.is_up ? 'UP (' + result?.status_code + ')' : 'DOWN'"></span>
+                        <h3 class="text-xl font-bold text-white tracking-wide" x-text="result?.final_url || result?.target_url"></h3>
+                    </div>
+                    <p class="text-xs text-zinc-400 mt-2">IP Resolvido: <span class="text-zinc-200" x-text="result?.resolved_ip || 'N/A'"></span> | Versão HTTP: <span class="text-zinc-200" x-text="result?.http_version || 'N/A'"></span></p>
+                </div>
+
+                <!-- Security Grade Card -->
+                <div class="flex items-center gap-4 bg-obsidian border border-bordercolor px-5 py-3 rounded-xl">
+                    <div>
+                        <div class="text-xs text-zinc-400">Security Grade</div>
+                        <div class="text-xs text-zinc-500" x-text="'Score: ' + (result?.security?.score || 0) + '/100'"></div>
+                    </div>
+                    <div class="w-12 h-12 rounded-lg flex items-center justify-center font-black text-xl shadow-inner"
+                         :class="{
+                            'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30': ['A+', 'A'].includes(result?.security?.grade),
+                            'bg-amber-500/20 text-amber-400 border border-amber-500/30': ['B', 'C'].includes(result?.security?.grade),
+                            'bg-red-500/20 text-red-400 border border-red-500/30': ['D', 'F'].includes(result?.security?.grade)
+                         }"
+                         x-text="result?.security?.grade || 'F'"></div>
+                </div>
+            </div>
+
+            <!-- Gráfico de Waterfall de Latência -->
+            <div class="bg-surface border border-bordercolor rounded-xl p-6 space-y-4">
+                <div class="flex justify-between items-center">
+                    <h4 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Waterfall de Latência (Network & Edge)</h4>
+                    <span class="text-xs text-zinc-400">Total: <strong class="text-white" x-text="(result?.timings?.total_ms || 0) + ' ms'"></strong></span>
+                </div>
+
+                <!-- Barra Proporcional Waterfall -->
+                <div class="w-full bg-obsidian h-4 rounded-lg overflow-hidden flex border border-bordercolor p-0.5 gap-0.5">
+                    <div class="h-full bg-sky-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('dns_ms') + '%'" :title="'DNS: ' + result?.timings?.dns_ms + 'ms'"></div>
+                    <div class="h-full bg-blue-600 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('tcp_ms') + '%'" :title="'TCP: ' + result?.timings?.tcp_ms + 'ms'"></div>
+                    <div class="h-full bg-purple-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('tls_ms') + '%'" :title="'TLS: ' + result?.timings?.tls_ms + 'ms'"></div>
+                    <div class="h-full bg-amber-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('ttfb_ms') + '%'" :title="'TTFB: ' + result?.timings?.ttfb_ms + 'ms'"></div>
+                    <div class="h-full bg-emerald-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('transfer_ms') + '%'" :title="'Transfer: ' + result?.timings?.transfer_ms + 'ms'"></div>
+                </div>
+
+                <!-- Legenda de Fases -->
+                <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2 text-xs">
+                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
+                        <span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>
+                        <div>
+                            <div class="text-zinc-500">DNS</div>
+                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.dns_ms || 0) + ' ms'"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
+                        <span class="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+                        <div>
+                            <div class="text-zinc-500">TCP Handshake</div>
+                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.tcp_ms || 0) + ' ms'"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
+                        <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+                        <div>
+                            <div class="text-zinc-500">TLS Handshake</div>
+                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.tls_ms || 0) + ' ms'"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
+                        <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+                        <div>
+                            <div class="text-zinc-500">TTFB (Backend)</div>
+                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.ttfb_ms || 0) + ' ms'"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
+                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                        <div>
+                            <div class="text-zinc-500">Transferência</div>
+                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.transfer_ms || 0) + ' ms'"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Auditoria de Segurança e Runbook de Remediação -->
+            <div class="bg-surface border border-bordercolor rounded-xl p-6 space-y-4 md:col-span-2">
+                <div class="flex justify-between items-center">
+                    <h4 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Auditoria DevSecOps & Runbook de Remediação</h4>
+                    <span class="text-xs text-zinc-400">Ações recomendadas para blindar a borda</span>
+                </div>
+
+                <div class="space-y-3">
+                    <template x-for="finding in result?.security?.missing_findings">
+                        <div class="p-3 rounded-lg bg-obsidian border border-bordercolor space-y-2">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-red-400 flex items-center gap-2">
+                                    <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                                    <span x-text="finding.header"></span>
+                                </span>
+                                <span class="text-[10px] text-zinc-500 px-2 py-0.5 rounded bg-zinc-800" x-text="'+' + finding.weight + ' pts'"></span>
+                            </div>
+                            <p class="text-xs text-zinc-400" x-text="finding.description"></p>
+                            <div class="bg-surface p-2 rounded border border-bordercolor flex items-center justify-between text-[11px] font-mono text-amber-400 overflow-x-auto">
+                                <span x-text="finding.remediation"></span>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="!result?.security?.missing_findings?.length" class="p-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
+                        Parabéns! Todos os headers de segurança recomendados estão configurados na borda.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Alvos Monitorados em Background (Targets Cache) -->
+        <section class="space-y-4">
+            <h3 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Vigilância Contínua (Targets Cache)</h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {% if cached_results %}
+                    {% for item in cached_results %}
+                    <div class="bg-surface border border-bordercolor rounded-xl p-5 space-y-3 hover:border-fire-500/50 transition">
+                        <div class="flex justify-between items-center">
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase {{ 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' if item.is_up else 'bg-red-500/10 text-red-400 border border-red-500/20' }}">
+                                {{ 'UP (' ~ item.status_code ~ ')' if item.is_up else 'DOWN' }}
+                            </span>
+                            <span class="text-xs font-bold px-2 py-0.5 rounded bg-obsidian border border-bordercolor {{ 'text-emerald-400' if item.security.grade in ['A+', 'A'] else 'text-amber-400' }}">
+                                Grade {{ item.security.grade }}
+                            </span>
+                        </div>
+                        <div>
+                            <h4 class="font-medium text-sm text-white truncate" title="{{ item.target_url }}">{{ item.target_url }}</h4>
+                            <p class="text-[11px] text-zinc-500 mt-1">Total: <strong class="text-zinc-300">{{ item.timings.total_ms }} ms</strong> | IP: {{ item.resolved_ip }}</p>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="col-span-3 bg-surface border border-bordercolor rounded-xl p-8 text-center text-zinc-500 text-sm">
+                        Nenhum alvo monitorado em background no momento. Configure o <code class="text-zinc-300">targets.yaml</code> na raiz para ativar a vigilância contínua do Anhangá.
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-bordercolor mt-20 py-6 text-center text-xs text-zinc-600">
+        Anhangá Engine // Desenvolvido para SRE e DevSecOps exigentes.
+    </footer>
+
+    <!-- Script Alpine.js para requisição da API -->
+    <script>
+        function anhangaApp() {
+            return {
+                targetUrl: '',
+                loading: false,
+                errorMessage: '',
+                result: null,
+
+                async runScan() {
+                    if (!this.targetUrl.trim()) return;
+                    this.loading = true;
+                    this.errorMessage = '';
+                    this.result = null;
+
+                    try {
+                        const response = await fetch(`/api/v1/scan?url=${encodeURIComponent(this.targetUrl)}`);
+                        const data = await response.json();
+
+                        if (!response.ok) {
+                            throw new Error(data.detail || 'Falha ao executar o diagnóstico.');
+                        }
+
+                        this.result = data;
+                    } catch (err) {
+                        this.errorMessage = err.message;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                getPercent(phaseKey) {
+                    if (!this.result || !this.result.timings) return 0;
+                    const total = this.result.timings.total_ms || 1;
+                    const val = this.result.timings[phaseKey] || 0;
+                    return Math.max(2, Math.round((val / total) * 100));
+                }
+            }
+        }
+    </script>
+</body>
+</html>

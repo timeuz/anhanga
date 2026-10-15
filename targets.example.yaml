@@ -1,0 +1,7 @@
+interval_seconds: 30
+allow_private: false
+targets:
+  - https://cloudflare.com
+  - https://github.com
+  - https://news.ycombinator.com
+  - https://httpbin.org/delay/1

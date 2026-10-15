@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "anhanga"
+version = "0.1.0"
+description = "Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx[http2]>=0.27.0",
+    "pydantic>=2.9.0",
+    "prometheus-client>=0.21.0",
+    "jinja2>=3.1.4",
+    "pyyaml>=6.0.2",
+    "rich>=13.8.0", # Para deixar a CLI bonita no terminal
+]
+
+[project.scripts]
+anhanga = "anhanga.cli:main"

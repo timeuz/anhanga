@@ -99,20 +99,45 @@ def evaluate_probe_gates(
     """
     Avalia os Quality Gates de SRE/DevSecOps sobre um ProbeResult.
     Retorna (passed, exit_code, violations):
-    - exit_code 2: Erro de DNS, bloqueio Anti-SSRF ou URL inválida
-    - exit_code 1: Alvo offline ou violação de --min-grade, --max-ttfb ou --max-total
+    - exit_code 3: Erro de DNS, bloqueio Anti-SSRF, target inválido ou erro de configuração
+    - exit_code 2: Nota de segurança abaixo do mínimo exigido (--min-grade)
+    - exit_code 1: Alvo offline, falha de SLO (TTFB/Total) ou Content Assertion falhou
     - exit_code 0: Todas as verificações passaram
     """
     violations: list[str] = []
 
     if _is_execution_or_ssrf_error(result.error):
         violations.append(result.error or "Erro de DNS ou bloqueio Anti-SSRF.")
-        return False, 2, violations
+        return False, 3, violations
+
+    slo_or_conn_failed = False
 
     if not result.is_up:
-        reason = result.error or f"HTTP {result.status_code or 'ERR'}"
-        violations.append(f"Alvo OFFLINE: {reason}")
+        if result.assertions and not result.assertions.passed and result.status_code and 200 <= result.status_code < 400:
+            pass
+        else:
+            reason = result.error or f"HTTP {result.status_code or 'ERR'}"
+            violations.append(f"Alvo OFFLINE: {reason}")
+            slo_or_conn_failed = True
 
+    if result.assertions and not result.assertions.passed:
+        for fail_msg in result.assertions.failures:
+            violations.append(f"Content Assertion: {fail_msg}")
+        slo_or_conn_failed = True
+
+    if max_ttfb_ms is not None and result.timings.ttfb_ms > max_ttfb_ms:
+        violations.append(
+            f"SLO de TTFB violado: {result.timings.ttfb_ms:.2f}ms excede o limite de {max_ttfb_ms:.2f}ms."
+        )
+        slo_or_conn_failed = True
+
+    if max_total_ms is not None and result.timings.total_ms > max_total_ms:
+        violations.append(
+            f"SLO de Latência Total violado: {result.timings.total_ms:.2f}ms excede o limite de {max_total_ms:.2f}ms."
+        )
+        slo_or_conn_failed = True
+
+    grade_failed = False
     if min_grade:
         norm_min = min_grade.strip().upper()
         if norm_min not in GRADE_RANK:
@@ -124,17 +149,12 @@ def evaluate_probe_gates(
             violations.append(
                 f"Nota de segurança insuficiente: obtido '{actual_grade}' (score {result.security.score}/100), mínimo exigido '{norm_min}'."
             )
+            grade_failed = True
 
-    if max_ttfb_ms is not None and result.timings.ttfb_ms > max_ttfb_ms:
-        violations.append(
-            f"SLO de TTFB violado: {result.timings.ttfb_ms:.2f}ms excede o limite de {max_ttfb_ms:.2f}ms."
-        )
-
-    if max_total_ms is not None and result.timings.total_ms > max_total_ms:
-        violations.append(
-            f"SLO de Latência Total violado: {result.timings.total_ms:.2f}ms excede o limite de {max_total_ms:.2f}ms."
-        )
-
+    if slo_or_conn_failed:
+        return False, 1, violations
+    if grade_failed:
+        return False, 2, violations
     if violations:
         return False, 1, violations
     return True, 0, []
@@ -200,6 +220,10 @@ def build_sarif_report(
             rule_id = "ANHANGA-AVAILABILITY"
             rule_name = "TargetUnavailable"
             short_desc = "Alvo indisponível ou retornando erro HTTP"
+        elif "content assertion" in v_lower or "assertion" in v_lower:
+            rule_id = "ANHANGA-ASSERTION"
+            rule_name = "ContentAssertionFailure"
+            short_desc = "Falha em verificação de asserção de conteúdo"
         else:
             rule_id = f"ANHANGA-GATE-{idx}"
             rule_name = f"QualityGateViolation{idx}"
@@ -354,13 +378,21 @@ def render_rich_report(
             "🔥 SIM" if p.is_dominant else "-",
         )
     wf_table.add_row(
-        "[bold]TOTAL[/bold]",
+        "[bold]TOTAL (1ª Amostra Fria)[/bold]",
         f"0.00 → {result.timings.total_ms:.2f} ms",
         f"[bold]{result.timings.total_ms:.2f} ms[/bold]",
         "-",
         f"Dominante: {result.timings.dominant_phase or 'N/A'}",
     )
     console.print(wf_table)
+
+    # Decomposição Física: RTT de Rede vs Processamento Servidor
+    rtt_text = (
+        f"🌐 [bold cyan]Decomposição Física:[/bold cyan] "
+        f"RTT de Rede Estimado: [bold]{result.timings.estimated_rtt_ms:.2f} ms[/bold]  |  "
+        f"Processamento Servidor (TTFB − RTT): [bold]{result.timings.server_processing_ms:.2f} ms[/bold]"
+    )
+    console.print(Panel(rtt_text, border_style="blue"))
 
     # Estatísticas de Amostragem (P50 / P95 / P99 / Jitter / Fria vs Keep-Alive)
     samp = result.sampling
@@ -369,32 +401,55 @@ def render_rich_report(
         if samp.warm_avg_total_ms is not None
         else "N/A (1 amostra)"
     )
-    stats_panel = Panel(
+    stats_body = (
+        f"Destaque: [bold green]{samp.headline_label}: {samp.headline_total_ms:.2f} ms[/bold green]  |  "
         f"Amostras: [bold]{samp.samples_count}x[/bold]  |  "
-        f"P50: [bold]{samp.p50_ms:.2f} ms[/bold]  |  "
-        f"P95: [bold]{samp.p95_ms:.2f} ms[/bold]  |  "
-        f"P99: [bold]{samp.p99_ms:.2f} ms[/bold]  |  "
         f"Jitter: [bold]{samp.jitter_ms:.2f} ms[/bold]\n"
+        f"Percentis: P50=[bold]{samp.p50_ms:.2f}ms[/bold], "
+        f"P95=[bold]{f'{samp.p95_ms:.2f}ms' if samp.p95_valid else 'N/A (n<20)'}[/bold], "
+        f"P99=[bold]{f'{samp.p99_ms:.2f}ms' if samp.p99_valid else 'N/A (n<100)'}[/bold]\n"
         f"Conexão Fria (1ª): [bold]{samp.cold_total_ms:.2f} ms[/bold]  |  "
-        f"Keep-Alive (Reaproveitada): [bold]{warm_str}[/bold]",
-        title="Estatísticas SRE (Percentis & Reuso de Conexão)",
-        border_style="blue",
+        f"Keep-Alive Reusada: [bold]{warm_str}[/bold]"
     )
-    console.print(stats_panel)
+    if samp.sample_size_notice:
+        stats_body += f"\n[dim yellow]ℹ️ {samp.sample_size_notice}[/dim yellow]"
 
-    # Resumo TLS
+    console.print(
+        Panel(
+            stats_body,
+            title="Estatísticas SRE (Latência Típica Mediana & Percentis)",
+            border_style="cyan",
+        )
+    )
+
+    # Alerta de Falha de Modo Comum (se detectado)
+    if result.common_mode_failure_warning:
+        console.print(
+            Panel(
+                f"[bold red]⚠️ FALHA DE MODO COMUM DETECTADA:[/bold red] {result.common_mode_failure_warning}",
+                border_style="red",
+            )
+        )
+
+    # Resumo TLS e HTTP Port 80
     if result.tls:
         tls_valid_str = (
             "[bold green]VÁLIDO[/bold green]"
             if result.tls.valid
             else "[bold red]INVÁLIDO[/bold red]"
         )
+        port80_info = (
+            f"  |  Porta 80 (HTTP→HTTPS): [bold]{result.http_port_80_status or 'N/A'}[/bold]"
+            if result.http_port_80_status
+            else ""
+        )
         console.print(
             Panel(
                 f"Certificado: {tls_valid_str}  |  Protocolo: [bold]{result.tls.protocol or 'N/A'}[/bold]  |  "
-                f"Cifra: [bold]{result.tls.cipher or 'N/A'}[/bold]\n"
+                f"Cifra: [bold]{result.tls.cipher or 'N/A'}[/bold]{port80_info}\n"
                 f"Emissor: {result.tls.issuer or 'N/A'}  |  "
-                f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold]  |  "
+                f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold] "
+                f"({result.tls.relative_validity_percent_remaining:.1f}% restante)  |  "
                 f"OCSP: {result.tls.ocsp_status}",
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",
@@ -572,11 +627,35 @@ async def _run_check_async(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise CLIArgumentError(str(exc)) from exc
 
+    resolve_override: dict[str, str] = {}
+    if getattr(args, "resolve", None):
+        for res_item in args.resolve:
+            parts = res_item.split(":")
+            if len(parts) == 3:
+                # host:port:ip -> map host and host:port
+                h, p, ip = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                resolve_override[h] = ip
+                resolve_override[f"{h}:{p}"] = ip
+            elif len(parts) == 2:
+                # host:ip
+                h, ip = parts[0].strip(), parts[1].strip()
+                resolve_override[h] = ip
+            else:
+                raise CLIArgumentError(
+                    f"Formato inválido em --resolve '{res_item}'. Use 'host:port:ip' ou 'host:ip'."
+                )
+
     result = await execute_probe(
         raw_url=target_url,
         timeout=args.timeout,
         allow_private=args.allow_private,
         samples=args.samples,
+        resolve_override=resolve_override or None,
+        fail_if_body_not_matches_regexp=getattr(args, "fail_if_body_not_matches_regexp", None),
+        fail_if_body_matches_regexp=getattr(args, "fail_if_body_matches_regexp", None),
+        min_payload_bytes=getattr(args, "min_payload_bytes", None),
+        max_payload_bytes=getattr(args, "max_payload_bytes", None),
+        assert_final_url=getattr(args, "assert_final_url", None),
     )
 
     _, exit_code, violations = evaluate_probe_gates(
@@ -668,7 +747,7 @@ async def async_main(argv: list[str] | None = None) -> int:
     try:
         if not raw_args:
             parser.print_help(sys.stderr)
-            return 2
+            return 3
 
         parsed_args = parser.parse_args(raw_args)
         if parsed_args.command == "serve":
@@ -681,7 +760,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             return 2
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
-        return 2
+        return 3
     except SystemExit as sys_exit:
         code = sys_exit.code
         return int(code) if isinstance(code, int) else 0

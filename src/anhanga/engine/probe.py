@@ -14,7 +14,11 @@ import httpx
 from httpcore._backends.auto import AutoBackend
 from httpcore._backends.base import AsyncNetworkBackend, AsyncNetworkStream, SOCKET_OPTION
 
+from collections import deque
+import os
+
 from anhanga.engine.models import (
+    ContentAssertionsResult,
     PhasePercentiles,
     ProbeResult,
     RedirectHop,
@@ -25,6 +29,7 @@ from anhanga.engine.models import (
     build_timing_breakdown,
 )
 from anhanga.engine.security import (
+    audit_cors_active,
     audit_http_security,
     check_tls10_11_accepted_async,
     is_ssrf_safe,
@@ -160,15 +165,128 @@ class InstrumentedPinnedNetworkBackend(AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
+_GLOBAL_PROBE_HISTORY: deque[tuple[float, str, float, bool]] = deque(maxlen=100)
+
+
+def _detect_system_dns_resolver() -> str:
+    resolv_conf = "/etc/resolv.conf"
+    try:
+        with open(resolv_conf, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("nameserver"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1]
+    except Exception:
+        pass
+    return "127.0.0.53 (systemd-resolved)"
+
+
+def _check_common_mode_failure(current_host: str, dns_ms: float, has_error: bool) -> str | None:
+    now = time.monotonic()
+    _GLOBAL_PROBE_HISTORY.append((now, current_host.lower(), dns_ms, has_error))
+    cutoff = now - 60.0
+    recent = [item for item in _GLOBAL_PROBE_HISTORY if item[0] >= cutoff]
+    degraded_domains = {
+        host for _, host, d_ms, is_err in recent
+        if (d_ms > 500.0 or is_err) and host
+    }
+    if len(degraded_domains) >= 3:
+        return (
+            f"Alerta de Falha em Modo Comum: múltiplos alvos distintos ({len(degraded_domains)}) apresentaram "
+            "alta latência de DNS (>500ms) ou timeout simultaneamente nos últimos 60s. "
+            "O gargalo pode estar no resolvedor ou na conectividade da sonda local."
+        )
+    return None
+
+
+async def _check_port_80(
+    host: str,
+    allow_private: bool = False,
+    timeout: float = 1.5,
+) -> str:
+    """Verifica se a porta 80 (HTTP) redireciona apropriadamente para HTTPS."""
+    test_url = f"http://{host}/"
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=timeout,
+            headers={"User-Agent": "Anhanga-Probe/0.3 (+https://github.com/timeuz/anhanga)"},
+        ) as c:
+            resp = await c.get(test_url)
+            if resp.status_code in (301, 302, 307, 308):
+                loc = resp.headers.get("location", "").strip()
+                if loc.lower().startswith("https://"):
+                    return f"{resp.status_code} Redireciona para HTTPS (Correto)"
+                return f"{resp.status_code} Redireciona para HTTP ({loc[:35]})"
+            if 200 <= resp.status_code < 400:
+                return f"{resp.status_code} Sem Redirecionamento HTTPS (Inseguro)"
+            return f"HTTP {resp.status_code}"
+    except Exception:
+        return "Porta 80 Inacessível / Fechada"
+
+
+def _evaluate_content_assertions(
+    body_text: str,
+    payload_bytes: int,
+    final_url: str,
+    fail_if_body_not_matches_regexp: str | None = None,
+    fail_if_body_matches_regexp: str | None = None,
+    min_payload_bytes: int | None = None,
+    max_payload_bytes: int | None = None,
+    assert_final_url: str | None = None,
+) -> ContentAssertionsResult:
+    failures: list[str] = []
+
+    if fail_if_body_not_matches_regexp:
+        try:
+            if not re.search(fail_if_body_not_matches_regexp, body_text):
+                failures.append(
+                    f"Corpo não contém o padrão esperado: '{fail_if_body_not_matches_regexp}'"
+                )
+        except re.error as err:
+            failures.append(f"Regexp inválida em fail_if_body_not_matches_regexp: {err}")
+
+    if fail_if_body_matches_regexp:
+        try:
+            if re.search(fail_if_body_matches_regexp, body_text):
+                failures.append(
+                    f"Corpo contém o padrão proibido: '{fail_if_body_matches_regexp}'"
+                )
+        except re.error as err:
+            failures.append(f"Regexp inválida em fail_if_body_matches_regexp: {err}")
+
+    if min_payload_bytes is not None and payload_bytes < min_payload_bytes:
+        failures.append(
+            f"Payload recebido ({payload_bytes} bytes) abaixo do mínimo exigido ({min_payload_bytes} bytes)"
+        )
+
+    if max_payload_bytes is not None and payload_bytes > max_payload_bytes:
+        failures.append(
+            f"Payload recebido ({payload_bytes} bytes) acima do máximo permitido ({max_payload_bytes} bytes)"
+        )
+
+    if assert_final_url and final_url != assert_final_url:
+        failures.append(
+            f"URL final obtida ('{final_url}') diverge da URL esperada ('{assert_final_url}')"
+        )
+
+    return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures)
+
+
 async def resolve_and_validate_host(
     host: str,
     port: int,
     allow_private: bool = False,
     dns_timeout: float = 3.0,
-) -> tuple[str, float]:
+    resolve_override: dict[str, str] | None = None,
+    return_all_ips: bool = False,
+) -> tuple[str, float] | tuple[str, float, list[str]]:
     """
     Resolve o hostname via getaddrinfo (IPv4/IPv6) uma única vez com timeout próprio,
     mede dns_ms real e valida TODOS os endereços retornados contra a política Anti-SSRF.
+    Suporta override (--resolve host:port:ip).
     """
     clean_host = host.strip()
     if clean_host.startswith("[") and clean_host.endswith("]"):
@@ -179,6 +297,22 @@ async def resolve_and_validate_host(
             clean_host,
             f"Bloqueado pelo Guardião Anti-SSRF: zona IPv6 não permitida ({clean_host}).",
         )
+
+    # Suporte a override explícito de resolução (--resolve host:port:ip)
+    if resolve_override:
+        override_ip = (
+            resolve_override.get(f"{clean_host.lower()}:{port}")
+            or resolve_override.get(clean_host.lower())
+        )
+        if override_ip:
+            if not is_ssrf_safe(override_ip, allow_private):
+                raise SSRFBlockedError(
+                    override_ip,
+                    f"Bloqueado pelo Guardião Anti-SSRF: IP de override privado/restrito ({override_ip}).",
+                )
+            if return_all_ips:
+                return override_ip, 0.0, [override_ip]
+            return override_ip, 0.0
 
     # Se já for literal de IP, valida antes mesmo de invocar o resolvedor
     try:
@@ -221,6 +355,8 @@ async def resolve_and_validate_host(
             )
 
     chosen_ip = preferred_ipv4 or resolved_ips[0]
+    if return_all_ips:
+        return chosen_ip, dns_ms, resolved_ips
     return chosen_ip, dns_ms
 
 
@@ -266,6 +402,7 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
 
     totals = [s.timings.total_ms for s in raw_samples]
     sorted_totals = sorted(totals)
+    p50_total = _percentile(sorted_totals, 50.0)
 
     cold_total_ms = round(raw_samples[0].timings.total_ms, 2)
     warm_totals = [
@@ -292,11 +429,22 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         for phase_name, series in phase_series.items()
     }
 
+    n_samples = len(raw_samples)
+    p95_valid = n_samples >= 20
+    p99_valid = n_samples >= 100
+    sample_size_notice = (
+        None
+        if p95_valid
+        else "Amostragem com n < 20: P95 e P99 requerem amostragem maior (n ≥ 20 para P95, n ≥ 100 para P99) para validade estatística."
+    )
+
     return SamplingStats(
-        samples_count=len(raw_samples),
+        samples_count=n_samples,
+        headline_total_ms=p50_total,
+        headline_label="Latência Típica (Mediana P50)",
         cold_total_ms=cold_total_ms,
         warm_avg_total_ms=warm_avg_total_ms,
-        p50_ms=_percentile(sorted_totals, 50.0),
+        p50_ms=p50_total,
         p95_ms=_percentile(sorted_totals, 95.0),
         p99_ms=_percentile(sorted_totals, 99.0),
         min_ms=round(sorted_totals[0], 2),
@@ -304,6 +452,9 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         mean_ms=round(statistics.mean(totals), 2),
         stdev_ms=round(statistics.stdev(totals), 2) if len(totals) > 1 else 0.0,
         jitter_ms=_compute_jitter(totals),
+        p95_valid=p95_valid,
+        p99_valid=p99_valid,
+        sample_size_notice=sample_size_notice,
         phase_stats=phase_stats,
         raw_samples=raw_samples,
     )
@@ -325,18 +476,21 @@ async def _execute_single_http_step(
     url: str,
     dns_ms: float,
     max_body_bytes: int,
-) -> tuple[httpx.Response, TimingBreakdown, bool, int, bool]:
+    reference_sample: str = "Amostra 1 (Conexão Fria)",
+) -> tuple[httpx.Response, TimingBreakdown, bool, int, bool, bytes]:
     """
     Executa um único GET com streaming e mede de forma estritamente não-cumulativa:
     - tcp_ms e tls_ms via backend instrumentado
     - ttfb_ms desde o fim do handshake TCP/TLS (ou início do request se conexão reutilizada) até os headers
     - transfer_ms durante a leitura em streaming do body (limitado a max_body_bytes)
+    - captura os bytes do payload para asserções de conteúdo
     """
     backend.reset_step()
     t_req_start = time.perf_counter()
 
     payload_bytes = 0
     payload_truncated = False
+    body_chunks: list[bytes] = []
 
     async with client.stream("GET", url) as resp:
         t_headers_received = time.perf_counter()
@@ -362,6 +516,7 @@ async def _execute_single_http_step(
         t_transfer_start = time.perf_counter()
         async for chunk in resp.aiter_bytes():
             payload_bytes += len(chunk)
+            body_chunks.append(chunk)
             if payload_bytes > max_body_bytes:
                 payload_bytes = max_body_bytes
                 payload_truncated = True
@@ -374,8 +529,9 @@ async def _execute_single_http_step(
         tls_ms=tls_ms,
         ttfb_ms=ttfb_ms,
         transfer_ms=transfer_ms,
+        reference_sample=reference_sample,
     )
-    return resp, timings, connection_reused, payload_bytes, payload_truncated
+    return resp, timings, connection_reused, payload_bytes, payload_truncated, b"".join(body_chunks)
 
 
 async def _run_probe_session(
@@ -385,10 +541,16 @@ async def _run_probe_session(
     samples: int,
     max_body_bytes: int,
     verify_ssl: bool = True,
+    resolve_override: dict[str, str] | None = None,
+    fail_if_body_not_matches_regexp: str | None = None,
+    fail_if_body_matches_regexp: str | None = None,
+    min_payload_bytes: int | None = None,
+    max_payload_bytes: int | None = None,
+    assert_final_url: str | None = None,
 ) -> ProbeResult:
     backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)
     transport = _create_instrumented_transport(backend, verify=verify_ssl, http2=True)
-    headers = {"User-Agent": "Anhanga-Probe/0.1 (+https://github.com/timeuz/anhanga)"}
+    headers = {"User-Agent": "Anhanga-Probe/0.3 (+https://github.com/timeuz/anhanga)"}
 
     redirect_chain: list[RedirectHop] = []
     origin_conn_timings: dict[tuple[str, str, int], tuple[float, float, float]] = {}
@@ -396,6 +558,7 @@ async def _run_probe_session(
     current_url = initial_url
     max_redirects = 10
     resolved_ip: str | None = None
+    all_resolved_ips: list[str] = []
     last_dns_timings = TimingBreakdown()
 
     step_timeout = httpx.Timeout(
@@ -405,6 +568,9 @@ async def _run_probe_session(
         write=min(timeout, 5.0),
         pool=min(timeout, 5.0),
     )
+
+    dns_resolver = _detect_system_dns_resolver()
+    probe_origin = os.getenv("ANHANGA_PROBE_ORIGIN", "Sonda Local (Linux)")
 
     async with httpx.AsyncClient(
         transport=transport,
@@ -417,6 +583,7 @@ async def _run_probe_session(
         final_timings: TimingBreakdown = TimingBreakdown()
         final_payload_bytes = 0
         final_payload_truncated = False
+        final_body_bytes = b""
 
         for hop_num in range(1, max_redirects + 2):
             parsed = urlparse(current_url)
@@ -427,6 +594,8 @@ async def _run_probe_session(
                     final_url=current_url,
                     redirect_hops=len(redirect_chain),
                     redirect_chain=redirect_chain,
+                    dns_resolver=dns_resolver,
+                    probe_origin=probe_origin,
                     error=f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
                 )
 
@@ -434,18 +603,26 @@ async def _run_probe_session(
             if not host:
                 return ProbeResult(
                     target_url=initial_url,
+                    dns_resolver=dns_resolver,
+                    probe_origin=probe_origin,
                     error="URL inválida: hostname não encontrado.",
                 )
             port = parsed.port or (443 if scheme == "https" else 80)
 
             try:
-                hop_ip, dns_ms = await resolve_and_validate_host(
+                res_tuple = await resolve_and_validate_host(
                     host,
                     port,
                     allow_private=allow_private,
                     dns_timeout=min(timeout, 3.0),
+                    resolve_override=resolve_override,
+                    return_all_ips=True,
                 )
+                hop_ip, dns_ms, hop_all_ips = res_tuple  # type: ignore[misc]
                 resolved_ip = hop_ip
+                for ip_item in hop_all_ips:
+                    if ip_item not in all_resolved_ips:
+                        all_resolved_ips.append(ip_item)
                 backend.pinned_ips[host.lower()] = hop_ip
                 last_dns_timings = build_timing_breakdown(dns_ms=dns_ms)
             except SSRFBlockedError as ssrf_err:
@@ -453,6 +630,9 @@ async def _run_probe_session(
                     target_url=initial_url,
                     final_url=current_url,
                     resolved_ip=ssrf_err.ip,
+                    all_resolved_ips=all_resolved_ips,
+                    dns_resolver=dns_resolver,
+                    probe_origin=probe_origin,
                     redirect_hops=len(redirect_chain),
                     redirect_chain=redirect_chain,
                     timings=last_dns_timings,
@@ -462,19 +642,22 @@ async def _run_probe_session(
                 return ProbeResult(
                     target_url=initial_url,
                     final_url=current_url,
+                    dns_resolver=dns_resolver,
+                    probe_origin=probe_origin,
                     redirect_hops=len(redirect_chain),
                     redirect_chain=redirect_chain,
                     timings=last_dns_timings,
                     error=f"Erro de DNS: {dns_exc}",
                 )
 
-            resp, step_timings, conn_reused, p_bytes, p_trunc = (
+            resp, step_timings, conn_reused, p_bytes, p_trunc, p_body = (
                 await _execute_single_http_step(
                     client=client,
                     backend=backend,
                     url=current_url,
                     dns_ms=dns_ms,
                     max_body_bytes=max_body_bytes,
+                    reference_sample="Amostra 1 (Conexão Fria)",
                 )
             )
 
@@ -495,6 +678,9 @@ async def _run_probe_session(
                         target_url=initial_url,
                         final_url=current_url,
                         resolved_ip=resolved_ip,
+                        all_resolved_ips=all_resolved_ips,
+                        dns_resolver=dns_resolver,
+                        probe_origin=probe_origin,
                         redirect_hops=len(redirect_chain),
                         redirect_chain=redirect_chain,
                         timings=step_timings,
@@ -510,6 +696,9 @@ async def _run_probe_session(
                         target_url=initial_url,
                         final_url=next_url,
                         resolved_ip=resolved_ip,
+                        all_resolved_ips=all_resolved_ips,
+                        dns_resolver=dns_resolver,
+                        probe_origin=probe_origin,
                         redirect_hops=len(redirect_chain),
                         redirect_chain=redirect_chain,
                         timings=step_timings,
@@ -532,8 +721,6 @@ async def _run_probe_session(
                 continue
 
             # Chegou na resposta final!
-            # Se um redirect anterior para a mesma origem já havia aberto o socket desta amostra 1,
-            # preservamos os tempos frios (DNS/TCP/TLS) da conexão inicial para a amostra 1.
             if conn_reused and origin_key in origin_conn_timings:
                 o_dns, o_tcp, o_tls = origin_conn_timings[origin_key]
                 step_timings = build_timing_breakdown(
@@ -542,12 +729,14 @@ async def _run_probe_session(
                     tls_ms=o_tls,
                     ttfb_ms=step_timings.ttfb_ms,
                     transfer_ms=step_timings.transfer_ms,
+                    reference_sample="Amostra 1 (Conexão Fria)",
                 )
 
             final_resp = resp
             final_timings = step_timings
             final_payload_bytes = p_bytes
             final_payload_truncated = p_trunc
+            final_body_bytes = p_body
             break
 
         assert final_resp is not None
@@ -563,12 +752,13 @@ async def _run_probe_session(
 
         # 2. Amostras adicionais (2..samples) reutilizando a mesma conexão Keep-Alive
         for sample_idx in range(2, max(1, samples) + 1):
-            s_resp, s_timings, s_reused, _, _ = await _execute_single_http_step(
+            s_resp, s_timings, s_reused, _, _, _ = await _execute_single_http_step(
                 client=client,
                 backend=backend,
                 url=current_url,
                 dns_ms=0.0,
                 max_body_bytes=max_body_bytes,
+                reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
             )
             raw_samples.append(
                 SampleMeasurement(
@@ -584,6 +774,7 @@ async def _run_probe_session(
         final_parsed = urlparse(str(final_resp.url))
         is_https = final_parsed.scheme.lower() == "https"
         tls_info: TLSInspection | None = None
+        http_port_80_status: str | None = None
 
         if is_https:
             ssl_obj = backend.last_ssl_object or final_resp.extensions.get("ssl_object")
@@ -614,24 +805,77 @@ async def _run_probe_session(
                     tls10_11_accepted=legacy_tls_accepted,
                 )
 
-        sec_audit = audit_http_security(final_resp.headers, is_https, tls_info)
+            # Sonda automática de porta 80 (HTTP) para checar redirecionamento obrigatório
+            http_port_80_status = await _check_port_80(
+                final_host, allow_private=allow_private, timeout=min(timeout, 2.0)
+            )
+
+        # Sonda ativa de CORS enviando Origin hostil
+        cors_result = await audit_cors_active(
+            client=client, target_url=current_url, timeout=min(timeout, 2.0)
+        )
+
+        sec_audit = audit_http_security(
+            final_resp.headers, is_https, tls_info, cors_audit=cors_result
+        )
+
+        # Avaliação de Asserções de Conteúdo
+        body_text = final_body_bytes.decode("utf-8", errors="replace")
+        assertions_res = _evaluate_content_assertions(
+            body_text=body_text,
+            payload_bytes=final_payload_bytes,
+            final_url=str(final_resp.url),
+            fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+            fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+            min_payload_bytes=min_payload_bytes,
+            max_payload_bytes=max_payload_bytes,
+            assert_final_url=assert_final_url,
+        )
+
+        is_up = (200 <= final_resp.status_code < 400) and assertions_res.passed
+
+        # Detecção de Falha em Modo Comum
+        cmf_warning = _check_common_mode_failure(
+            current_host=final_parsed.hostname or "",
+            dns_ms=final_timings.dns_ms,
+            has_error=not is_up,
+        )
+
+        # Suporte a protocolos modernos e compressão
+        http2_supported = final_resp.http_version in ("HTTP/2", "h2")
+        http3_alt_svc = final_resp.headers.get("alt-svc")
+        compression = final_resp.headers.get("content-encoding")
+
+        err_msg: str | None = None
+        if not assertions_res.passed:
+            err_msg = f"Falha em Content Assertion: {'; '.join(assertions_res.failures)}"
 
         return ProbeResult(
             target_url=initial_url,
             final_url=str(final_resp.url),
             resolved_ip=resolved_ip,
-            is_up=(200 <= final_resp.status_code < 400),
+            all_resolved_ips=all_resolved_ips,
+            dns_resolver=dns_resolver,
+            probe_origin=probe_origin,
+            is_up=is_up,
             http_version=final_resp.http_version,
             status_code=final_resp.status_code,
             redirect_hops=len(redirect_chain),
             redirect_chain=redirect_chain,
+            http_port_80_status=http_port_80_status,
             timings=final_timings,
             sampling=sampling_stats,
             tls=tls_info,
             security=sec_audit,
+            assertions=assertions_res,
+            common_mode_failure_warning=cmf_warning,
             payload_bytes=final_payload_bytes,
             payload_truncated=final_payload_truncated,
+            http2_supported=http2_supported,
+            http3_alt_svc=http3_alt_svc,
+            compression=compression,
             history_ms=[s.timings.total_ms for s in raw_samples],
+            error=err_msg,
         )
 
 
@@ -654,7 +898,6 @@ def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
         return url, None
 
     # Detecta esquemas sem '://' como javascript:, data:, file:, mailto:, etc.
-    # (Cuidado para não confundir 'localhost:8080' ou '[::1]:8080' com esquema)
     m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$", url)
     if m:
         candidate_scheme = m.group(1).lower()
@@ -674,6 +917,12 @@ async def execute_probe(
     allow_private: bool = False,
     samples: int = 1,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    resolve_override: dict[str, str] | None = None,
+    fail_if_body_not_matches_regexp: str | None = None,
+    fail_if_body_matches_regexp: str | None = None,
+    min_payload_bytes: int | None = None,
+    max_payload_bytes: int | None = None,
+    assert_final_url: str | None = None,
 ) -> ProbeResult:
     url, scheme_err = _normalize_and_validate_scheme(raw_url)
     if scheme_err:
@@ -693,7 +942,7 @@ async def execute_probe(
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
-    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 2.0, timeout + 1.5))
+    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 3.0, timeout + 2.0))
 
     try:
         return await asyncio.wait_for(
@@ -704,6 +953,12 @@ async def execute_probe(
                 samples=samples,
                 max_body_bytes=max_body_bytes,
                 verify_ssl=True,
+                resolve_override=resolve_override,
+                fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+                fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+                min_payload_bytes=min_payload_bytes,
+                max_payload_bytes=max_payload_bytes,
+                assert_final_url=assert_final_url,
             ),
             timeout=overall_timeout,
         )
@@ -719,8 +974,6 @@ async def execute_probe(
             error=f"Timeout rígido excedido ({timeout}s): {timeout_err or 'limite de tempo esgotado'}",
         )
     except Exception as exc:
-        # Se a falha foi causada por erro de verificação de certificado SSL (ex: self-signed ou expirado),
-        # refazemos a sondagem capturando o certificado sem verificação de CA (marcando valid conforme política)
         exc_str = str(exc)
         is_ssl_verify_err = isinstance(exc, ssl.SSLCertVerificationError) or (
             "CERTIFICATE_VERIFY_FAILED" in exc_str
@@ -736,6 +989,12 @@ async def execute_probe(
                         samples=samples,
                         max_body_bytes=max_body_bytes,
                         verify_ssl=False,
+                        resolve_override=resolve_override,
+                        fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+                        fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+                        min_payload_bytes=min_payload_bytes,
+                        max_payload_bytes=max_payload_bytes,
+                        assert_final_url=assert_final_url,
                     ),
                     timeout=overall_timeout,
                 )

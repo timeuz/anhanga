@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 
+import re
 from typing import Any, Literal
 import yaml
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -52,12 +53,9 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
 def _extract_client_ip(request: Request | None) -> str:
     if request is None:
         return "127.0.0.1"
-    if request.client and request.client.host:
-        return request.client.host
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()
-    return "127.0.0.1"
+    remote_addr = request.client.host if request.client else "127.0.0.1"
+    xff = request.headers.get("x-forwarded-for")
+    return RATE_LIMITER.extract_client_ip(remote_addr=remote_addr, x_forwarded_for=xff)
 
 
 def _enforce_rate_limit(request: Request | None) -> None:
@@ -74,16 +72,24 @@ def _enforce_rate_limit(request: Request | None) -> None:
         )
 
 
-def _update_state_and_history(result: ProbeResult) -> ProbeResult:
+def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) -> ProbeResult:
     """Atualiza o cache de estado e a série histórica de latências (sparkline) do alvo."""
     key = result.target_url
     history = HISTORY_CACHE.setdefault(key, [])
-    if result.sampling and result.sampling.raw_samples and len(result.sampling.raw_samples) > 1:
-        for sample in result.sampling.raw_samples:
-            if sample.timings.total_ms > 0:
-                history.append(sample.timings.total_ms)
-    elif result.timings.total_ms > 0:
-        history.append(result.timings.total_ms)
+
+    # Apenas observações da vigilância contínua ou o primeiro ponto mediano de um novo scan entram na série histórica,
+    # prevenindo que rajadas manuais (ex: 10 amostras instantâneas) poluam a linha de tendência temporal (sparkline).
+    headline_ms = (
+        result.sampling.headline_total_ms
+        if result.sampling and result.sampling.headline_total_ms > 0
+        else result.timings.total_ms
+    )
+    if is_continuous:
+        if headline_ms > 0:
+            history.append(headline_ms)
+    else:
+        if not history and headline_ms > 0:
+            history.append(headline_ms)
 
     if len(history) > MAX_HISTORY_POINTS:
         del history[:-MAX_HISTORY_POINTS]
@@ -93,12 +99,27 @@ def _update_state_and_history(result: ProbeResult) -> ProbeResult:
     return result
 
 
+def _interpolate_env_vars(obj: Any) -> Any:
+    """Interpola recursivamente variáveis de ambiente ${VAR_NAME} em strings e dicionários."""
+    if isinstance(obj, str):
+        return re.sub(
+            r"\$\{([A-Za-z0-9_]+)\}",
+            lambda m: os.getenv(m.group(1), ""),
+            obj,
+        )
+    if isinstance(obj, list):
+        return [_interpolate_env_vars(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _interpolate_env_vars(v) for k, v in obj.items()}
+    return obj
+
+
 def load_targets_config() -> dict:
-    """Carrega alvos declarativos do targets.yaml de forma robusta."""
+    """Carrega alvos declarativos do targets.yaml interpolando variáveis de ambiente ${ENV_VAR}."""
     possible_paths = [
         Path(os.getenv("ANHANGA_CONFIG", "targets.yaml")),
         Path("targets.yaml"),
-        BASE_DIR.parent.parent / "targets.yaml",  # Se rodando de src/anhanga/
+        BASE_DIR.parent.parent / "targets.yaml",
         Path.cwd() / "targets.yaml",
     ]
 
@@ -112,7 +133,8 @@ def load_targets_config() -> dict:
         return {"interval_seconds": 60, "allow_private": False, "targets": []}
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            raw_cfg = yaml.safe_load(f) or {}
+            return _interpolate_env_vars(raw_cfg)
     except Exception as exc:
         logger.error(f"Falha ao ler {config_path}: {exc}")
         return {"interval_seconds": 60, "allow_private": False, "targets": []}
@@ -170,7 +192,7 @@ async def background_guardian_loop():
 
             for res in results:
                 if isinstance(res, ProbeResult):
-                    _update_state_and_history(res)
+                    _update_state_and_history(res, is_continuous=True)
                     record_probe_metrics(res)
                     if webhooks_cfg:
                         await _dispatch_configured_webhooks(
@@ -197,7 +219,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Anhangá",
     description="Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps",
-    version="0.1.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -221,9 +243,14 @@ async def api_scan_url(
         description="Limite máximo de bytes lidos do corpo da resposta (máx 5 MiB)",
     ),
     allow_private: bool = Query(False, description="Permite IPs de rede interna (Lab/Infra)"),
+    fail_if_body_not_matches_regexp: str | None = Query(None, description="Regexp que DEVE estar presente no corpo"),
+    fail_if_body_matches_regexp: str | None = Query(None, description="Regexp que NÃO PODE estar presente no corpo"),
+    min_payload_bytes: int | None = Query(None, description="Tamanho mínimo de payload em bytes"),
+    max_payload_bytes: int | None = Query(None, description="Tamanho máximo de payload em bytes"),
+    assert_final_url: str | None = Query(None, description="URL final esperada após redirects"),
     record_metrics: bool = Query(False, description="Se True, grava no /metrics do Prometheus"),
 ):
-    """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects e Security Headers."""
+    """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects, Asserções e Security Headers."""
     _enforce_rate_limit(request)
     if not url.strip():
         raise HTTPException(status_code=400, detail="O parâmetro 'url' é obrigatório.")
@@ -234,8 +261,13 @@ async def api_scan_url(
         allow_private=allow_private,
         samples=samples,
         max_body_bytes=max_body_bytes,
+        fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+        fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+        min_payload_bytes=min_payload_bytes,
+        max_payload_bytes=max_payload_bytes,
+        assert_final_url=assert_final_url,
     )
-    _update_state_and_history(result)
+    _update_state_and_history(result, is_continuous=False)
 
     # Evita alta cardinalidade por padrão em scans avulsos
     if record_metrics:
@@ -306,7 +338,7 @@ async def blackbox_compatible_probe(
     """Compatível com relabel_configs do Prometheus Blackbox Exporter."""
     _enforce_rate_limit(request)
     result = await execute_probe(target, allow_private=allow_private, samples=samples)
-    _update_state_and_history(result)
+    _update_state_and_history(result, is_continuous=False)
     record_probe_metrics(result)
     payload, content_type = render_prometheus_metrics()
     return Response(content=payload, media_type=content_type)

@@ -15,10 +15,12 @@ from typing import Any
 import httpx
 
 from anhanga.engine.models import (
+    CORSInspection,
     CookieAuditItem,
     SecurityAudit,
     SecurityFinding,
     TLSInspection,
+    X509ChainLink,
 )
 
 FORBIDDEN_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
@@ -91,10 +93,25 @@ def _build_header_snippets(header_name: str, header_value: str) -> dict[str, str
             f'          {header_name}: "{escaped_val}"'
         ),
         "kubernetes": (
+            f"# Padrão Moderno: Kubernetes Gateway API (HTTPRoute)\n"
+            f"apiVersion: gateway.networking.k8s.io/v1\n"
+            f"kind: HTTPRoute\n"
             f"metadata:\n"
-            f"  annotations:\n"
-            f"    nginx.ingress.kubernetes.io/configuration-snippet: |\n"
-            f"      {k8s_snippet}"
+            f"  name: sec-headers\n"
+            f"spec:\n"
+            f"  rules:\n"
+            f"    - filters:\n"
+            f"        - type: ResponseHeaderModifier\n"
+            f"          responseHeaderModifier:\n"
+            f"            add:\n"
+            f"              - name: {header_name}\n"
+            f'                value: "{escaped_val}"\n'
+            f"# Observação: ingress-nginx foi descontinuado upstream em março/2026.\n"
+            f"# Caso use legado ingress-nginx:\n"
+            f"# metadata:\n"
+            f"#   annotations:\n"
+            f"#     nginx.ingress.kubernetes.io/configuration-snippet: |\n"
+            f"#       {k8s_snippet}"
         ),
     }
 
@@ -113,10 +130,24 @@ def _build_cookie_snippets() -> dict[str, str]:
             '          Set-Cookie: "Secure; HttpOnly; SameSite=Lax"'
         ),
         "kubernetes": (
+            "# Kubernetes Gateway API com Traefik ou Envoy Plugin\n"
+            "apiVersion: gateway.networking.k8s.io/v1\n"
+            "kind: HTTPRoute\n"
             "metadata:\n"
-            "  annotations:\n"
-            '    nginx.ingress.kubernetes.io/session-cookie-secure: "true"\n'
-            '    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"'
+            "  name: sec-cookies\n"
+            "spec:\n"
+            "  rules:\n"
+            "    - filters:\n"
+            "        - type: ResponseHeaderModifier\n"
+            "          responseHeaderModifier:\n"
+            "            add:\n"
+            "              - name: Set-Cookie\n"
+            '                value: "Secure; HttpOnly; SameSite=Lax"\n'
+            "# Legado ingress-nginx:\n"
+            "# metadata:\n"
+            "#   annotations:\n"
+            '#     nginx.ingress.kubernetes.io/session-cookie-secure: "true"\n'
+            '#     nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"'
         ),
     }
 
@@ -124,22 +155,34 @@ def _build_cookie_snippets() -> dict[str, str]:
 def _build_cors_snippets() -> dict[str, str]:
     origin = "https://app.seudominio.com"
     return {
-        "nginx": f'add_header Access-Control-Allow-Origin "{origin}" always;',
-        "apache": f'Header always set Access-Control-Allow-Origin "{origin}"',
-        "caddy": f'header Access-Control-Allow-Origin "{origin}"',
+        "nginx": f'add_header Access-Control-Allow-Origin "{origin}" always;\nadd_header Vary "Origin" always;',
+        "apache": f'Header always set Access-Control-Allow-Origin "{origin}"\nHeader always set Vary "Origin"',
+        "caddy": f'header Access-Control-Allow-Origin "{origin}"\nheader Vary "Origin"',
         "traefik": (
             "http:\n"
             "  middlewares:\n"
             "    cors-strict:\n"
             "      headers:\n"
             "        accessControlAllowOriginList:\n"
-            f'          - "{origin}"'
+            f'          - "{origin}"\n'
+            "        addVaryHeader: true"
         ),
         "kubernetes": (
+            "# Kubernetes Gateway API / Traefik Middleware\n"
+            "apiVersion: traefik.io/v1alpha1\n"
+            "kind: Middleware\n"
             "metadata:\n"
-            "  annotations:\n"
-            '    nginx.ingress.kubernetes.io/enable-cors: "true"\n'
-            f'    nginx.ingress.kubernetes.io/cors-allow-origin: "{origin}"'
+            "  name: cors-strict\n"
+            "spec:\n"
+            "  headers:\n"
+            "    accessControlAllowOriginList:\n"
+            f'      - "{origin}"\n'
+            "    addVaryHeader: true\n"
+            "# Legado ingress-nginx:\n"
+            "# metadata:\n"
+            "#   annotations:\n"
+            '#     nginx.ingress.kubernetes.io/enable-cors: "true"\n'
+            f'#     nginx.ingress.kubernetes.io/cors-allow-origin: "{origin}"'
         ),
     }
 
@@ -163,10 +206,23 @@ def _build_leak_snippets(leak_header: str) -> dict[str, str]:
             f'          {leak_header}: ""'
         ),
         "kubernetes": (
+            "# Kubernetes Gateway API (HTTPRoute) remoção de cabeçalho\n"
+            "apiVersion: gateway.networking.k8s.io/v1\n"
+            "kind: HTTPRoute\n"
             "metadata:\n"
-            "  annotations:\n"
-            "    nginx.ingress.kubernetes.io/configuration-snippet: |\n"
-            f"      more_clear_headers '{leak_header}';"
+            "  name: hide-fingerprint\n"
+            "spec:\n"
+            "  rules:\n"
+            "    - filters:\n"
+            "        - type: ResponseHeaderModifier\n"
+            "          responseHeaderModifier:\n"
+            "            remove:\n"
+            f"              - {leak_header}\n"
+            "# Legado ingress-nginx:\n"
+            "# metadata:\n"
+            "#   annotations:\n"
+            "#     nginx.ingress.kubernetes.io/configuration-snippet: |\n"
+            f"#       more_clear_headers '{leak_header}';"
         ),
     }
 
@@ -175,52 +231,62 @@ SECURITY_HEADERS_DETAILS: dict[str, dict[str, Any]] = {
     "Strict-Transport-Security": {
         "id": "SEC-HSTS",
         "severity": "high",
-        "weight": 25,
-        "value": "max-age=2592000; includeSubDomains",
+        "weight": 15,
+        "value": "max-age=300",
+        "safe_default": "max-age=300 (Etapa 1: Teste seguro de 5 min)",
         "desc": (
             "Força o navegador a usar HTTPS estritamente, prevenindo ataques de Downgrade SSL e MITM. "
-            "Recomenda-se adoção progressiva (5 min -> 1 semana -> 1 mês); a diretiva 'preload' é opcional (opt-in)."
+            "Recomenda-se iniciar na Etapa 1 (max-age=300) antes de fixar em produção (max-age=2592000). "
+            "A diretiva 'preload' é opcional (opt-in)."
         ),
-        "fix": 'add_header Strict-Transport-Security "max-age=2592000; includeSubDomains" always;',
+        "fix": 'add_header Strict-Transport-Security "max-age=300" always;',
     },
     "Content-Security-Policy": {
         "id": "SEC-CSP",
         "severity": "high",
-        "weight": 25,
-        "value": "default-src 'self'; frame-ancestors 'self'",
-        "desc": "Controla quais fontes de scripts e objetos podem ser executadas, mitigando XSS e Clickjacking.",
-        "fix": "add_header Content-Security-Policy \"default-src 'self'; frame-ancestors 'self'\" always;",
+        "weight": 15,
+        "value": "default-src 'self'; frame-ancestors 'self'; report-to /csp-violation-report-endpoint",
+        "safe_default": "Modo Report-Only (não quebra a aplicação em produção)",
+        "desc": (
+            "Controla fontes de scripts, estilos e conexões externas, mitigando XSS e Clickjacking (via frame-ancestors). "
+            "Recomenda-se implantar primeiro como 'Content-Security-Policy-Report-Only' para validar relatórios antes do bloqueio definitivo."
+        ),
+        "fix": 'add_header Content-Security-Policy-Report-Only "default-src \'self\'; frame-ancestors \'self\'; report-to /csp-violation-report-endpoint" always;',
     },
     "X-Content-Type-Options": {
         "id": "SEC-XCTO",
         "severity": "medium",
-        "weight": 15,
+        "weight": 5,
         "value": "nosniff",
-        "desc": "Previne que o browser faça MIME-sniffing e execute arquivos com tipos incorretos.",
+        "safe_default": "nosniff",
+        "desc": "Previne que o navegador realize MIME-sniffing e execute arquivos com tipos incorretos.",
         "fix": 'add_header X-Content-Type-Options "nosniff" always;',
     },
     "X-Frame-Options": {
         "id": "SEC-XFO",
         "severity": "medium",
-        "weight": 15,
+        "weight": 5,
         "value": "SAMEORIGIN",
-        "desc": "Protege a aplicação contra ataques de Clickjacking (também atendido por CSP frame-ancestors).",
+        "safe_default": "SAMEORIGIN (ou CSP frame-ancestors)",
+        "desc": "Protege a aplicação contra ataques de Clickjacking (atendido nativamente por CSP frame-ancestors).",
         "fix": 'add_header X-Frame-Options "SAMEORIGIN" always;',
     },
     "Referrer-Policy": {
         "id": "SEC-REFPOL",
         "severity": "low",
-        "weight": 10,
+        "weight": 5,
         "value": "strict-origin-when-cross-origin",
-        "desc": "Controla quanta informação de URL é passada no header Referer para terceiros.",
+        "safe_default": "strict-origin-when-cross-origin",
+        "desc": "Controla quanta informação de URL é repassada no cabeçalho Referer para domínios terceiros.",
         "fix": 'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
     },
     "Permissions-Policy": {
         "id": "SEC-PERMPOL",
         "severity": "low",
-        "weight": 10,
+        "weight": 5,
         "value": "camera=(), geolocation=(), microphone=()",
-        "desc": "Restringe o acesso a APIs sensíveis do navegador (especialmente camera=(), geolocalização e microfone).",
+        "safe_default": "camera=(), geolocation=(), microphone=()",
+        "desc": "Restringe o acesso da página a APIs sensíveis do dispositivo (câmera, geolocalização e microfone).",
         "fix": 'add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;',
     },
 }
@@ -282,6 +348,62 @@ class SlidingWindowRateLimiter:
     def is_allowed(self, client_ip: str) -> bool:
         allowed, _ = self.check(client_ip)
         return allowed
+
+    def get_trusted_proxies(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        raw = os.getenv("ANHANGA_TRUSTED_PROXIES", "127.0.0.1,::1")
+        networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for item in raw.split(","):
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            try:
+                if "/" in cleaned:
+                    networks.append(ipaddress.ip_network(cleaned, strict=False))
+                else:
+                    ip = ipaddress.ip_address(cleaned)
+                    networks.append(ipaddress.ip_network(f"{ip}/{32 if ip.version == 4 else 128}"))
+            except ValueError:
+                pass
+        return networks
+
+    def extract_client_ip(
+        self,
+        remote_addr: str,
+        x_forwarded_for: str | None = None,
+    ) -> str:
+        """
+        Extrai com segurança o IP do cliente real:
+        - Se remote_addr não for de um proxy confiável, ignora XFF e retorna remote_addr (evita spoofing).
+        - Se remote_addr for confiável e XFF existir, extrai o primeiro IP não-confiável a partir da direita.
+        """
+        clean_remote = (remote_addr or "127.0.0.1").strip()
+        if clean_remote.startswith("[") and clean_remote.endswith("]"):
+            clean_remote = clean_remote[1:-1].strip()
+        if "%" in clean_remote:
+            clean_remote = clean_remote.split("%", 1)[0].strip()
+
+        try:
+            remote_ip = ipaddress.ip_address(clean_remote)
+        except ValueError:
+            return clean_remote
+
+        trusted = self.get_trusted_proxies()
+        is_trusted = any(remote_ip in net for net in trusted)
+        if not is_trusted or not x_forwarded_for:
+            return clean_remote
+
+        ips = [p.strip() for p in x_forwarded_for.split(",") if p.strip()]
+        for ip_cand in reversed(ips):
+            cand_clean = ip_cand.strip("[]")
+            if "%" in cand_clean:
+                cand_clean = cand_clean.split("%", 1)[0].strip()
+            try:
+                parsed_cand = ipaddress.ip_address(cand_clean)
+                if not any(parsed_cand in net for net in trusted):
+                    return str(parsed_cand)
+            except ValueError:
+                continue
+        return ips[0] if ips else clean_remote
 
     def reset(self) -> None:
         self._hits.clear()
@@ -503,6 +625,10 @@ def parse_tls_certificate(
     expires_at = _parse_asn1_time(cert.get("notAfter"))
     days_remaining: int | None = None
     is_time_valid = True
+    total_validity_days: int | None = None
+    relative_validity_percent_remaining: float | None = None
+    alert_relative_expiring = False
+
     if expires_at is not None:
         now = datetime.now(timezone.utc)
         delta = expires_at - now
@@ -514,6 +640,15 @@ def parse_tls_certificate(
     if not_before is not None and not_before > datetime.now(timezone.utc):
         is_time_valid = False
 
+    if expires_at is not None and not_before is not None:
+        total_validity_days = max(1, (expires_at - not_before).days)
+        if days_remaining is not None:
+            relative_validity_percent_remaining = round(
+                (days_remaining / total_validity_days) * 100.0, 1
+            )
+            # Alerta se restar menos de 15% do ciclo total de vida do certificado
+            alert_relative_expiring = bool(relative_validity_percent_remaining < 15.0)
+
     # Extração de SANs (Subject Alternative Names)
     sans: list[str] = []
     for san_type, san_val in cert.get("subjectAltName", []):
@@ -522,6 +657,7 @@ def parse_tls_certificate(
 
     # Extração da cadeia de certificação (Certificate Chain)
     cert_chain: list[str] = []
+    cert_chain_details: list[X509ChainLink] = []
     inner_ssl = getattr(ssl_obj, "_sslobj", ssl_obj)
     raw_chain: list[bytes] = []
     for chain_getter in ("get_verified_chain", "get_unverified_chain"):
@@ -540,10 +676,34 @@ def parse_tls_certificate(
             decoded = _decode_der_cert(der_item)
             sub_d = _extract_dn_dict(decoded.get("subject", []))
             iss_d = _extract_dn_dict(decoded.get("issuer", []))
-            node_name = sub_d.get("commonName") or sub_d.get("organizationName")
+            link_cn = sub_d.get("commonName")
+            link_org = sub_d.get("organizationName")
+            link_iss = iss_d.get("commonName") or iss_d.get("organizationName")
+            link_nb = _parse_asn1_time(decoded.get("notBefore"))
+            link_na = _parse_asn1_time(decoded.get("notAfter"))
+            link_days: int | None = None
+            if link_na is not None:
+                d_delta = link_na - datetime.now(timezone.utc)
+                link_days = max(0, d_delta.days) if d_delta.total_seconds() >= 0 else 0
+            link_sn = decoded.get("serialNumber")
+            link_fp = hashlib.sha256(der_item).hexdigest().upper()
+            cert_chain_details.append(
+                X509ChainLink(
+                    common_name=link_cn,
+                    organization=link_org,
+                    issuer=link_iss,
+                    not_before=link_nb,
+                    expires_at=link_na,
+                    days_remaining=link_days,
+                    serial_number=str(link_sn) if link_sn else None,
+                    fingerprint_sha256=link_fp,
+                )
+            )
+
+            node_name = link_cn or link_org
             if node_name and (not cert_chain or cert_chain[-1] != node_name):
                 cert_chain.append(node_name)
-            last_issuer = iss_d.get("commonName") or iss_d.get("organizationName")
+            last_issuer = link_iss
 
     if last_issuer and (not cert_chain or cert_chain[-1] != last_issuer):
         cert_chain.append(last_issuer)
@@ -553,19 +713,21 @@ def parse_tls_certificate(
             if node and (not cert_chain or cert_chain[-1] != node):
                 cert_chain.append(node)
 
-    # Detecção de OCSP Stapling
+    # Detecção de OCSP Stapling e checagem da extensão AIA no certificado
     ocsp_resp = getattr(ssl_obj, "ocsp_response", None) or getattr(
         inner_ssl, "ocsp_response", None
     )
+    cert_ocsp = cert.get("OCSP")
     if ocsp_resp:
         ocsp_stapling = True
         ocsp_status = "Ativo (Stapled)"
-    elif cert.get("OCSP"):
+    elif cert_ocsp:
         ocsp_stapling = False
         ocsp_status = "Suportado pelo CA (Sem Stapling)"
     else:
+        # Let's Encrypt encerrou OCSP e removeu as URLs OCSP dos certificados em 2025/2026
         ocsp_stapling = False
-        ocsp_status = "Não detectado"
+        ocsp_status = "N/A (sem OCSP no certificado)"
 
     valid = bool(verified and is_time_valid and (cert or der_cert))
 
@@ -583,9 +745,13 @@ def parse_tls_certificate(
         not_before=not_before,
         expires_at=expires_at,
         days_remaining=days_remaining,
+        total_validity_days=total_validity_days,
+        relative_validity_percent_remaining=relative_validity_percent_remaining,
         alert_expiring=(days_remaining is not None and days_remaining < 15),
+        alert_relative_expiring=alert_relative_expiring,
         sans=sans,
         cert_chain=cert_chain,
+        cert_chain_details=cert_chain_details,
         ocsp_stapling=ocsp_stapling,
         ocsp_status=ocsp_status,
     )
@@ -638,288 +804,348 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
     return cookies_audited
 
 
+async def audit_cors_active(
+    client: httpx.AsyncClient,
+    target_url: str,
+    timeout: float = 2.0,
+) -> CORSInspection:
+    """
+    Sonda ativamente a política CORS enviando Origin hostil (https://evil.anhanga.test).
+    Verifica se a aplicação reflete o Origin hostil, se usa wildcard (*),
+    e se expõe credenciais sensíveis (Access-Control-Allow-Credentials: true).
+    """
+    test_origin = "https://evil.anhanga.test"
+    try:
+        resp = await client.get(
+            target_url,
+            headers={"Origin": test_origin},
+            timeout=timeout,
+        )
+        allow_origin = resp.headers.get("access-control-allow-origin", "").strip()
+        allow_creds = (
+            resp.headers.get("access-control-allow-credentials", "").strip().lower() == "true"
+        )
+        if not allow_origin:
+            return CORSInspection(
+                tested=True,
+                status="Restrito / Seguro (Sem CORS público)",
+                reflects_origin=False,
+                wildcard=False,
+                allow_credentials=allow_creds,
+                vulnerable=False,
+                details="A aplicação não reflete origens arbitrárias nem expõe cabeçalhos de CORS público.",
+            )
+        if allow_origin == "*":
+            return CORSInspection(
+                tested=True,
+                status="Wildcard (*) detectado",
+                reflects_origin=False,
+                wildcard=True,
+                allow_credentials=allow_creds,
+                vulnerable=allow_creds,
+                details="Permite acesso de qualquer origem (*). "
+                + ("CRÍTICO: combinado com Allow-Credentials: true!" if allow_creds else "Inadequado para dados sensíveis."),
+            )
+        if allow_origin in (test_origin, "null"):
+            return CORSInspection(
+                tested=True,
+                status="Vulnerável: reflete origem arbitrária",
+                reflects_origin=True,
+                wildcard=False,
+                allow_credentials=allow_creds,
+                vulnerable=True,
+                details=f"O servidor refletiu a origem hostil '{allow_origin}'"
+                + (" com credenciais habilitadas!" if allow_creds else "."),
+            )
+        return CORSInspection(
+            tested=True,
+            status=f"Restrito para {allow_origin}",
+            reflects_origin=False,
+            wildcard=False,
+            allow_credentials=allow_creds,
+            vulnerable=False,
+            details=f"O servidor restringe o acesso explicitamente à origem configurada: {allow_origin}.",
+        )
+    except Exception as exc:
+        return CORSInspection(
+            tested=False,
+            status="Não testado (Falha na requisição)",
+            details=str(exc),
+        )
+
+
 def audit_http_security(
-    headers: httpx.Headers, is_https: bool, tls: TLSInspection | None
+    headers: httpx.Headers,
+    is_https: bool,
+    tls: TLSInspection | None,
+    cors_audit: CORSInspection | None = None,
 ) -> SecurityAudit:
-    score = 0
     present: dict[str, str] = {}
     missing_findings: list[SecurityFinding] = []
     leaks: list[str] = []
 
     cookies_audited = _audit_cookies(headers, is_https)
+
+    # Avaliação de CORS
     cors_val = headers.get("access-control-allow-origin", "").strip()
-    cors_wildcard = cors_val == "*"
+    cors_wildcard = cors_val == "*" or bool(cors_audit and cors_audit.wildcard)
     cors_credentials = (
         headers.get("access-control-allow-credentials", "").strip().lower() == "true"
+        or bool(cors_audit and cors_audit.allow_credentials)
     )
+    cors_vulnerable = bool(cors_audit and cors_audit.vulnerable) or (cors_wildcard and cors_credentials)
 
-    if not is_https or (tls and not tls.valid):
-        all_findings = [
-            SecurityFinding(
-                id=info["id"],
-                header=h,
-                category="header",
-                severity=info["severity"],
-                weight=info["weight"],
-                description=info["desc"],
-                remediation=info["fix"],
-                snippets=_build_header_snippets(h, info["value"]),
-                progressive_steps=(
-                    list(HSTS_PROGRESSIVE_STEPS)
-                    if h == "Strict-Transport-Security"
-                    else []
-                ),
-            )
-            for h, info in SECURITY_HEADERS_DETAILS.items()
-        ]
-        return SecurityAudit(
-            grade="F",
-            score=0,
-            missing_findings=all_findings,
-            cookies_audited=cookies_audited,
-            cors_wildcard=cors_wildcard,
+    # Identifica subdomínios do certificado que seriam afetados por HSTS includeSubDomains
+    hsts_affected_sans: list[str] = []
+    if tls and tls.sans:
+        for s in tls.sans:
+            if s.startswith("*.") or "." in s:
+                if s not in hsts_affected_sans:
+                    hsts_affected_sans.append(s)
+
+    # 1. Dimensão: Transporte & TLS (até 40 pontos)
+    transport_score = 0
+    if is_https and tls and tls.valid:
+        transport_score += 20  # Base HTTPS com certificado válido
+        is_modern_tls = (
+            tls.protocol in ("TLSv1.2", "TLSv1.3")
+            and not tls.deprecated_protocol
+            and not tls.tls10_11_accepted
         )
+        if is_modern_tls:
+            transport_score += 10
+        is_cert_healthy = (not tls.alert_expiring) and (not getattr(tls, "alert_relative_expiring", False))
+        if is_cert_healthy:
+            transport_score += 10
+        else:
+            transport_score += 5
 
+    # 2. Dimensão: Cabeçalhos de Proteção (até 40 pontos)
+    headers_score = 0
     hsts_max_age: int | None = None
     hsts_include_subdomains = False
     hsts_preload_opt_in = False
-    csp_frame_ancestors = False
-    permissions_camera_restricted = False
 
-    # Pré-avalia CSP para saber se frame-ancestors já protege contra Clickjacking
-    if "Content-Security-Policy" in headers:
-        csp_raw = headers["Content-Security-Policy"]
-        csp_frame_ancestors = bool(
-            re.search(r"\bframe-ancestors\b", csp_raw, re.IGNORECASE)
+    # 2.1 HSTS (até 15 pontos)
+    hsts_info = SECURITY_HEADERS_DETAILS["Strict-Transport-Security"]
+    hsts_default_snippets = _build_header_snippets("Strict-Transport-Security", hsts_info["value"])
+    if "Strict-Transport-Security" in headers:
+        val = headers["Strict-Transport-Security"]
+        present["Strict-Transport-Security"] = val
+        m = re.search(r"max-age\s*=\s*(\d+)", val, re.IGNORECASE)
+        if m:
+            hsts_max_age = int(m.group(1))
+        hsts_include_subdomains = "includesubdomains" in val.lower()
+        hsts_preload_opt_in = "preload" in val.lower()
+
+        if hsts_max_age is not None and hsts_max_age >= 2592000:
+            headers_score += 15  # Produção (30 dias+)
+        elif hsts_max_age is not None and hsts_max_age >= 604800:
+            headers_score += 10  # 1 semana
+            missing_findings.append(
+                SecurityFinding(
+                    id=hsts_info["id"],
+                    header="Strict-Transport-Security",
+                    category="header",
+                    severity="low",
+                    weight=5,
+                    safe_default="max-age=2592000; includeSubDomains",
+                    description=(
+                        f"HSTS ativo em estágio intermediário (max-age={hsts_max_age}s). "
+                        "Avance para a Etapa 3 (max-age=2592000; includeSubDomains) para proteção integral."
+                    ),
+                    remediation='add_header Strict-Transport-Security "max-age=2592000; includeSubDomains" always;',
+                    snippets=_build_header_snippets("Strict-Transport-Security", "max-age=2592000; includeSubDomains"),
+                    progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
+                )
+            )
+        elif hsts_max_age is not None and hsts_max_age >= 300:
+            headers_score += 5   # Teste inicial (5 min)
+            missing_findings.append(
+                SecurityFinding(
+                    id=hsts_info["id"],
+                    header="Strict-Transport-Security",
+                    category="header",
+                    severity="medium",
+                    weight=10,
+                    safe_default="max-age=604800; includeSubDomains",
+                    description=(
+                        f"HSTS em fase de teste (max-age={hsts_max_age}s). "
+                        "Após validar subdomínios, avance para a Etapa 2 (max-age=604800; includeSubDomains)."
+                    ),
+                    remediation='add_header Strict-Transport-Security "max-age=604800; includeSubDomains" always;',
+                    snippets=_build_header_snippets("Strict-Transport-Security", "max-age=604800; includeSubDomains"),
+                    progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
+                )
+            )
+        else:
+            sans_alert = f" Atenção: afetará os subdomínios do certificado: {', '.join(hsts_affected_sans[:4])}." if hsts_affected_sans else ""
+            missing_findings.append(
+                SecurityFinding(
+                    id=hsts_info["id"],
+                    header="Strict-Transport-Security",
+                    category="header",
+                    severity="high",
+                    weight=15,
+                    safe_default=hsts_info.get("safe_default", "max-age=300"),
+                    description=f"HSTS configurado com max-age insuficiente (< 300s).{sans_alert}",
+                    remediation=hsts_info["fix"],
+                    snippets=hsts_default_snippets,
+                    progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
+                )
+            )
+    else:
+        sans_alert = f" Atenção: ativar includeSubDomains cobrirá os seguintes subdomínios identificados no certificado: {', '.join(hsts_affected_sans[:4])}." if hsts_affected_sans else ""
+        missing_findings.append(
+            SecurityFinding(
+                id=hsts_info["id"],
+                header="Strict-Transport-Security",
+                category="header",
+                severity="high",
+                weight=15,
+                safe_default=hsts_info.get("safe_default", "max-age=300"),
+                description=hsts_info["desc"] + sans_alert,
+                remediation=hsts_info["fix"],
+                snippets=hsts_default_snippets,
+                progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
+            )
         )
 
-    for header, info in SECURITY_HEADERS_DETAILS.items():
-        default_snippets = _build_header_snippets(header, info["value"])
+    # 2.2 Content-Security-Policy & Clickjacking (até 15 pontos)
+    csp_info = SECURITY_HEADERS_DETAILS["Content-Security-Policy"]
+    csp_default_snippets = _build_header_snippets("Content-Security-Policy-Report-Only", csp_info["value"])
+    csp_raw = headers.get("Content-Security-Policy") or headers.get("Content-Security-Policy-Report-Only", "")
+    has_csp = bool(csp_raw)
+    csp_frame_ancestors = bool(re.search(r"\bframe-ancestors\b", csp_raw, re.IGNORECASE)) if has_csp else False
+    has_xfo = "X-Frame-Options" in headers
 
-        if header == "Strict-Transport-Security":
-            if header in headers:
-                val = headers[header]
-                present[header] = val
-                m = re.search(r"max-age\s*=\s*(\d+)", val, re.IGNORECASE)
-                if m:
-                    hsts_max_age = int(m.group(1))
-                hsts_include_subdomains = "includesubdomains" in val.lower()
-                hsts_preload_opt_in = "preload" in val.lower()
-
-                if hsts_max_age is not None and hsts_max_age >= 2592000:
-                    # Etapa 3 atingida (>= 30 dias): nota integral de HSTS sem exigir preload!
-                    score += 25
-                elif hsts_max_age is not None and hsts_max_age >= 604800:
-                    # Etapa 2 (1 semana a < 1 mês): 15 pts + recomendação de avançar para Etapa 3
-                    score += 15
-                    missing_findings.append(
-                        SecurityFinding(
-                            id=info["id"],
-                            header=header,
-                            category="header",
-                            severity="low",
-                            weight=10,
-                            description=(
-                                f"HSTS ativo em estágio intermediário (max-age={hsts_max_age}s). "
-                                "Avance para a Etapa 3 (max-age=2592000; includeSubDomains - 1 mês+) para proteção integral. "
-                                "A diretiva 'preload' é opcional (opt-in)."
-                            ),
-                            remediation=info["fix"],
-                            snippets=default_snippets,
-                            progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
-                        )
-                    )
-                elif hsts_max_age is not None and hsts_max_age >= 300:
-                    # Etapa 1 (5 min a < 1 semana): 10 pts + recomendação de avançar para Etapa 2/3
-                    score += 10
-                    missing_findings.append(
-                        SecurityFinding(
-                            id=info["id"],
-                            header=header,
-                            category="header",
-                            severity="medium",
-                            weight=15,
-                            description=(
-                                f"HSTS em fase inicial de teste (max-age={hsts_max_age}s). "
-                                "Evolua gradualmente para a Etapa 2 (1 semana: max-age=604800; includeSubDomains) "
-                                "e Etapa 3 (1 mês: max-age=2592000; includeSubDomains). 'preload' é opt-in."
-                            ),
-                            remediation='add_header Strict-Transport-Security "max-age=604800; includeSubDomains" always;',
-                            snippets=_build_header_snippets(
-                                header, "max-age=604800; includeSubDomains"
-                            ),
-                            progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
-                        )
-                    )
-                else:
-                    # max-age ausente ou < 300s
-                    missing_findings.append(
-                        SecurityFinding(
-                            id=info["id"],
-                            header=header,
-                            category="header",
-                            severity="high",
-                            weight=25,
-                            description=(
-                                "HSTS configurado com max-age insuficiente (< 300s). "
-                                "Siga o runbook progressivo: 300s (teste) -> 604800s (1 semana) -> 2592000s (1 mês). "
-                                "A diretiva 'preload' é estritamente opt-in."
-                            ),
-                            remediation=info["fix"],
-                            snippets=default_snippets,
-                            progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
-                        )
-                    )
-            else:
-                missing_findings.append(
-                    SecurityFinding(
-                        id=info["id"],
-                        header=header,
-                        category="header",
-                        severity=info["severity"],
-                        weight=info["weight"],
-                        description=info["desc"],
-                        remediation=info["fix"],
-                        snippets=default_snippets,
-                        progressive_steps=list(HSTS_PROGRESSIVE_STEPS),
-                    )
+    if has_csp:
+        present["Content-Security-Policy"] = csp_raw
+        if csp_frame_ancestors:
+            headers_score += 15
+            present["X-Frame-Options (via CSP frame-ancestors)"] = "Ativo via Content-Security-Policy frame-ancestors"
+        elif has_xfo:
+            headers_score += 15
+            present["X-Frame-Options"] = headers["X-Frame-Options"]
+        else:
+            headers_score += 10
+            xfo_info = SECURITY_HEADERS_DETAILS["X-Frame-Options"]
+            missing_findings.append(
+                SecurityFinding(
+                    id=xfo_info["id"],
+                    header="X-Frame-Options",
+                    category="header",
+                    severity="medium",
+                    weight=5,
+                    safe_default="frame-ancestors 'self'",
+                    description="CSP ativo, mas sem a diretiva 'frame-ancestors' e sem cabeçalho X-Frame-Options para proteção contra Clickjacking.",
+                    remediation=xfo_info["fix"],
+                    snippets=_build_header_snippets("X-Frame-Options", xfo_info["value"]),
                 )
-            continue
-
-        if header == "X-Frame-Options":
-            if header in headers:
-                present[header] = headers[header]
-                score += info["weight"]
-            elif csp_frame_ancestors:
-                # Equivalência moderna: CSP frame-ancestors substitui X-Frame-Options com segurança superior
-                present["X-Frame-Options (via CSP frame-ancestors)"] = (
-                    "Ativo via Content-Security-Policy"
+            )
+    else:
+        if has_xfo:
+            headers_score += 5
+            present["X-Frame-Options"] = headers["X-Frame-Options"]
+            missing_findings.append(
+                SecurityFinding(
+                    id=csp_info["id"],
+                    header="Content-Security-Policy",
+                    category="header",
+                    severity="high",
+                    weight=10,
+                    safe_default=csp_info.get("safe_default"),
+                    description=csp_info["desc"],
+                    remediation=csp_info["fix"],
+                    snippets=csp_default_snippets,
                 )
-                score += info["weight"]
-            else:
-                missing_findings.append(
-                    SecurityFinding(
-                        id=info["id"],
-                        header=header,
-                        category="header",
-                        severity=info["severity"],
-                        weight=info["weight"],
-                        description=info["desc"],
-                        remediation=info["fix"],
-                        snippets=default_snippets,
-                    )
-                )
-            continue
-
-        if header == "Permissions-Policy":
-            if header in headers:
-                val = headers[header]
-                present[header] = val
-                permissions_camera_restricted = bool(
-                    re.search(r"camera\s*=\s*\(\s*\)", val, re.IGNORECASE)
-                )
-                if permissions_camera_restricted:
-                    score += info["weight"]
-                else:
-                    score += 5
-                    missing_findings.append(
-                        SecurityFinding(
-                            id=info["id"],
-                            header=header,
-                            category="header",
-                            severity="low",
-                            weight=5,
-                            description=(
-                                "Permissions-Policy está presente, mas não restringe explicitamente "
-                                "o acesso à câmera via diretiva 'camera=()'."
-                            ),
-                            remediation=info["fix"],
-                            snippets=default_snippets,
-                        )
-                    )
-            else:
-                missing_findings.append(
-                    SecurityFinding(
-                        id=info["id"],
-                        header=header,
-                        category="header",
-                        severity=info["severity"],
-                        weight=info["weight"],
-                        description=info["desc"],
-                        remediation=info["fix"],
-                        snippets=default_snippets,
-                    )
-                )
-            continue
-
-        # Demais headers padrão (Content-Security-Policy, X-Content-Type-Options, Referrer-Policy)
-        if header in headers:
-            val = headers[header]
-            present[header] = val
-            score += info["weight"]
+            )
         else:
             missing_findings.append(
                 SecurityFinding(
-                    id=info["id"],
-                    header=header,
+                    id=csp_info["id"],
+                    header="Content-Security-Policy",
                     category="header",
-                    severity=info["severity"],
-                    weight=info["weight"],
-                    description=info["desc"],
-                    remediation=info["fix"],
-                    snippets=default_snippets,
+                    severity="high",
+                    weight=15,
+                    safe_default=csp_info.get("safe_default"),
+                    description=csp_info["desc"],
+                    remediation=csp_info["fix"],
+                    snippets=csp_default_snippets,
                 )
             )
 
-    # Auditoria de Cookies inseguros
-    insecure_cookies = [c for c in cookies_audited if c.issues]
-    if insecure_cookies:
-        score = max(0, score - 5)
-        cookie_details = "; ".join(
-            f"{c.name} ({', '.join(c.issues)})" for c in insecure_cookies
-        )
+    # 2.3 X-Content-Type-Options (5 pontos)
+    xcto_info = SECURITY_HEADERS_DETAILS["X-Content-Type-Options"]
+    if "X-Content-Type-Options" in headers:
+        present["X-Content-Type-Options"] = headers["X-Content-Type-Options"]
+        headers_score += 5
+    else:
         missing_findings.append(
             SecurityFinding(
-                id="SEC-COOKIES",
-                header="Set-Cookie (Flags Inseguras)",
-                category="cookie",
+                id=xcto_info["id"],
+                header="X-Content-Type-Options",
+                category="header",
                 severity="medium",
                 weight=5,
-                description=f"Cookies detectados sem blindagem completa: {cookie_details}.",
-                remediation="Configure as flags Secure, HttpOnly e SameSite=Lax (ou Strict) na emissão de cookies.",
-                snippets=_build_cookie_snippets(),
+                safe_default="nosniff",
+                description=xcto_info["desc"],
+                remediation=xcto_info["fix"],
+                snippets=_build_header_snippets("X-Content-Type-Options", xcto_info["value"]),
             )
         )
 
-    # Auditoria de CORS com Wildcard (*)
-    if cors_wildcard:
-        cors_weight = 10 if cors_credentials else 5
-        cors_severity: Any = "high" if cors_credentials else "medium"
-        score = max(0, score - cors_weight)
-        cors_desc = (
-            "Cabeçalho 'Access-Control-Allow-Origin: *' expõe respostas para qualquer domínio externo."
-        )
-        if cors_credentials:
-            cors_desc += " Crítico: combinado com Access-Control-Allow-Credentials: true."
+    # 2.4 Permissions-Policy (5 pontos)
+    perm_info = SECURITY_HEADERS_DETAILS["Permissions-Policy"]
+    permissions_camera_restricted = False
+    if "Permissions-Policy" in headers:
+        pval = headers["Permissions-Policy"]
+        present["Permissions-Policy"] = pval
+        permissions_camera_restricted = bool(re.search(r"camera\s*=\s*\(\s*\)", pval, re.IGNORECASE))
+        if permissions_camera_restricted:
+            headers_score += 5
+        else:
+            headers_score += 3
+            missing_findings.append(
+                SecurityFinding(
+                    id=perm_info["id"],
+                    header="Permissions-Policy",
+                    category="header",
+                    severity="low",
+                    weight=2,
+                    safe_default="camera=(), geolocation=(), microphone=()",
+                    description="Permissions-Policy está presente, mas não restringe explicitamente o acesso à câmera via 'camera=()'.",
+                    remediation=perm_info["fix"],
+                    snippets=_build_header_snippets("Permissions-Policy", perm_info["value"]),
+                )
+            )
+    else:
         missing_findings.append(
             SecurityFinding(
-                id="SEC-CORS",
-                header="Access-Control-Allow-Origin (Wildcard)",
-                category="cors",
-                severity=cors_severity,
-                weight=cors_weight,
-                description=cors_desc,
-                remediation='Restrinja Access-Control-Allow-Origin para origens explícitas confiáveis (ex: "https://app.seudominio.com").',
-                snippets=_build_cors_snippets(),
+                id=perm_info["id"],
+                header="Permissions-Policy",
+                category="header",
+                severity="low",
+                weight=5,
+                safe_default=perm_info.get("safe_default"),
+                description=perm_info["desc"],
+                remediation=perm_info["fix"],
+                snippets=_build_header_snippets("Permissions-Policy", perm_info["value"]),
             )
         )
 
-    # Auditoria de Vazamento de Stack/Versão (Server, X-Powered-By, etc.)
+    # Referrer-Policy informativo
+    if "Referrer-Policy" in headers:
+        present["Referrer-Policy"] = headers["Referrer-Policy"]
+
+    # 3. Dimensão: Higiene de Aplicação (até 20 pontos)
+    hygiene_score = 20
+
+    # 3.1 Vazamentos de Servidor / Versão (até 10 pontos)
     for leak_h in LEAK_HEADERS:
         if leak_h in headers:
             leak_val = headers[leak_h]
             leaks.append(f"{leak_h}: {leak_val}")
-            score = max(0, score - 5)
             missing_findings.append(
                 SecurityFinding(
                     id=f"SEC-LEAK-{leak_h.upper()}",
@@ -927,48 +1153,102 @@ def audit_http_security(
                     category="leak",
                     severity="low",
                     weight=5,
+                    safe_default=f"Remover cabeçalho {leak_h}",
                     description=(
                         f"O cabeçalho '{leak_h}: {leak_val}' expõe tecnologia/versão da borda ou backend, "
-                        "facilitando reconhecimento automatizado de vulnerabilidades (fingerprinting)."
+                        "facilitando reconhecimento de vulnerabilidades específicas."
                     ),
                     remediation=f"Oculte ou remova o cabeçalho {leak_h} na borda.",
                     snippets=_build_leak_snippets(leak_h),
                 )
             )
+    if leaks:
+        hygiene_score -= 10
+
+    # 3.2 Cookies (até 5 pontos)
+    insecure_cookies = [c for c in cookies_audited if c.issues]
+    if insecure_cookies:
+        hygiene_score -= 5
+        cookie_details = "; ".join(f"{c.name} ({', '.join(c.issues)})" for c in insecure_cookies)
+        missing_findings.append(
+            SecurityFinding(
+                id="SEC-COOKIES",
+                header="Set-Cookie (Flags Inseguras)",
+                category="cookie",
+                severity="medium",
+                weight=5,
+                safe_default="Secure; HttpOnly; SameSite=Lax",
+                description=f"Cookies detectados sem blindagem completa: {cookie_details}.",
+                remediation="Configure as flags Secure, HttpOnly e SameSite=Lax na emissão de cookies.",
+                snippets=_build_cookie_snippets(),
+            )
+        )
+
+    # 3.3 CORS (até 5 pontos)
+    if cors_vulnerable or cors_wildcard:
+        hygiene_score -= 5
+        cors_desc = (
+            cors_audit.details if cors_audit and cors_audit.details else
+            "Cabeçalho 'Access-Control-Allow-Origin: *' expõe respostas da aplicação indiscriminadamente."
+        )
+        missing_findings.append(
+            SecurityFinding(
+                id="SEC-CORS",
+                header="Access-Control-Allow-Origin (Inseguro)",
+                category="cors",
+                severity="high" if cors_credentials else "medium",
+                weight=5,
+                safe_default='add_header Access-Control-Allow-Origin "https://app.seudominio.com" always;',
+                description=cors_desc,
+                remediation='Restrinja Access-Control-Allow-Origin para origens explícitas e confiáveis.',
+                snippets=_build_cors_snippets(),
+            )
+        )
+
+    # Garante limites e soma total
+    transport_score = max(0, min(40, transport_score))
+    headers_score = max(0, min(40, headers_score))
+    hygiene_score = max(0, min(20, hygiene_score))
 
     if tls and (
         tls.protocol in ("TLSv1", "TLSv1.1", "SSLv3")
         or tls.deprecated_protocol
         or tls.tls10_11_accepted
     ):
-        score = min(score, 40)
+        transport_score = min(transport_score, 10)
 
-    score = max(0, min(100, score))
+    total_score = max(0, min(100, transport_score + headers_score + hygiene_score))
 
-    if score >= 95 and not leaks:
+    if total_score >= 95 and not leaks and transport_score >= 35:
         grade: Any = "A+"
-    elif score >= 80:
+    elif total_score >= 80:
         grade = "A"
-    elif score >= 65:
+    elif total_score >= 65:
         grade = "B"
-    elif score >= 50:
+    elif total_score >= 50:
         grade = "C"
-    elif score >= 30:
+    elif total_score >= 30:
         grade = "D"
     else:
         grade = "F"
 
     return SecurityAudit(
         grade=grade,
-        score=score,
+        score=total_score,
+        ruleset="v3",
+        transport_score=transport_score,
+        headers_score=headers_score,
+        hygiene_score=hygiene_score,
         present_headers=present,
         missing_findings=missing_findings,
         leaked_tech=leaks,
         cookies_audited=cookies_audited,
         cors_wildcard=cors_wildcard,
+        cors_audit=cors_audit or CORSInspection(),
         hsts_max_age=hsts_max_age,
         hsts_include_subdomains=hsts_include_subdomains,
         hsts_preload_opt_in=hsts_preload_opt_in,
+        hsts_affected_sans=hsts_affected_sans,
         csp_frame_ancestors=csp_frame_ancestors,
         permissions_camera_restricted=permissions_camera_restricted,
     )

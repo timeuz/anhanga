@@ -10,7 +10,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from anhanga.engine.models import ProbeResult
-from anhanga.engine.probe import execute_probe
+from anhanga.engine.probe import (
+    ABSOLUTE_MAX_BODY_BYTES,
+    DEFAULT_MAX_BODY_BYTES,
+    execute_probe,
+)
+from anhanga.engine.security import RATE_LIMITER
 from anhanga.metrics.exporter import record_probe_metrics, render_prometheus_metrics
 
 logging.basicConfig(
@@ -26,6 +31,31 @@ MAX_HISTORY_POINTS = 30
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+
+
+def _extract_client_ip(request: Request | None) -> str:
+    if request is None:
+        return "127.0.0.1"
+    if request.client and request.client.host:
+        return request.client.host
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return "127.0.0.1"
+
+
+def _enforce_rate_limit(request: Request | None) -> None:
+    client_ip = _extract_client_ip(request)
+    allowed, retry_after = RATE_LIMITER.check(client_ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit excedido para o IP '{client_ip}' "
+                f"(máximo {RATE_LIMITER.max_requests} req/min). Aguarde {retry_after}s."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 def _update_state_and_history(result: ProbeResult) -> ProbeResult:
@@ -132,18 +162,30 @@ async def healthcheck():
 
 @app.get("/api/v1/scan", response_model=ProbeResult, tags=["Diagnostics"])
 async def api_scan_url(
+    request: Request,
     url: str = Query(..., description="URL ou hostname alvo para inspeção profunda"),
     timeout: float = Query(5.0, ge=1.0, le=30.0),
     samples: int = Query(1, ge=1, le=20, description="Quantidade de amostras para cálculo de P50/P95/P99 e Jitter"),
+    max_body_bytes: int = Query(
+        DEFAULT_MAX_BODY_BYTES,
+        ge=1024,
+        le=ABSOLUTE_MAX_BODY_BYTES,
+        description="Limite máximo de bytes lidos do corpo da resposta (máx 5 MiB)",
+    ),
     allow_private: bool = Query(False, description="Permite IPs de rede interna (Lab/Infra)"),
     record_metrics: bool = Query(False, description="Se True, grava no /metrics do Prometheus"),
 ):
     """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects e Security Headers."""
+    _enforce_rate_limit(request)
     if not url.strip():
         raise HTTPException(status_code=400, detail="O parâmetro 'url' é obrigatório.")
 
     result = await execute_probe(
-        url, timeout=timeout, allow_private=allow_private, samples=samples
+        url,
+        timeout=timeout,
+        allow_private=allow_private,
+        samples=samples,
+        max_body_bytes=max_body_bytes,
     )
     _update_state_and_history(result)
 
@@ -169,11 +211,13 @@ async def prometheus_metrics():
 
 @app.get("/probe", tags=["Observability"])
 async def blackbox_compatible_probe(
+    request: Request,
     target: str = Query(..., description="URL alvo no estilo Blackbox Exporter"),
     allow_private: bool = Query(False),
     samples: int = Query(1, ge=1, le=20),
 ):
     """Compatível com relabel_configs do Prometheus Blackbox Exporter."""
+    _enforce_rate_limit(request)
     result = await execute_probe(target, allow_private=allow_private, samples=samples)
     _update_state_and_history(result)
     record_probe_metrics(result)

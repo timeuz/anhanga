@@ -4,18 +4,22 @@ import logging
 import os
 from pathlib import Path
 
+from typing import Any, Literal
 import yaml
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ABSOLUTE_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES,
+    SSRFBlockedError,
     execute_probe,
 )
 from anhanga.engine.security import RATE_LIMITER
+from anhanga.engine.webhooks import send_webhook_alert
 from anhanga.metrics.exporter import record_probe_metrics, render_prometheus_metrics
 
 logging.basicConfig(
@@ -28,6 +32,18 @@ logger = logging.getLogger("anhanga")
 STATE_CACHE: dict[str, ProbeResult] = {}
 HISTORY_CACHE: dict[str, list[float]] = {}
 MAX_HISTORY_POINTS = 30
+
+
+class WebhookNotifyRequest(BaseModel):
+    webhook_url: str = Field(..., description="URL do Webhook (Slack, Teams ou Telegram)")
+    url: str | None = Field(default=None, description="URL alvo para sondar caso 'result' não seja enviado")
+    result: ProbeResult | None = Field(default=None, description="Resultado de sondagem pré-computado")
+    provider: Literal["auto", "slack", "teams", "telegram"] = Field(default="auto")
+    chat_id: str | None = Field(default=None, description="Chat ID para Telegram")
+    violations: list[str] = Field(default_factory=list)
+    allow_private: bool = Field(default=False, description="Permite IPs privados no probe/webhook (Lab/CI)")
+    timeout: float = Field(default=5.0, ge=1.0, le=30.0)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -102,6 +118,33 @@ def load_targets_config() -> dict:
         return {"interval_seconds": 60, "allow_private": False, "targets": []}
 
 
+async def _dispatch_configured_webhooks(
+    res: ProbeResult, webhooks_cfg: list[Any], allow_private: bool = False
+) -> None:
+    if not webhooks_cfg:
+        return
+    should_alert = (not res.is_up) or bool(res.tls and res.tls.alert_expiring)
+    if not should_alert:
+        return
+
+    for wh in webhooks_cfg:
+        try:
+            if isinstance(wh, str):
+                await send_webhook_alert(
+                    webhook_url=wh, result=res, allow_private=allow_private
+                )
+            elif isinstance(wh, dict) and wh.get("url"):
+                await send_webhook_alert(
+                    webhook_url=str(wh["url"]),
+                    result=res,
+                    provider=str(wh.get("provider", "auto")),
+                    chat_id=wh.get("chat_id"),
+                    allow_private=bool(wh.get("allow_private", allow_private)),
+                )
+        except Exception as exc:
+            logger.warning(f"Falha ao enviar alerta de webhook para {res.target_url}: {exc}")
+
+
 async def background_guardian_loop():
     """Loop assíncrono que sonda os alvos do targets.yaml concorrentemente."""
     config = load_targets_config()
@@ -109,6 +152,7 @@ async def background_guardian_loop():
     interval: int = config.get("interval_seconds", 60)
     allow_private: bool = config.get("allow_private", False)
     samples: int = config.get("samples", 1)
+    webhooks_cfg: list[Any] = config.get("webhooks", [])
 
     if not targets:
         logger.info("Nenhum targets.yaml detectado. Operando apenas em modo On-Demand/API.")
@@ -128,6 +172,10 @@ async def background_guardian_loop():
                 if isinstance(res, ProbeResult):
                     _update_state_and_history(res)
                     record_probe_metrics(res)
+                    if webhooks_cfg:
+                        await _dispatch_configured_webhooks(
+                            res, webhooks_cfg, allow_private=allow_private
+                        )
         except asyncio.CancelledError:
             logger.info("Desligando loop de vigilância do Anhangá.")
             break
@@ -196,6 +244,44 @@ async def api_scan_url(
     return result
 
 
+@app.post("/api/v1/webhooks/notify", tags=["Alerting"])
+async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
+    """Dispara alerta formatado para Slack, Microsoft Teams ou Telegram com proteção Anti-SSRF."""
+    _enforce_rate_limit(request)
+    probe_res = body.result
+    if probe_res is None:
+        if not body.url or not body.url.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Informe 'result' ou 'url' para disparar a notificação de webhook.",
+            )
+        probe_res = STATE_CACHE.get(body.url) or await execute_probe(
+            body.url,
+            timeout=body.timeout,
+            allow_private=body.allow_private,
+        )
+
+    try:
+        delivery = await send_webhook_alert(
+            webhook_url=body.webhook_url,
+            result=probe_res,
+            provider=body.provider,
+            violations=body.violations,
+            chat_id=body.chat_id,
+            allow_private=body.allow_private,
+            timeout=body.timeout,
+        )
+        return delivery
+    except SSRFBlockedError as ssrf_err:
+        raise HTTPException(status_code=403, detail=str(ssrf_err)) from ssrf_err
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err)) from val_err
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Erro ao enviar webhook: {exc}"
+        ) from exc
+
+
 @app.get("/api/v1/targets", response_model=list[ProbeResult], tags=["Diagnostics"])
 async def list_cached_targets():
     """Retorna o último estado conhecido de todos os alvos monitorados."""
@@ -213,6 +299,7 @@ async def prometheus_metrics():
 async def blackbox_compatible_probe(
     request: Request,
     target: str = Query(..., description="URL alvo no estilo Blackbox Exporter"),
+    module: str = Query("http_2xx", description="Módulo compatível com Blackbox Exporter"),
     allow_private: bool = Query(False),
     samples: int = Query(1, ge=1, le=20),
 ):

@@ -60,7 +60,7 @@ async def _handle_controlled_http(
                 "X-Frame-Options: SAMEORIGIN\r\n"
                 "Referrer-Policy: strict-origin-when-cross-origin\r\n"
                 "Permissions-Policy: camera=(), geolocation=()\r\n"
-                "Set-Cookie: session_id=xyz; HttpOnly\r\n"
+                "Set-Cookie: session_id=xyz; Secure; HttpOnly; SameSite=Strict\r\n"
                 "\r\n"
             )
             writer.write(resp_headers.encode("latin1"))

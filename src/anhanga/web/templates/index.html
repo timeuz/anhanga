@@ -1,9 +1,13 @@
 <!DOCTYPE html>
-<html lang="pt-BR" class="dark">
+<html lang="pt-BR" class="dark" style="color-scheme: dark;">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anhangá // Spectral Edge & Latency Auditor</title>
+    <title>Anhangá // Auditoria Tática de Borda, TLS e Latência</title>
+    <!-- Google Fonts: Inter (Sans) & JetBrains Mono (Mono) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- TailwindCSS v3 CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -11,11 +15,17 @@
             darkMode: 'class',
             theme: {
                 extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+                    },
                     colors: {
-                        obsidian: '#0a0a0c',
+                        obsidian: '#09090b',
                         surface: '#121216',
-                        bordercolor: '#27272a',
+                        elevated: '#18181f',
+                        bordercolor: '#2e2e38',
                         fire: {
+                            400: '#fb923c',
                             500: '#ef4444',
                             600: '#dc2626',
                             glow: '#f97316'
@@ -28,210 +38,864 @@
     <!-- Alpine.js -->
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
+        :root {
+            color-scheme: dark;
+        }
         [x-cloak] { display: none !important; }
+        .cv-auto {
+            content-visibility: auto;
+            contain-intrinsic-size: 1px 420px;
+        }
+        /* Contraste e foco acessível WCAG AA */
+        :focus-visible {
+            outline: 2px solid #fb923c;
+            outline-offset: 2px;
+        }
     </style>
 </head>
-<body class="bg-obsidian text-zinc-100 min-h-screen font-mono selection:bg-fire-500 selection:text-white" x-data="anhangaApp()">
+<body class="bg-obsidian text-zinc-100 min-h-screen font-sans antialiased selection:bg-fire-500 selection:text-white"
+      x-data="anhangaApp()"
+      x-init="init()">
 
-    <!-- Header / Navbar -->
-    <header class="border-b border-bordercolor bg-surface/50 backdrop-blur sticky top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+    <!-- Cabeçalho / Barra de Navegação -->
+    <header class="border-b border-bordercolor bg-surface/90 backdrop-blur sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-4">
             <div class="flex items-center space-x-3">
                 <!-- Ícone Estilizado de Olhos de Fogo -->
-                <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-fire-600 to-amber-600 flex items-center justify-center shadow-lg shadow-fire-600/20">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-fire-600 to-amber-600 flex items-center justify-center shadow-lg shadow-fire-600/25 border border-fire-400/40" aria-hidden="true">
                     <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                     </svg>
                 </div>
                 <div>
-                    <h1 class="font-bold text-lg tracking-wider text-white flex items-center gap-2">
-                        ANHANGÁ <span class="text-xs px-2 py-0.5 rounded bg-fire-500/10 text-fire-500 border border-fire-500/20">v0.1</span>
+                    <h1 class="font-bold text-lg tracking-wide text-white flex items-center gap-2">
+                        <span>ANHANGÁ</span>
+                        <span class="font-mono text-xs px-2 py-0.5 rounded-md bg-fire-500/20 text-amber-200 border border-fire-400/50">v0.3</span>
                     </h1>
-                    <p class="text-xs text-zinc-400">Spectral Edge, TLS & Latency Auditor</p>
+                    <p class="text-xs text-zinc-300" x-text="t('subtitle')">Auditor Tático de Borda, TLS, Latência e DevSecOps</p>
                 </div>
             </div>
 
-            <div class="flex items-center space-x-4 text-sm">
-                <a href="/docs" target="_blank" class="text-zinc-400 hover:text-white transition flex items-center gap-1">
-                    <span>Swagger API</span>
+            <nav class="flex items-center flex-wrap gap-3 text-sm" aria-label="Navegação Principal">
+                <!-- Seletor de Idioma (i18n PT-BR / EN-US) -->
+                <div class="inline-flex items-center rounded-lg bg-obsidian border border-bordercolor p-0.5" role="group" aria-label="Seletor de Idioma">
+                    <button type="button"
+                            @click="setLocale('pt-BR')"
+                            :class="locale === 'pt-BR' ? 'bg-zinc-800 text-white border border-zinc-500 font-semibold' : 'text-zinc-300 hover:text-white'"
+                            class="px-2.5 py-1 rounded-md text-xs transition cursor-pointer">
+                        PT-BR
+                    </button>
+                    <button type="button"
+                            @click="setLocale('en-US')"
+                            :class="locale === 'en-US' ? 'bg-zinc-800 text-white border border-zinc-500 font-semibold' : 'text-zinc-300 hover:text-white'"
+                            class="px-2.5 py-1 rounded-md text-xs transition cursor-pointer">
+                        EN-US
+                    </button>
+                </div>
+
+                <a href="/docs" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-lg bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor transition flex items-center gap-1.5 text-xs font-medium">
+                    <span x-text="t('apiDocs')">Documentação da API</span>
                 </a>
-                <a href="/metrics" target="_blank" class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-bordercolor transition flex items-center gap-2">
-                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span>/metrics</span>
+                <a href="/metrics" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-lg bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 border border-zinc-600 transition flex items-center gap-2 text-xs font-medium">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
+                    <span class="font-mono">/metrics</span>
                 </a>
-            </div>
+            </nav>
         </div>
     </header>
 
-    <!-- Main Container -->
-    <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
+    <!-- Conteúdo Principal -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
 
-        <!-- Barramento de Diagnóstico On-Demand -->
-        <section class="bg-surface border border-bordercolor rounded-xl p-6 shadow-2xl relative overflow-hidden">
-            <div class="absolute -right-10 -bottom-10 w-40 h-40 bg-fire-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <!-- Barramento de Diagnóstico Sob Demanda -->
+        <section class="bg-surface border border-bordercolor rounded-2xl p-6 shadow-2xl relative overflow-hidden" aria-labelledby="scan-heading">
+            <div class="absolute -right-10 -bottom-10 w-44 h-44 bg-fire-500/10 rounded-full blur-3xl pointer-events-none" aria-hidden="true"></div>
 
-            <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest mb-4">Inspeção Cirúrgica de Endpoint</h2>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+                <div>
+                    <h2 id="scan-heading" class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('scanTitle')">Inspeção Cirúrgica de Endpoint</h2>
+                    <p class="text-xs text-zinc-300 mt-0.5" x-text="t('scanSubtitle')">Diagnóstico não-cumulativo de DNS, TCP, TLS, TTFB, Transferência, Cadeia de Redirects e Cabeçalhos de Segurança.</p>
+                </div>
+                <span class="inline-flex items-center gap-1.5 text-xs text-emerald-200 bg-emerald-950/80 border border-emerald-500/50 px-2.5 py-1 rounded-md font-medium">
+                    <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                    </svg>
+                    <span x-text="t('ssrfProtected')">Proteção Anti-SSRF & DNS Pinning Ativos</span>
+                </span>
+            </div>
 
-            <form @submit.prevent="runScan()" class="flex flex-col sm:flex-row gap-3">
+            <form @submit.prevent="runScan(false)" class="flex flex-col md:flex-row gap-3">
                 <div class="relative flex-1">
-                    <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                    <label for="target-url-input" class="sr-only" x-text="t('targetUrlLabel')">URL ou Hostname Alvo</label>
+                    <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-300 font-mono text-xs">
                         https://
                     </div>
-                    <input type="text" x-model="targetUrl" placeholder="ex: github.com ou api.meusite.com.br"
-                           class="w-full bg-obsidian border border-bordercolor rounded-lg pl-24 pr-4 py-3 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-fire-500 transition">
+                    <input id="target-url-input"
+                           type="text"
+                           x-model="targetUrl"
+                           :placeholder="t('urlPlaceholder')"
+                           placeholder="ex: github.com ou api.seudominio.com.br"
+                           class="w-full bg-obsidian border border-bordercolor rounded-xl pl-20 pr-4 py-3 text-sm font-mono text-zinc-100 placeholder-zinc-400 focus:outline-none focus:border-fire-400 transition">
                 </div>
+
+                <!-- Seletor de Amostras (P50 / P95 / P99 / Jitter) -->
+                <div class="flex items-center gap-2 bg-obsidian border border-bordercolor rounded-xl px-3 py-2">
+                    <label for="samples-select" class="text-xs font-medium text-zinc-200 whitespace-nowrap" x-text="t('samplesLabel')">Amostras:</label>
+                    <select id="samples-select"
+                            x-model.number="samples"
+                            class="bg-transparent text-zinc-100 font-mono text-xs font-semibold focus:outline-none cursor-pointer">
+                        <option value="1" class="bg-obsidian text-zinc-100">1x (Instantâneo)</option>
+                        <option value="3" class="bg-obsidian text-zinc-100">3x (P50/P95 + Keep-Alive)</option>
+                        <option value="5" class="bg-obsidian text-zinc-100">5x (Série Tática)</option>
+                        <option value="10" class="bg-obsidian text-zinc-100">10x (Alta Precisão)</option>
+                    </select>
+                </div>
+
                 <button type="submit" :disabled="loading"
-                        class="bg-gradient-to-r from-fire-600 to-amber-600 hover:from-fire-500 hover:to-amber-500 text-white font-medium px-6 py-3 rounded-lg text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-lg shadow-fire-600/20">
-                    <svg x-show="loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        class="bg-gradient-to-r from-fire-600 to-amber-600 hover:from-fire-500 hover:to-amber-500 text-white font-semibold px-6 py-3 rounded-xl text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-lg shadow-fire-600/25 border border-fire-400/30">
+                    <svg x-show="loading" class="animate-spin -ml-1 mr-1 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <span x-text="loading ? 'Sondando Borda...' : 'Executar Anhangá'"></span>
+                    <span x-text="loading ? t('scanningBtn') : t('scanBtn')">Executar Diagnóstico</span>
                 </button>
             </form>
 
-            <div x-show="errorMessage" x-cloak class="mt-4 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm" x-text="errorMessage"></div>
+            <!-- Alerta de Erro Acessível -->
+            <div x-show="errorMessage" x-cloak role="alert" class="mt-4 p-4 rounded-xl bg-red-950/90 border border-red-500/60 text-red-200 text-sm flex items-start gap-3">
+                <svg class="w-5 h-5 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"></path>
+                </svg>
+                <div>
+                    <strong class="font-semibold block" x-text="t('errorPrefix')">Falha na sondagem:</strong>
+                    <span x-text="errorMessage"></span>
+                </div>
+            </div>
         </section>
 
-        <!-- Painel de Resultado do Scan Ativo -->
-        <section x-show="result" x-cloak class="space-y-6">
-            <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-surface border border-bordercolor rounded-xl p-6">
-                <div>
-                    <div class="flex items-center gap-3">
-                        <span class="px-2.5 py-1 rounded text-xs font-bold uppercase"
-                              :class="result?.is_up ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'"
-                              x-text="result?.is_up ? 'UP (' + result?.status_code + ')' : 'DOWN'"></span>
-                        <h3 class="text-xl font-bold text-white tracking-wide" x-text="result?.final_url || result?.target_url"></h3>
+        <!-- Painel de Resultados do Scan Ativo -->
+        <section x-show="result" x-cloak class="space-y-6" aria-live="polite">
+
+            <!-- Barra Superior do Alvo + Botões de Re-escanear e Exportação -->
+            <div class="bg-surface border border-bordercolor rounded-2xl p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                <div class="space-y-1.5">
+                    <div class="flex flex-wrap items-center gap-2.5">
+                        <!-- Badge ONLINE / OFFLINE com alto contraste WCAG AA -->
+                        <span class="px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider inline-flex items-center gap-1.5"
+                              :class="result?.is_up ? 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' : 'bg-red-950/90 text-red-200 border border-red-500/60'">
+                            <span class="w-2 h-2 rounded-full" :class="result?.is_up ? 'bg-emerald-400' : 'bg-red-400'"></span>
+                            <span x-text="result?.is_up ? t('statusOnline') + ' (' + (result?.status_code || 200) + ')' : t('statusOffline')">ONLINE</span>
+                        </span>
+
+                        <h3 class="text-lg sm:text-xl font-bold font-mono text-white break-all" x-text="result?.final_url || result?.target_url"></h3>
                     </div>
-                    <p class="text-xs text-zinc-400 mt-2">IP Resolvido: <span class="text-zinc-200" x-text="result?.resolved_ip || 'N/A'"></span> | Versão HTTP: <span class="text-zinc-200" x-text="result?.http_version || 'N/A'"></span></p>
+
+                    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-300">
+                        <span><span x-text="t('resolvedIp')">IP Resolvido</span>: <strong class="font-mono text-zinc-100" x-text="result?.resolved_ip || 'N/D'"></strong></span>
+                        <span>•</span>
+                        <span><span x-text="t('httpProtocol')">Protocolo HTTP</span>: <strong class="font-mono text-zinc-100" x-text="result?.http_version || 'N/D'"></strong></span>
+                        <span>•</span>
+                        <span><span x-text="t('payloadRead')">Payload Lido</span>: <strong class="font-mono text-zinc-100" x-text="(result?.payload_bytes || 0) + ' B'"></strong></span>
+                        <span x-show="result?.redirect_hops > 0">• <span x-text="t('redirectsCount')">Redirecionamentos</span>: <strong class="font-mono text-amber-200" x-text="result?.redirect_hops"></strong></span>
+                    </div>
                 </div>
 
-                <!-- Security Grade Card -->
-                <div class="flex items-center gap-4 bg-obsidian border border-bordercolor px-5 py-3 rounded-xl">
+                <!-- Barra de Ferramentas: Re-escanear & Exportação (Link Permanente, JSON, Markdown) -->
+                <div class="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+                    <button type="button"
+                            @click="rescanTarget()"
+                            :disabled="loading"
+                            class="px-3.5 py-2 rounded-xl bg-fire-600/20 hover:bg-fire-600/30 text-amber-200 border border-fire-400/60 text-xs font-semibold transition inline-flex items-center gap-1.5 cursor-pointer">
+                        <svg class="w-4 h-4 text-amber-300" :class="loading ? 'animate-spin' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        <span x-text="t('rescanBtn')">Re-escanear Agora</span>
+                    </button>
+
+                    <button type="button"
+                            @click="copyPermalink()"
+                            class="px-3 py-2 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                        <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+                        </svg>
+                        <span x-text="permalinkCopied ? t('permalinkCopied') : t('permalinkBtn')">Link Permanente</span>
+                    </button>
+
+                    <button type="button"
+                            @click="exportJson()"
+                            class="px-3 py-2 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                        <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                        <span x-text="t('exportJsonBtn')">Exportar JSON</span>
+                    </button>
+
+                    <button type="button"
+                            @click="exportMarkdown()"
+                            class="px-3 py-2 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                        <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                        </svg>
+                        <span x-text="t('exportMdBtn')">Exportar Markdown</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Banner de Delta de Evolução (Exibido ao Re-escanear o mesmo alvo) -->
+            <div x-show="comparisonDelta" x-cloak
+                 class="bg-elevated border border-amber-500/60 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-lg bg-amber-950/90 border border-amber-500/60 flex items-center justify-center text-amber-200 font-bold text-sm">
+                        Δ
+                    </div>
                     <div>
-                        <div class="text-xs text-zinc-400">Security Grade</div>
-                        <div class="text-xs text-zinc-500" x-text="'Score: ' + (result?.security?.score || 0) + '/100'"></div>
+                        <h4 class="text-xs font-bold uppercase tracking-wider text-amber-200" x-text="t('deltaTitle')">Delta de Evolução (Comparativo de Re-escaneamento)</h4>
+                        <p class="text-xs text-zinc-200 mt-0.5" x-text="comparisonDelta?.summary"></p>
                     </div>
-                    <div class="w-12 h-12 rounded-lg flex items-center justify-center font-black text-xl shadow-inner"
-                         :class="{
-                            'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30': ['A+', 'A'].includes(result?.security?.grade),
-                            'bg-amber-500/20 text-amber-400 border border-amber-500/30': ['B', 'C'].includes(result?.security?.grade),
-                            'bg-red-500/20 text-red-400 border border-red-500/30': ['D', 'F'].includes(result?.security?.grade)
-                         }"
-                         x-text="result?.security?.grade || 'F'"></div>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <span class="px-3 py-1 rounded-lg text-xs font-semibold font-mono border"
+                          :class="(comparisonDelta?.scoreDiff || 0) >= 0 ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'"
+                          x-text="comparisonDelta?.gradeLabel"></span>
+                    <span class="px-3 py-1 rounded-lg text-xs font-semibold font-mono border"
+                          :class="(comparisonDelta?.latencyDiffMs || 0) <= 0 ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-amber-950/90 text-amber-200 border-amber-500/60'"
+                          x-text="comparisonDelta?.latencyLabel"></span>
                 </div>
             </div>
 
-            <!-- Gráfico de Waterfall de Latência -->
-            <div class="bg-surface border border-bordercolor rounded-xl p-6 space-y-4">
-                <div class="flex justify-between items-center">
-                    <h4 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Waterfall de Latência (Network & Edge)</h4>
-                    <span class="text-xs text-zinc-400">Total: <strong class="text-white" x-text="(result?.timings?.total_ms || 0) + ' ms'"></strong></span>
-                </div>
+            <!-- 1. HERO KPIs PRINCIPAIS NO TOPO DO DASHBOARD (Nota de Segurança & Latência Total) -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-                <!-- Barra Proporcional Waterfall -->
-                <div class="w-full bg-obsidian h-4 rounded-lg overflow-hidden flex border border-bordercolor p-0.5 gap-0.5">
-                    <div class="h-full bg-sky-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('dns_ms') + '%'" :title="'DNS: ' + result?.timings?.dns_ms + 'ms'"></div>
-                    <div class="h-full bg-blue-600 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('tcp_ms') + '%'" :title="'TCP: ' + result?.timings?.tcp_ms + 'ms'"></div>
-                    <div class="h-full bg-purple-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('tls_ms') + '%'" :title="'TLS: ' + result?.timings?.tls_ms + 'ms'"></div>
-                    <div class="h-full bg-amber-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('ttfb_ms') + '%'" :title="'TTFB: ' + result?.timings?.ttfb_ms + 'ms'"></div>
-                    <div class="h-full bg-emerald-500 rounded-sm transition-all duration-500" :style="'width: ' + getPercent('transfer_ms') + '%'" :title="'Transfer: ' + result?.timings?.transfer_ms + 'ms'"></div>
-                </div>
-
-                <!-- Legenda de Fases -->
-                <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2 text-xs">
-                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
-                        <span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>
-                        <div>
-                            <div class="text-zinc-500">DNS</div>
-                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.dns_ms || 0) + ' ms'"></div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
-                        <span class="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
-                        <div>
-                            <div class="text-zinc-500">TCP Handshake</div>
-                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.tcp_ms || 0) + ' ms'"></div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
-                        <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
-                        <div>
-                            <div class="text-zinc-500">TLS Handshake</div>
-                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.tls_ms || 0) + ' ms'"></div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
-                        <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
-                        <div>
-                            <div class="text-zinc-500">TTFB (Backend)</div>
-                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.ttfb_ms || 0) + ' ms'"></div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2 bg-obsidian px-3 py-2 rounded-lg border border-bordercolor">
-                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-                        <div>
-                            <div class="text-zinc-500">Transferência</div>
-                            <div class="font-bold text-zinc-200" x-text="(result?.timings?.transfer_ms || 0) + ' ms'"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Auditoria de Segurança e Runbook de Remediação -->
-            <div class="bg-surface border border-bordercolor rounded-xl p-6 space-y-4 md:col-span-2">
-                <div class="flex justify-between items-center">
-                    <h4 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Auditoria DevSecOps & Runbook de Remediação</h4>
-                    <span class="text-xs text-zinc-400">Ações recomendadas para blindar a borda</span>
-                </div>
-
-                <div class="space-y-3">
-                    <template x-for="finding in result?.security?.missing_findings">
-                        <div class="p-3 rounded-lg bg-obsidian border border-bordercolor space-y-2">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-red-400 flex items-center gap-2">
-                                    <span class="w-2 h-2 rounded-full bg-red-500"></span>
-                                    <span x-text="finding.header"></span>
-                                </span>
-                                <span class="text-[10px] text-zinc-500 px-2 py-0.5 rounded bg-zinc-800" x-text="'+' + finding.weight + ' pts'"></span>
+                <!-- HERO KPI #1: NOTA DE SEGURANÇA (Security Grade) -->
+                <div class="bg-surface border border-bordercolor rounded-2xl p-6 flex flex-col justify-between gap-5 shadow-xl relative overflow-hidden">
+                    <div class="flex items-start justify-between gap-4">
+                        <div class="space-y-1">
+                            <span class="text-xs font-bold uppercase tracking-wider text-zinc-300" x-text="t('heroSecurityTitle')">Nota de Segurança da Borda</span>
+                            <div class="flex items-baseline gap-2">
+                                <span class="text-3xl font-extrabold font-mono text-white" x-text="(result?.security?.score ?? 0) + '/100'"></span>
+                                <span class="text-xs text-zinc-300" x-text="t('pointsLabel')">pontos de blindagem</span>
                             </div>
-                            <p class="text-xs text-zinc-400" x-text="finding.description"></p>
-                            <div class="bg-surface p-2 rounded border border-bordercolor flex items-center justify-between text-[11px] font-mono text-amber-400 overflow-x-auto">
-                                <span x-text="finding.remediation"></span>
+                            <p class="text-xs text-zinc-300" x-text="getSecuritySummaryText()"></p>
+                        </div>
+
+                        <!-- Badge Gigante da Nota de Segurança (Contraste WCAG AA) -->
+                        <div class="w-20 h-20 rounded-2xl flex flex-col items-center justify-center font-mono font-black text-3xl shadow-lg shrink-0 border-2"
+                             :class="{
+                                'bg-emerald-950/90 text-emerald-200 border-emerald-400': ['A+', 'A'].includes(result?.security?.grade),
+                                'bg-amber-950/90 text-amber-200 border-amber-400': ['B', 'C'].includes(result?.security?.grade),
+                                'bg-red-950/90 text-red-200 border-red-400': ['D', 'F'].includes(result?.security?.grade || 'F')
+                             }">
+                            <span class="text-[10px] font-sans font-bold uppercase tracking-widest opacity-90" x-text="t('gradeWord')">NOTA</span>
+                            <span x-text="result?.security?.grade || 'F'"></span>
+                        </div>
+                    </div>
+
+                    <!-- Barra de Progresso de Score -->
+                    <div class="space-y-2">
+                        <div class="w-full h-2.5 bg-obsidian rounded-full overflow-hidden border border-bordercolor">
+                            <div class="h-full transition-all duration-500 rounded-full"
+                                 :class="{
+                                    'bg-emerald-400': (result?.security?.score || 0) >= 80,
+                                    'bg-amber-400': (result?.security?.score || 0) >= 50 && (result?.security?.score || 0) < 80,
+                                    'bg-red-500': (result?.security?.score || 0) < 50
+                                 }"
+                                 :style="'width: ' + (result?.security?.score || 0) + '%'"></div>
+                        </div>
+
+                        <!-- Mini-indicadores de Postura DevSecOps -->
+                        <div class="grid grid-cols-3 gap-2 pt-2 text-xs">
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                                <span class="text-zinc-300 block" x-text="t('presentHeadersLabel')">Cabeçalhos Ativos</span>
+                                <strong class="font-mono text-sm text-emerald-300" x-text="Object.keys(result?.security?.present_headers || {}).length"></strong>
+                            </div>
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                                <span class="text-zinc-300 block" x-text="t('pendingFixesLabel')">Pendências</span>
+                                <strong class="font-mono text-sm text-amber-200" x-text="(result?.security?.missing_findings || []).length"></strong>
+                            </div>
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                                <span class="text-zinc-300 block" x-text="t('leakedTechLabel')">Vazamentos</span>
+                                <strong class="font-mono text-sm"
+                                        :class="(result?.security?.leaked_tech || []).length === 0 ? 'text-emerald-300' : 'text-red-300'"
+                                        x-text="(result?.security?.leaked_tech || []).length"></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- HERO KPI #2: LATÊNCIA TOTAL & SLO / PERCENTIS -->
+                <div class="bg-surface border border-bordercolor rounded-2xl p-6 flex flex-col justify-between gap-5 shadow-xl relative overflow-hidden">
+                    <div class="flex items-start justify-between gap-4">
+                        <div class="space-y-1">
+                            <span class="text-xs font-bold uppercase tracking-wider text-zinc-300" x-text="t('heroLatencyTitle')">Latência Total de Ponta a Ponta</span>
+                            <div class="flex items-baseline gap-2.5">
+                                <span class="text-3xl sm:text-4xl font-extrabold font-mono text-white" x-text="(result?.timings?.total_ms ?? 0) + ' ms'"></span>
+                                <span class="text-xs text-zinc-300" x-show="result?.timings?.dominant_phase">
+                                    (<span x-text="t('bottleneckLabel')">Gargalo</span>: <strong class="text-amber-200 font-semibold" x-text="formatPhaseName(result?.timings?.dominant_phase)"></strong>)
+                                </span>
+                            </div>
+                            <p class="text-xs text-zinc-300">
+                                <span x-text="t('coldConnLabel')">Conexão Fria</span>: <strong class="font-mono text-zinc-100" x-text="(result?.sampling?.cold_total_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                                <template x-if="result?.sampling?.warm_avg_total_ms !== null && result?.sampling?.warm_avg_total_ms !== undefined">
+                                    <span> | <span x-text="t('warmConnLabel')">Keep-Alive (Reaproveitada)</span>: <strong class="font-mono text-emerald-300" x-text="result.sampling.warm_avg_total_ms + ' ms'"></strong></span>
+                                </template>
+                            </p>
+                        </div>
+
+                        <!-- Badge de Status de SLO Geral (Ícone + Cor + Borda WCAG AA) -->
+                        <div class="px-3.5 py-2 rounded-xl border text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shrink-0"
+                             :class="getOverallSloBadgeClass()">
+                            <span x-text="getOverallSloIcon()" aria-hidden="true"></span>
+                            <span x-text="getOverallSloLabel()">SLO Saudável</span>
+                        </div>
+                    </div>
+
+                    <!-- Mini-cards de Percentis P50 / P95 / P99 / Jitter -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                            <span class="text-zinc-300 block">P50 (Mediana)</span>
+                            <strong class="font-mono text-sm text-zinc-100" x-text="(result?.sampling?.p50_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                        </div>
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                            <span class="text-zinc-300 block">P95 (Cauda)</span>
+                            <strong class="font-mono text-sm text-amber-200" x-text="(result?.sampling?.p95_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                        </div>
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                            <span class="text-zinc-300 block">P99 (Extremo)</span>
+                            <strong class="font-mono text-sm text-zinc-100" x-text="(result?.sampling?.p99_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                        </div>
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                            <span class="text-zinc-300 block">Jitter (Variação)</span>
+                            <strong class="font-mono text-sm text-sky-300" x-text="(result?.sampling?.jitter_ms ?? 0) + ' ms'"></strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. WATERFALL TÁTICO REAL (COM OFFSETS, LIMIARES DE SLO E FASE DOMINANTE) -->
+            <div class="bg-surface border border-bordercolor rounded-2xl p-6 space-y-5 shadow-xl">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-bordercolor pb-4">
+                    <div>
+                        <h4 class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('waterfallTitle')">Waterfall Tático de Latência (Offsets Reais Não-Cumulativos)</h4>
+                        <p class="text-xs text-zinc-300 mt-0.5" x-text="t('waterfallSubtitle')">Cada barra representa o instante exato de início (offset) e término da respectiva fase de rede ou borda.</p>
+                    </div>
+
+                    <!-- Legenda de Limiares de SLO -->
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <span class="px-2.5 py-1 rounded-md bg-emerald-950/90 text-emerald-200 border border-emerald-500/60 font-medium inline-flex items-center gap-1">
+                            <span>●</span> <span x-text="t('sloOk')">Saudável (OK)</span>
+                        </span>
+                        <span class="px-2.5 py-1 rounded-md bg-amber-950/90 text-amber-200 border border-amber-500/60 font-medium inline-flex items-center gap-1">
+                            <span>▲</span> <span x-text="t('sloWarning')">Atenção (Alerta)</span>
+                        </span>
+                        <span class="px-2.5 py-1 rounded-md bg-red-950/90 text-red-200 border border-red-500/60 font-medium inline-flex items-center gap-1">
+                            <span>✖</span> <span x-text="t('sloCritical')">Crítico (Violação)</span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Régua Temporal do Waterfall -->
+                <div class="hidden sm:grid sm:grid-cols-12 gap-4 text-[11px] font-mono text-zinc-300 px-3">
+                    <div class="col-span-4 font-sans font-semibold text-zinc-200" x-text="t('phaseColumnHeader')">Fase de Rede / Borda</div>
+                    <div class="col-span-5 flex justify-between border-b border-zinc-700 pb-1">
+                        <span>0 ms</span>
+                        <span x-text="Math.round((result?.timings?.total_ms || 0) * 0.25) + ' ms'"></span>
+                        <span x-text="Math.round((result?.timings?.total_ms || 0) * 0.50) + ' ms'"></span>
+                        <span x-text="Math.round((result?.timings?.total_ms || 0) * 0.75) + ' ms'"></span>
+                        <span x-text="(result?.timings?.total_ms || 0) + ' ms'"></span>
+                    </div>
+                    <div class="col-span-3 text-right font-sans font-semibold text-zinc-200" x-text="t('intervalColumnHeader')">Janela (Início → Fim) & Duração</div>
+                </div>
+
+                <!-- Linhas do Waterfall por Fase (com Offset margin-left e width real) -->
+                <div class="space-y-2.5">
+                    <template x-for="phase in getWaterfallPhases()" :key="phase.phase">
+                        <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center p-3 rounded-xl transition border"
+                             :class="phase.is_dominant ? 'bg-amber-950/30 border-amber-400/70 shadow-md' : 'bg-obsidian border-bordercolor'">
+
+                            <!-- Coluna 1: Nome da Fase + Status SLO + Destaque Fase Dominante -->
+                            <div class="sm:col-span-4 flex flex-wrap items-center gap-2">
+                                <span class="text-xs font-bold text-white" x-text="formatPhaseName(phase.phase)"></span>
+
+                                <!-- Badge SLO da Fase -->
+                                <span class="px-2 py-0.5 rounded text-[11px] font-semibold border inline-flex items-center gap-1"
+                                      :class="getPhaseSloBadgeClass(phase.slo_status)">
+                                    <span x-text="getPhaseSloIcon(phase.slo_status)" aria-hidden="true"></span>
+                                    <span x-text="getPhaseSloText(phase.slo_status)"></span>
+                                </span>
+
+                                <!-- Badge de Fase Dominante / Gargalo -->
+                                <span x-show="phase.is_dominant"
+                                      class="px-2 py-0.5 rounded text-[11px] font-bold bg-fire-600/30 text-amber-200 border border-amber-400/70">
+                                    ★ <span x-text="t('dominantPhaseBadge')">Fase Dominante / Gargalo</span>
+                                </span>
+                            </div>
+
+                            <!-- Coluna 2: Trilha Horizontal com Barra em Offset Real (margin-left + width) -->
+                            <div class="sm:col-span-5">
+                                <div class="w-full h-5 bg-surface rounded-lg overflow-hidden border border-zinc-700/80 relative p-0.5">
+                                    <div class="h-full rounded transition-all duration-500 relative"
+                                         :class="getPhaseBarColorClass(phase.slo_status, phase.is_dominant)"
+                                         :style="getWaterfallBarStyle(phase)"
+                                         :title="formatPhaseName(phase.phase) + ': ' + phase.start_ms + 'ms → ' + phase.end_ms + 'ms (' + phase.duration_ms + 'ms)'">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Coluna 3: Intervalo (start_ms -> end_ms) e Duração em font-mono -->
+                            <div class="sm:col-span-3 flex sm:flex-col items-center sm:items-end justify-between text-right">
+                                <span class="font-mono text-xs font-bold text-white" x-text="phase.duration_ms + ' ms'"></span>
+                                <span class="font-mono text-[11px] text-zinc-300" x-text="phase.start_ms + ' ms → ' + phase.end_ms + ' ms'"></span>
                             </div>
                         </div>
                     </template>
-                    <div x-show="!result?.security?.missing_findings?.length" class="p-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
-                        Parabéns! Todos os headers de segurança recomendados estão configurados na borda.
+                </div>
+
+                <!-- Resumo Estatístico da Amostragem (Mín / Máx / Média / Desvio Padrão / Amostras) -->
+                <div class="bg-obsidian border border-bordercolor rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
+                    <div class="flex flex-wrap items-center gap-4">
+                        <span><span class="text-zinc-300" x-text="t('samplesExecuted')">Amostras Executadas</span>: <strong class="font-mono text-white" x-text="(result?.sampling?.samples_count || 1) + 'x'"></strong></span>
+                        <span><span class="text-zinc-300" x-text="t('meanLatency')">Média</span>: <strong class="font-mono text-white" x-text="(result?.sampling?.mean_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong></span>
+                        <span><span class="text-zinc-300" x-text="t('minMaxLatency')">Mín / Máx</span>: <strong class="font-mono text-zinc-100" x-text="(result?.sampling?.min_ms ?? result?.timings?.total_ms ?? 0) + ' ms / ' + (result?.sampling?.max_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong></span>
+                    </div>
+                    <div class="text-zinc-300">
+                        <span x-text="t('stdevLabel')">Desvio Padrão</span>: <strong class="font-mono text-zinc-100" x-text="(result?.sampling?.stdev_ms ?? 0) + ' ms'"></strong>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. CADEIA DE REDIRECTS (HOP-BY-HOP) & CARD COMPLETO DE CERTIFICADO TLS -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 cv-auto">
+
+                <!-- Card Completo de Inspecão TLS / SSL -->
+                <div class="bg-surface border border-bordercolor rounded-2xl p-6 space-y-4 shadow-xl">
+                    <div class="flex items-center justify-between border-b border-bordercolor pb-3">
+                        <div>
+                            <h4 class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('tlsCardTitle')">Inspeção Profunda de Certificado TLS</h4>
+                            <p class="text-xs text-zinc-300 mt-0.5" x-text="t('tlsCardSubtitle')">Cadeia X.509, cifra negociada, OCSP Stapling, SANs e protocolos legados.</p>
+                        </div>
+
+                        <template x-if="result?.tls">
+                            <span class="px-3 py-1 rounded-md text-xs font-bold border"
+                                  :class="result.tls.valid && !result.tls.alert_expiring ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'"
+                                  x-text="result.tls.valid ? t('tlsValidBadge') : t('tlsInvalidBadge')">
+                            </span>
+                        </template>
+                    </div>
+
+                    <template x-if="result?.tls">
+                        <div class="space-y-4 text-xs">
+                            <!-- Grid de Metadados Principais do TLS -->
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-3">
+                                    <span class="text-zinc-300 block" x-text="t('tlsDaysRemaining')">Validade Restante</span>
+                                    <div class="flex items-center gap-2 mt-1">
+                                        <strong class="font-mono text-base"
+                                                :class="result.tls.alert_expiring ? 'text-red-300' : 'text-emerald-300'"
+                                                x-text="result.tls.days_remaining !== null && result.tls.days_remaining !== undefined ? result.tls.days_remaining + ' ' + t('daysWord') : 'N/D'"></strong>
+                                        <span x-show="result.tls.alert_expiring"
+                                              class="px-2 py-0.5 rounded bg-red-950 text-red-200 border border-red-500/60 text-[10px] font-bold uppercase"
+                                              x-text="t('expiringAlert')">Expiração Próxima (&lt;15d)</span>
+                                    </div>
+                                </div>
+
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-3">
+                                    <span class="text-zinc-300 block" x-text="t('tlsProtocolCipher')">Protocolo & Cifra</span>
+                                    <strong class="font-mono text-sm text-white block mt-1" x-text="(result.tls.protocol || 'N/D') + (result.tls.cipher_bits ? ' (' + result.tls.cipher_bits + ' bits)' : '')"></strong>
+                                    <span class="font-mono text-[11px] text-zinc-300 break-all" x-text="result.tls.cipher || 'N/D'"></span>
+                                </div>
+
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-3">
+                                    <span class="text-zinc-300 block" x-text="t('tlsIssuerSubject')">Emissor (CA) & Titular (Subject)</span>
+                                    <strong class="text-zinc-100 block mt-1" x-text="result.tls.issuer || 'N/D'"></strong>
+                                    <span class="font-mono text-[11px] text-zinc-300" x-text="'CN: ' + (result.tls.subject || 'N/D')"></span>
+                                </div>
+
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-1.5">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-zinc-300">OCSP Stapling:</span>
+                                        <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
+                                                :class="result.tls.ocsp_stapling ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-zinc-800 text-zinc-200 border-zinc-600'"
+                                                x-text="result.tls.ocsp_status || 'Não detectado'"></strong>
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-zinc-300" x-text="t('tlsLegacyCheck')">TLS 1.0 / 1.1 Legado:</span>
+                                        <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
+                                                :class="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? 'bg-red-950/90 text-red-200 border-red-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
+                                                x-text="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? t('tlsLegacyAccepted') : t('tlsLegacyBlocked')"></strong>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Cadeia de Certificação (Certificate Chain) -->
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-2">
+                                <span class="text-zinc-200 font-semibold block" x-text="t('tlsCertChain')">Cadeia de Certificação (Hierarquia X.509)</span>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <template x-for="(node, idx) in (result.tls.cert_chain || [])" :key="idx">
+                                        <div class="inline-flex items-center gap-2">
+                                            <span class="px-2.5 py-1 rounded-md bg-surface border border-bordercolor font-mono text-zinc-100 text-[11px]" x-text="node"></span>
+                                            <span x-show="idx < (result.tls.cert_chain.length - 1)" class="text-amber-300 font-bold">→</span>
+                                        </div>
+                                    </template>
+                                    <span x-show="!(result.tls.cert_chain || []).length" class="text-zinc-300" x-text="t('notAvailable')">Não disponível</span>
+                                </div>
+                            </div>
+
+                            <!-- Lista de SANs (Subject Alternative Names) & Fingerprint SHA-256 -->
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-zinc-200 font-semibold" x-text="t('tlsSansLabel')">Nomes Alternativos (SANs)</span>
+                                    <span class="font-mono text-[11px] text-zinc-300" x-text="(result.tls.sans || []).length + ' ' + t('domainsWord')"></span>
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                                    <template x-for="san in (result.tls.sans || [])" :key="san">
+                                        <span class="px-2 py-0.5 rounded bg-surface border border-bordercolor font-mono text-[11px] text-zinc-200" x-text="san"></span>
+                                    </template>
+                                    <span x-show="!(result.tls.sans || []).length" class="text-zinc-300" x-text="t('noSansRegistered')">Nenhum SAN listado</span>
+                                </div>
+                                <div x-show="result.tls.fingerprint_sha256" class="pt-2 border-t border-bordercolor/80 text-[11px] text-zinc-300 break-all">
+                                    <span>SHA-256: </span>
+                                    <span class="font-mono text-zinc-200" x-text="result.tls.fingerprint_sha256"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <div x-show="!result?.tls" class="p-4 rounded-xl bg-obsidian border border-bordercolor text-zinc-300 text-xs" x-text="t('tlsNotApplicable')">
+                        Inspeção TLS não aplicável (conexão HTTP sem criptografia ou handshake não concluído).
+                    </div>
+                </div>
+
+                <!-- Card de Cadeia de Redirects (Hop-by-Hop) & Auditoria de Cookies/CORS -->
+                <div class="space-y-6">
+                    <!-- Cadeia de Redirects -->
+                    <div class="bg-surface border border-bordercolor rounded-2xl p-6 space-y-4 shadow-xl">
+                        <div class="flex items-center justify-between border-b border-bordercolor pb-3">
+                            <div>
+                                <h4 class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('redirectChainTitle')">Rastreamento de Cadeia de Redirecionamentos</h4>
+                                <p class="text-xs text-zinc-300 mt-0.5" x-text="t('redirectChainSubtitle')">Inspeção hop-by-hop com validação anti-SSRF individual por salto.</p>
+                            </div>
+                            <span class="px-2.5 py-1 rounded-md font-mono text-xs font-bold bg-obsidian border border-bordercolor text-zinc-200"
+                                  x-text="(result?.redirect_chain?.length || 0) + ' Hops'"></span>
+                        </div>
+
+                        <div x-show="(result?.redirect_chain || []).length > 0" class="space-y-3">
+                            <template x-for="hop in (result?.redirect_chain || [])" :key="hop.hop">
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-3.5 space-y-1.5 text-xs">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <div class="flex items-center gap-2">
+                                            <span class="px-2 py-0.5 rounded bg-amber-950/90 text-amber-200 border border-amber-500/60 font-mono font-bold"
+                                                  x-text="'Hop #' + hop.hop"></span>
+                                            <span class="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 border border-zinc-600 font-mono font-bold"
+                                                  x-text="'HTTP ' + hop.status_code"></span>
+                                            <span class="font-mono text-zinc-300" x-text="'IP: ' + (hop.resolved_ip || 'N/D')"></span>
+                                        </div>
+                                        <span class="font-mono font-bold text-white" x-text="(hop.timings?.total_ms || 0) + ' ms'"></span>
+                                    </div>
+                                    <div class="font-mono text-[11px] text-zinc-200 break-all">
+                                        <span class="text-zinc-300">De:</span> <span x-text="hop.url"></span>
+                                    </div>
+                                    <div class="font-mono text-[11px] text-emerald-300 break-all">
+                                        <span class="text-zinc-300">Para:</span> <span x-text="hop.target_url || hop.location || 'N/D'"></span>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <div x-show="!(result?.redirect_chain || []).length" class="p-4 rounded-xl bg-obsidian border border-bordercolor text-emerald-200 text-xs flex items-center gap-2">
+                            <span>●</span>
+                            <span x-text="t('directRouteMsg')">0 redirecionamentos detectados — rota direta até o endpoint final.</span>
+                        </div>
+                    </div>
+
+                    <!-- Card de Superfície Adicional: Cookies, CORS e Tecnologias Vazadas -->
+                    <div class="bg-surface border border-bordercolor rounded-2xl p-6 space-y-4 shadow-xl">
+                        <h4 class="text-sm font-bold text-zinc-100 uppercase tracking-wider border-b border-bordercolor pb-3" x-text="t('surfaceAuditTitle')">Superfície de Cookies, CORS & Fingerprinting</h4>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <!-- CORS Policy -->
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3">
+                                <span class="text-zinc-300 block" x-text="t('corsStatusLabel')">Política CORS (Allow-Origin)</span>
+                                <strong class="font-mono text-xs mt-1 inline-block px-2 py-0.5 rounded border"
+                                        :class="result?.security?.cors_wildcard ? 'bg-red-950/90 text-red-200 border-red-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
+                                        x-text="result?.security?.cors_wildcard ? t('corsWildcardAlert') : t('corsRestrictedOk')"></strong>
+                            </div>
+
+                            <!-- Fingerprinting / Leaked Tech -->
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3">
+                                <span class="text-zinc-300 block" x-text="t('techExposureLabel')">Exposição de Tecnologia (Headers)</span>
+                                <div class="mt-1 flex flex-wrap gap-1">
+                                    <template x-for="leak in (result?.security?.leaked_tech || [])" :key="leak">
+                                        <span class="px-2 py-0.5 rounded bg-red-950/90 text-red-200 border border-red-500/60 font-mono text-[11px]" x-text="leak"></span>
+                                    </template>
+                                    <span x-show="!(result?.security?.leaked_tech || []).length"
+                                          class="px-2 py-0.5 rounded bg-emerald-950/90 text-emerald-200 border border-emerald-500/60 font-mono text-[11px]"
+                                          x-text="t('noTechLeaks')">Oculto / Seguro</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Cookies Auditados -->
+                        <div x-show="(result?.security?.cookies_audited || []).length > 0" class="space-y-2 pt-1">
+                            <span class="text-xs font-semibold text-zinc-200 block" x-text="t('cookiesAuditedLabel')">Cookies Inspecionados (Set-Cookie):</span>
+                            <template x-for="ck in (result?.security?.cookies_audited || [])" :key="ck.name">
+                                <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                    <span class="font-mono font-bold text-white" x-text="ck.name"></span>
+                                    <div class="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                                        <span class="px-2 py-0.5 rounded border" :class="ck.secure ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'">Secure</span>
+                                        <span class="px-2 py-0.5 rounded border" :class="ck.httponly ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'">HttpOnly</span>
+                                        <span class="px-2 py-0.5 rounded border" :class="ck.samesite ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-amber-950/90 text-amber-200 border-amber-500/60'" x-text="'SameSite=' + (ck.samesite || 'Ausente')"></span>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. RUNBOOK DE REMEDIAÇÃO INTERATIVO (MULTI-SERVIDOR + SIMULAÇÃO DE PROJEÇÃO DE NOTA) -->
+            <div class="bg-surface border border-bordercolor rounded-2xl p-6 space-y-6 shadow-xl cv-auto">
+                <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-bordercolor pb-4">
+                    <div>
+                        <h4 class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('runbookTitle')">Auditoria DevSecOps & Runbook de Remediação Interativo</h4>
+                        <p class="text-xs text-zinc-300 mt-0.5" x-text="t('runbookSubtitle')">Selecione seu servidor de borda para gerar os snippets prontos para produção e simule o impacto na sua Nota de Segurança.</p>
+                    </div>
+
+                    <!-- Abas de Servidores: Nginx, Apache, Caddy, Traefik e Ingress do Kubernetes -->
+                    <div class="flex flex-wrap items-center gap-1.5 bg-obsidian p-1.5 rounded-xl border border-bordercolor" role="tablist" aria-label="Servidor de Borda para Remediação">
+                        <template x-for="srv in serverTabs" :key="srv.id">
+                            <button type="button"
+                                    role="tab"
+                                    :aria-selected="activeServer === srv.id"
+                                    @click="activeServer = srv.id"
+                                    :class="activeServer === srv.id ? 'bg-fire-600 text-white font-semibold shadow border border-fire-400' : 'text-zinc-200 hover:text-white hover:bg-zinc-800/70'"
+                                    class="px-3 py-1.5 rounded-lg text-xs transition cursor-pointer"
+                                    x-text="srv.label">
+                            </button>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Simulador Interativo de Projeção de Nota -->
+                <div x-show="(result?.security?.missing_findings || []).length > 0"
+                     class="bg-elevated border border-bordercolor rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                    <div class="space-y-1">
+                        <div class="flex items-center gap-2">
+                            <span class="px-2.5 py-0.5 rounded-md bg-amber-950/90 text-amber-200 border border-amber-500/60 text-xs font-bold uppercase" x-text="t('simulatorBadge')">Simulador de Evolução</span>
+                            <span class="text-xs font-semibold text-zinc-200" x-text="t('simulatorHint')">Marque as recomendações abaixo para projetar sua nota:</span>
+                        </div>
+                        <p class="text-sm font-bold text-white pt-1" x-text="getProjectedSimulationText()"></p>
+                    </div>
+
+                    <div class="flex items-center gap-3 self-end md:self-center">
+                        <button type="button"
+                                @click="selectAllFindings()"
+                                class="px-3 py-1.5 rounded-lg bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium cursor-pointer"
+                                x-text="t('selectAllBtn')">
+                            Selecionar Todas
+                        </button>
+                        <button type="button"
+                                @click="clearSelectedFindings()"
+                                x-show="selectedFindings.length > 0"
+                                class="px-3 py-1.5 rounded-lg bg-obsidian hover:bg-zinc-800 text-zinc-300 border border-bordercolor text-xs font-medium cursor-pointer"
+                                x-text="t('clearSelectionBtn')">
+                            Limpar
+                        </button>
+                        <div class="px-3.5 py-2 rounded-xl border font-mono text-sm font-black"
+                             :class="{
+                                'bg-emerald-950/90 text-emerald-200 border-emerald-400': ['A+', 'A'].includes(getSimulatedGrade()),
+                                'bg-amber-950/90 text-amber-200 border-amber-400': ['B', 'C'].includes(getSimulatedGrade()),
+                                'bg-red-950/90 text-red-200 border-red-400': ['D', 'F'].includes(getSimulatedGrade())
+                             }"
+                             x-text="(result?.security?.grade || 'F') + ' → ' + getSimulatedGrade() + ' (' + getSimulatedScore() + '/100)'">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Lista Numerada de Recomendações com Checkboxes, Snippets por Servidor e Cópia -->
+                <div class="space-y-4">
+                    <template x-for="(finding, index) in (result?.security?.missing_findings || [])" :key="finding.header + '-' + index">
+                        <div class="p-4 rounded-xl bg-obsidian border transition space-y-3"
+                             :class="isFindingSelected(index) ? 'border-amber-400/80 bg-amber-950/10' : 'border-bordercolor'">
+
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <label class="flex items-center gap-3 cursor-pointer select-none">
+                                    <input type="checkbox"
+                                           :checked="isFindingSelected(index)"
+                                           @change="toggleFinding(index)"
+                                           class="w-4 h-4 rounded border-zinc-500 bg-surface text-fire-500 focus:ring-fire-500 cursor-pointer">
+                                    <span class="font-mono text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 text-amber-200 border border-zinc-600"
+                                          x-text="'#' + (index + 1)"></span>
+                                    <span class="text-sm font-bold font-mono text-white" x-text="finding.header"></span>
+                                </label>
+
+                                <div class="flex items-center gap-2">
+                                    <span class="text-xs font-semibold px-2.5 py-0.5 rounded border uppercase"
+                                          :class="{
+                                            'bg-red-950/90 text-red-200 border-red-500/60': ['critical', 'high'].includes(finding.severity),
+                                            'bg-amber-950/90 text-amber-200 border-amber-500/60': finding.severity === 'medium',
+                                            'bg-sky-950/90 text-sky-200 border-sky-500/60': ['low', 'info'].includes(finding.severity)
+                                          }"
+                                          x-text="formatSeverity(finding.severity)"></span>
+                                    <span class="font-mono text-xs font-bold text-emerald-200 px-2.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60"
+                                          x-text="'+' + finding.weight + ' pts'"></span>
+                                </div>
+                            </div>
+
+                            <p class="text-xs text-zinc-200 leading-relaxed" x-text="finding.description"></p>
+
+                            <!-- Etapas Progressivas do HSTS (300s -> 1 semana -> 1 mês -> preload opt-in) -->
+                            <div x-show="(finding.progressive_steps || []).length > 0" class="bg-surface border border-bordercolor rounded-xl p-3 space-y-2">
+                                <span class="text-xs font-bold text-amber-200 block" x-text="t('hstsProgressiveTitle')">Plano de Adoção Progressiva de HSTS (Recomendado para evitar bloqueios):</span>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                                    <template x-for="step in (finding.progressive_steps || [])" :key="step.stage">
+                                        <div class="bg-obsidian border border-bordercolor rounded-lg p-2.5 space-y-1">
+                                            <span class="text-[11px] font-bold text-white block" x-text="step.stage"></span>
+                                            <code class="font-mono text-[11px] text-emerald-300 block break-all" x-text="step.value"></code>
+                                            <p class="text-[11px] text-zinc-300" x-text="step.description"></p>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <!-- Bloco de Código do Servidor Ativo + Botão Copiar Código -->
+                            <div class="bg-surface rounded-xl border border-bordercolor overflow-hidden">
+                                <div class="px-3.5 py-2 bg-elevated border-b border-bordercolor flex items-center justify-between text-xs">
+                                    <span class="font-semibold text-zinc-200">
+                                        <span x-text="t('snippetFor')">Configuração para</span>: <strong class="text-amber-200" x-text="getActiveServerLabel()"></strong>
+                                    </span>
+                                    <button type="button"
+                                            @click="copySnippet(finding, index)"
+                                            class="px-2.5 py-1 rounded-md bg-obsidian hover:bg-zinc-800 text-zinc-100 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                                        <svg class="w-3.5 h-3.5 text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                        </svg>
+                                        <span x-text="copiedSnippetIndex === index ? t('copiedFeedback') : t('copyCodeBtn')">Copiar Código</span>
+                                    </button>
+                                </div>
+                                <pre class="p-3.5 text-xs font-mono text-amber-200 overflow-x-auto leading-relaxed whitespace-pre-wrap"><code x-text="getFindingSnippet(finding)"></code></pre>
+                            </div>
+                        </div>
+                    </template>
+
+                    <div x-show="!(result?.security?.missing_findings || []).length" class="p-4 rounded-xl bg-emerald-950/90 border border-emerald-500/60 text-emerald-200 text-xs font-medium">
+                        ✓ <span x-text="t('allHeadersConfigured')">Excelente! Todos os cabeçalhos e políticas de segurança recomendados estão ativos na borda.</span>
+                    </div>
+                </div>
+
+                <!-- Cabeçalhos de Segurança Já Presentes -->
+                <div x-show="Object.keys(result?.security?.present_headers || {}).length > 0" class="pt-3 border-t border-bordercolor space-y-2.5">
+                    <h5 class="text-xs font-bold uppercase tracking-wider text-zinc-200" x-text="t('presentHeadersSection')">Cabeçalhos de Segurança Detectados na Resposta</h5>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        <template x-for="[hName, hVal] in Object.entries(result?.security?.present_headers || {})" :key="hName">
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3 text-xs space-y-1">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-mono font-bold text-emerald-300" x-text="hName"></span>
+                                    <span class="px-2 py-0.5 rounded bg-emerald-950/90 text-emerald-200 border border-emerald-500/60 text-[10px] font-bold uppercase" x-text="t('activeBadge')">Ativo</span>
+                                </div>
+                                <p class="font-mono text-[11px] text-zinc-300 break-all" x-text="hVal"></p>
+                            </div>
+                        </template>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- Alvos Monitorados em Background (Targets Cache) -->
-        <section class="space-y-4">
-            <h3 class="text-sm font-semibold text-zinc-300 uppercase tracking-widest">Vigilância Contínua (Targets Cache)</h3>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- 5. VIGILÂNCIA CONTÍNUA (MONITORAMENTO EM BACKGROUND COM GRÁFICOS SPARKLINE SVG) -->
+        <section class="space-y-4 cv-auto" aria-labelledby="monitoring-heading">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                    <h3 id="monitoring-heading" class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('continuousMonitoringTitle')">Vigilância Contínua (Monitoramento de Alvos e Tendência Sparkline)</h3>
+                    <p class="text-xs text-zinc-300 mt-0.5" x-text="t('continuousMonitoringSubtitle')">Série histórica de latência e postura de segurança dos endpoints monitorados pelo Anhangá.</p>
+                </div>
+
+                <button type="button"
+                        @click="refreshTargets()"
+                        class="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-surface hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                    <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span x-text="t('refreshTargetsBtn')">Atualizar Série</span>
+                </button>
+            </div>
+
+            <!-- Grid Dinâmico (Alpine.js) de Cards de Monitoramento com Sparkline SVG -->
+            <div x-show="targetsList.length > 0" x-cloak class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <template x-for="item in targetsList" :key="item.target_url">
+                    <div class="bg-surface border border-bordercolor rounded-2xl p-5 space-y-4 hover:border-fire-400/70 transition flex flex-col justify-between shadow-lg">
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center gap-2">
+                                <span class="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase border"
+                                      :class="item.is_up ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'"
+                                      x-text="item.is_up ? t('statusOnline') + ' (' + (item.status_code || 200) + ')' : t('statusOffline')">
+                                </span>
+                                <span class="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md border"
+                                      :class="['A+', 'A'].includes(item.security?.grade) ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : (['B', 'C'].includes(item.security?.grade) ? 'bg-amber-950/90 text-amber-200 border-amber-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60')"
+                                      x-text="t('gradeWord') + ' ' + (item.security?.grade || 'F')">
+                                </span>
+                            </div>
+
+                            <div>
+                                <h4 class="font-mono font-bold text-sm text-white truncate" :title="item.target_url" x-text="item.target_url"></h4>
+                                <p class="text-xs text-zinc-300 mt-1">
+                                    <span x-text="t('latencyWord')">Latência</span>: <strong class="font-mono text-white" x-text="(item.timings?.total_ms || 0) + ' ms'"></strong>
+                                    | IP: <span class="font-mono text-zinc-200" x-text="item.resolved_ip || 'N/D'"></span>
+                                </p>
+                            </div>
+
+                            <!-- Gráfico Sparkline SVG de Tendência de Latência -->
+                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-1.5">
+                                <div class="flex items-center justify-between text-[11px] text-zinc-300">
+                                    <span x-text="t('sparklineTrendLabel')">Tendência de Latência</span>
+                                    <span class="font-mono text-zinc-200" x-text="getSparklineRangeLabel(item.history_ms, item.timings?.total_ms)"></span>
+                                </div>
+                                <svg class="w-full h-12 overflow-visible" viewBox="0 0 180 44" role="img" aria-label="Sparkline de tendência de latência">
+                                    <polyline fill="none"
+                                              stroke="#fb923c"
+                                              stroke-width="2.2"
+                                              stroke-linecap="round"
+                                              stroke-linejoin="round"
+                                              :points="buildSparklinePoints(item.history_ms, item.timings?.total_ms)"></polyline>
+                                </svg>
+                            </div>
+                        </div>
+
+                        <button type="button"
+                                @click="selectCachedTarget(item)"
+                                class="w-full py-2 px-3 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-100 border border-bordercolor text-xs font-semibold transition cursor-pointer">
+                            <span x-text="t('openTargetReportBtn')">Abrir Relatório Completo</span>
+                        </button>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Fallback SSR Jinja2 para Primeiro Carregamento Sem JS / Crawlers / Testes -->
+            <div x-show="targetsList.length === 0" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {% if cached_results %}
                     {% for item in cached_results %}
-                    <div class="bg-surface border border-bordercolor rounded-xl p-5 space-y-3 hover:border-fire-500/50 transition">
+                    <div class="bg-surface border border-bordercolor rounded-2xl p-5 space-y-3 hover:border-fire-400/70 transition">
                         <div class="flex justify-between items-center">
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase {{ 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' if item.is_up else 'bg-red-500/10 text-red-400 border border-red-500/20' }}">
-                                {{ 'UP (' ~ item.status_code ~ ')' if item.is_up else 'DOWN' }}
+                            <span class="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase {{ 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' if item.is_up else 'bg-red-950/90 text-red-200 border border-red-500/60' }}">
+                                {{ 'ONLINE (' ~ item.status_code ~ ')' if item.is_up else 'OFFLINE' }}
                             </span>
-                            <span class="text-xs font-bold px-2 py-0.5 rounded bg-obsidian border border-bordercolor {{ 'text-emerald-400' if item.security.grade in ['A+', 'A'] else 'text-amber-400' }}">
-                                Grade {{ item.security.grade }}
+                            <span class="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md bg-obsidian border border-bordercolor {{ 'text-emerald-200' if item.security.grade in ['A+', 'A'] else 'text-amber-200' }}">
+                                Nota {{ item.security.grade }}
                             </span>
                         </div>
                         <div>
-                            <h4 class="font-medium text-sm text-white truncate" title="{{ item.target_url }}">{{ item.target_url }}</h4>
-                            <p class="text-[11px] text-zinc-500 mt-1">Total: <strong class="text-zinc-300">{{ item.timings.total_ms }} ms</strong> | IP: {{ item.resolved_ip }}</p>
+                            <h4 class="font-mono font-bold text-sm text-white truncate" title="{{ item.target_url }}">{{ item.target_url }}</h4>
+                            <p class="text-xs text-zinc-300 mt-1">Latência: <strong class="font-mono text-white">{{ item.timings.total_ms }} ms</strong> | IP: <span class="font-mono">{{ item.resolved_ip }}</span></p>
+                        </div>
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5" data-history="{{ item.history_ms | join(',') }}">
+                            <span class="text-[11px] text-zinc-300 block mb-1">Tendência de Latência (Sparkline)</span>
+                            <svg class="w-full h-10" viewBox="0 0 180 40" role="img" aria-label="Sparkline de tendência de latência">
+                                <polyline fill="none" stroke="#fb923c" stroke-width="2" points="4,28 60,20 120,24 176,16"></polyline>
+                            </svg>
                         </div>
                     </div>
                     {% endfor %}
                 {% else %}
-                    <div class="col-span-3 bg-surface border border-bordercolor rounded-xl p-8 text-center text-zinc-500 text-sm">
-                        Nenhum alvo monitorado em background no momento. Configure o <code class="text-zinc-300">targets.yaml</code> na raiz para ativar a vigilância contínua do Anhangá.
+                    <div class="col-span-3 bg-surface border border-bordercolor rounded-2xl p-8 text-center text-zinc-300 text-sm">
+                        Nenhum alvo monitorado em segundo plano no momento. Execute uma inspeção acima ou configure o arquivo <code class="font-mono text-zinc-100">targets.yaml</code> na raiz para ativar a vigilância contínua do Anhangá.
                     </div>
                 {% endif %}
             </div>
@@ -239,35 +903,298 @@
 
     </main>
 
-    <!-- Footer -->
-    <footer class="border-t border-bordercolor mt-20 py-6 text-center text-xs text-zinc-600">
-        Anhangá Engine // Desenvolvido para SRE e DevSecOps exigentes.
+    <!-- Rodapé -->
+    <footer class="border-t border-bordercolor mt-20 py-6 text-center text-xs text-zinc-300">
+        <span x-text="t('footerText')">Motor Anhangá // Desenvolvido para equipes de SRE, Engenharia de Plataforma e DevSecOps.</span>
     </footer>
 
-    <!-- Script Alpine.js para requisição da API -->
+    <!-- Lógica Principal Alpine.js (i18n PT-BR/EN-US, Waterfall, Simulador de Nota, Exportação e Sparklines) -->
     <script>
+        const I18N_DICTIONARY = {
+            'pt-BR': {
+                subtitle: 'Auditor Tático de Borda, TLS, Latência e DevSecOps',
+                apiDocs: 'Documentação da API',
+                scanTitle: 'Inspeção Cirúrgica de Endpoint',
+                scanSubtitle: 'Diagnóstico não-cumulativo de DNS, TCP, TLS, TTFB, Transferência, Cadeia de Redirects e Cabeçalhos de Segurança.',
+                ssrfProtected: 'Proteção Anti-SSRF & DNS Pinning Ativos',
+                targetUrlLabel: 'URL ou Hostname Alvo',
+                urlPlaceholder: 'ex: github.com ou api.seudominio.com.br',
+                samplesLabel: 'Amostras:',
+                scanBtn: 'Executar Diagnóstico',
+                scanningBtn: 'Sondando Borda...',
+                errorPrefix: 'Falha na sondagem:',
+                statusOnline: 'ONLINE',
+                statusOffline: 'OFFLINE',
+                resolvedIp: 'IP Resolvido',
+                httpProtocol: 'Protocolo HTTP',
+                payloadRead: 'Payload Lido',
+                redirectsCount: 'Redirecionamentos',
+                rescanBtn: 'Re-escanear Agora',
+                permalinkBtn: 'Link Permanente',
+                permalinkCopied: 'Link Copiado!',
+                exportJsonBtn: 'Exportar JSON',
+                exportMdBtn: 'Exportar Markdown',
+                deltaTitle: 'Delta de Evolução (Comparativo de Re-escaneamento)',
+                heroSecurityTitle: 'Nota de Segurança da Borda',
+                pointsLabel: 'pontos de blindagem',
+                gradeWord: 'NOTA',
+                presentHeadersLabel: 'Cabeçalhos Ativos',
+                pendingFixesLabel: 'Pendências',
+                leakedTechLabel: 'Vazamentos',
+                heroLatencyTitle: 'Latência Total de Ponta a Ponta',
+                bottleneckLabel: 'Gargalo',
+                coldConnLabel: 'Conexão Fria',
+                warmConnLabel: 'Keep-Alive (Reaproveitada)',
+                waterfallTitle: 'Waterfall Tático de Latência (Offsets Reais Não-Cumulativos)',
+                waterfallSubtitle: 'Cada barra representa o instante exato de início (offset) e término da respectiva fase de rede ou borda.',
+                sloOk: 'Saudável (OK)',
+                sloWarning: 'Atenção (Alerta)',
+                sloCritical: 'Crítico (Violação)',
+                phaseColumnHeader: 'Fase de Rede / Borda',
+                intervalColumnHeader: 'Janela (Início → Fim) & Duração',
+                dominantPhaseBadge: 'Fase Dominante / Gargalo',
+                samplesExecuted: 'Amostras Executadas',
+                meanLatency: 'Média',
+                minMaxLatency: 'Mín / Máx',
+                stdevLabel: 'Desvio Padrão',
+                tlsCardTitle: 'Inspeção Profunda de Certificado TLS',
+                tlsCardSubtitle: 'Cadeia X.509, cifra negociada, OCSP Stapling, SANs e protocolos legados.',
+                tlsValidBadge: 'Certificado Válido',
+                tlsInvalidBadge: 'Certificado Inválido',
+                tlsDaysRemaining: 'Validade Restante',
+                daysWord: 'dias',
+                expiringAlert: 'Expiração Próxima (<15d)',
+                tlsProtocolCipher: 'Protocolo & Cifra',
+                tlsIssuerSubject: 'Emissor (CA) & Titular (Subject)',
+                tlsLegacyCheck: 'TLS 1.0 / 1.1 Legado:',
+                tlsLegacyAccepted: 'Aceito (Risco)',
+                tlsLegacyBlocked: 'Bloqueado (Seguro)',
+                tlsCertChain: 'Cadeia de Certificação (Hierarquia X.509)',
+                notAvailable: 'Não disponível',
+                tlsSansLabel: 'Nomes Alternativos (SANs)',
+                domainsWord: 'domínios',
+                noSansRegistered: 'Nenhum SAN listado',
+                tlsNotApplicable: 'Inspeção TLS não aplicável (conexão HTTP sem criptografia ou handshake não concluído).',
+                redirectChainTitle: 'Rastreamento de Cadeia de Redirecionamentos',
+                redirectChainSubtitle: 'Inspeção hop-by-hop com validação anti-SSRF individual por salto.',
+                directRouteMsg: '0 redirecionamentos detectados — rota direta até o endpoint final.',
+                surfaceAuditTitle: 'Superfície de Cookies, CORS & Fingerprinting',
+                corsStatusLabel: 'Política CORS (Allow-Origin)',
+                corsWildcardAlert: 'Wildcard (*) Aberto',
+                corsRestrictedOk: 'Restrito / Seguro',
+                techExposureLabel: 'Exposição de Tecnologia (Headers)',
+                noTechLeaks: 'Oculto / Seguro',
+                cookiesAuditedLabel: 'Cookies Inspecionados (Set-Cookie):',
+                runbookTitle: 'Auditoria DevSecOps & Runbook de Remediação Interativo',
+                runbookSubtitle: 'Selecione seu servidor de borda para gerar os snippets prontos para produção e simule o impacto na sua Nota de Segurança.',
+                simulatorBadge: 'Simulador de Evolução',
+                simulatorHint: 'Marque as recomendações abaixo para projetar sua nota:',
+                selectAllBtn: 'Selecionar Todas',
+                clearSelectionBtn: 'Limpar',
+                hstsProgressiveTitle: 'Plano de Adoção Progressiva de HSTS (Recomendado para evitar bloqueios):',
+                snippetFor: 'Configuração para',
+                copyCodeBtn: 'Copiar Código',
+                copiedFeedback: 'Copiado!',
+                allHeadersConfigured: 'Excelente! Todos os cabeçalhos e políticas de segurança recomendados estão ativos na borda.',
+                presentHeadersSection: 'Cabeçalhos de Segurança Detectados na Resposta',
+                activeBadge: 'Ativo',
+                continuousMonitoringTitle: 'Vigilância Contínua (Monitoramento de Alvos e Tendência Sparkline)',
+                continuousMonitoringSubtitle: 'Série histórica de latência e postura de segurança dos endpoints monitorados pelo Anhangá.',
+                refreshTargetsBtn: 'Atualizar Série',
+                latencyWord: 'Latência',
+                sparklineTrendLabel: 'Tendência de Latência',
+                openTargetReportBtn: 'Abrir Relatório Completo',
+                footerText: 'Motor Anhangá // Desenvolvido para equipes de SRE, Engenharia de Plataforma e DevSecOps.'
+            },
+            'en-US': {
+                subtitle: 'Tactical Edge, TLS, Latency & DevSecOps Auditor',
+                apiDocs: 'API Documentation',
+                scanTitle: 'Surgical Endpoint Inspection',
+                scanSubtitle: 'Non-cumulative DNS, TCP, TLS, TTFB, Transfer, Redirect Chain, and Security Headers diagnostics.',
+                ssrfProtected: 'Anti-SSRF & DNS Pinning Active',
+                targetUrlLabel: 'Target URL or Hostname',
+                urlPlaceholder: 'e.g. github.com or api.yourdomain.com',
+                samplesLabel: 'Samples:',
+                scanBtn: 'Run Diagnostics',
+                scanningBtn: 'Probing Edge...',
+                errorPrefix: 'Probe failed:',
+                statusOnline: 'ONLINE',
+                statusOffline: 'OFFLINE',
+                resolvedIp: 'Resolved IP',
+                httpProtocol: 'HTTP Protocol',
+                payloadRead: 'Payload Read',
+                redirectsCount: 'Redirects',
+                rescanBtn: 'Rescan Now',
+                permalinkBtn: 'Permalink',
+                permalinkCopied: 'Link Copied!',
+                exportJsonBtn: 'Export JSON',
+                exportMdBtn: 'Export Markdown',
+                deltaTitle: 'Evolution Delta (Rescan Comparison)',
+                heroSecurityTitle: 'Edge Security Grade',
+                pointsLabel: 'hardening points',
+                gradeWord: 'GRADE',
+                presentHeadersLabel: 'Active Headers',
+                pendingFixesLabel: 'Pending Fixes',
+                leakedTechLabel: 'Tech Leaks',
+                heroLatencyTitle: 'End-to-End Total Latency',
+                bottleneckLabel: 'Bottleneck',
+                coldConnLabel: 'Cold Connection',
+                warmConnLabel: 'Keep-Alive (Reused)',
+                waterfallTitle: 'Tactical Latency Waterfall (Real Non-Cumulative Offsets)',
+                waterfallSubtitle: 'Each bar represents the exact start offset and completion window of its network or edge phase.',
+                sloOk: 'Healthy (OK)',
+                sloWarning: 'Warning (Alert)',
+                sloCritical: 'Critical (Breach)',
+                phaseColumnHeader: 'Network / Edge Phase',
+                intervalColumnHeader: 'Window (Start → End) & Duration',
+                dominantPhaseBadge: 'Dominant Phase / Bottleneck',
+                samplesExecuted: 'Executed Samples',
+                meanLatency: 'Mean',
+                minMaxLatency: 'Min / Max',
+                stdevLabel: 'Std Dev',
+                tlsCardTitle: 'Deep TLS Certificate Inspection',
+                tlsCardSubtitle: 'X.509 chain, negotiated cipher, OCSP Stapling, SANs, and legacy protocols.',
+                tlsValidBadge: 'Valid Certificate',
+                tlsInvalidBadge: 'Invalid Certificate',
+                tlsDaysRemaining: 'Remaining Validity',
+                daysWord: 'days',
+                expiringAlert: 'Expiring Soon (<15d)',
+                tlsProtocolCipher: 'Protocol & Cipher',
+                tlsIssuerSubject: 'Issuer (CA) & Subject',
+                tlsLegacyCheck: 'Legacy TLS 1.0 / 1.1:',
+                tlsLegacyAccepted: 'Accepted (Risk)',
+                tlsLegacyBlocked: 'Blocked (Secure)',
+                tlsCertChain: 'Certificate Chain (X.509 Hierarchy)',
+                notAvailable: 'Not available',
+                tlsSansLabel: 'Subject Alternative Names (SANs)',
+                domainsWord: 'domains',
+                noSansRegistered: 'No SANs listed',
+                tlsNotApplicable: 'TLS inspection not applicable (unencrypted HTTP or handshake not completed).',
+                redirectChainTitle: 'Redirect Chain Tracking',
+                redirectChainSubtitle: 'Hop-by-hop inspection with per-hop anti-SSRF validation.',
+                directRouteMsg: '0 redirects detected — direct route to final destination.',
+                surfaceAuditTitle: 'Cookies, CORS & Fingerprinting Surface',
+                corsStatusLabel: 'CORS Policy (Allow-Origin)',
+                corsWildcardAlert: 'Open Wildcard (*)',
+                corsRestrictedOk: 'Restricted / Secure',
+                techExposureLabel: 'Technology Exposure (Headers)',
+                noTechLeaks: 'Hidden / Secure',
+                cookiesAuditedLabel: 'Inspected Cookies (Set-Cookie):',
+                runbookTitle: 'DevSecOps Audit & Interactive Remediation Runbook',
+                runbookSubtitle: 'Choose your edge server to generate production-ready snippets and simulate your Security Grade impact.',
+                simulatorBadge: 'Grade Simulator',
+                simulatorHint: 'Check the recommendations below to project your grade:',
+                selectAllBtn: 'Select All',
+                clearSelectionBtn: 'Clear',
+                hstsProgressiveTitle: 'Progressive HSTS Rollout Plan (Recommended to prevent lockouts):',
+                snippetFor: 'Configuration for',
+                copyCodeBtn: 'Copy Code',
+                copiedFeedback: 'Copied!',
+                allHeadersConfigured: 'Excellent! All recommended security headers and policies are active at the edge.',
+                presentHeadersSection: 'Detected Response Security Headers',
+                activeBadge: 'Active',
+                continuousMonitoringTitle: 'Continuous Monitoring (Targets & Sparkline Trend)',
+                continuousMonitoringSubtitle: 'Historical latency series and security posture of endpoints monitored by Anhangá.',
+                refreshTargetsBtn: 'Refresh Series',
+                latencyWord: 'Latency',
+                sparklineTrendLabel: 'Latency Trend',
+                openTargetReportBtn: 'Open Full Report',
+                footerText: 'Anhangá Engine // Built for demanding SRE, Platform Engineering, and DevSecOps teams.'
+            }
+        };
+
         function anhangaApp() {
             return {
+                locale: 'pt-BR',
                 targetUrl: '',
+                samples: 1,
                 loading: false,
                 errorMessage: '',
                 result: null,
+                previousResult: null,
+                comparisonDelta: null,
+                activeServer: 'nginx',
+                selectedFindings: [],
+                copiedSnippetIndex: null,
+                permalinkCopied: false,
+                targetsList: [],
+                serverTabs: [
+                    { id: 'nginx', label: 'Nginx' },
+                    { id: 'apache', label: 'Apache' },
+                    { id: 'caddy', label: 'Caddy' },
+                    { id: 'traefik', label: 'Traefik' },
+                    { id: 'kubernetes', label: 'Ingress do Kubernetes' }
+                ],
 
-                async runScan() {
+                async init() {
+                    await this.refreshTargets();
+                    const params = new URLSearchParams(window.location.search);
+                    const scanParam = params.get('scan');
+                    const samplesParam = parseInt(params.get('samples') || '1', 10);
+                    if (samplesParam && [1, 3, 5, 10].includes(samplesParam)) {
+                        this.samples = samplesParam;
+                    }
+                    if (scanParam && scanParam.trim()) {
+                        this.targetUrl = scanParam.trim();
+                        await this.runScan(false);
+                    }
+                },
+
+                t(key) {
+                    const dict = I18N_DICTIONARY[this.locale] || I18N_DICTIONARY['pt-BR'];
+                    return dict[key] || I18N_DICTIONARY['pt-BR'][key] || key;
+                },
+
+                setLocale(lang) {
+                    if (I18N_DICTIONARY[lang]) {
+                        this.locale = lang;
+                        document.documentElement.lang = lang;
+                    }
+                },
+
+                async refreshTargets() {
+                    try {
+                        const resp = await fetch('/api/v1/targets');
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (Array.isArray(data)) {
+                                this.targetsList = data;
+                            }
+                        }
+                    } catch (_) {
+                        // Mantém fallback silencioso caso offline
+                    }
+                },
+
+                async runScan(isRescan = false) {
                     if (!this.targetUrl.trim()) return;
                     this.loading = true;
                     this.errorMessage = '';
-                    this.result = null;
+
+                    const prior = isRescan && this.result ? JSON.parse(JSON.stringify(this.result)) : null;
 
                     try {
-                        const response = await fetch(`/api/v1/scan?url=${encodeURIComponent(this.targetUrl)}`);
+                        const query = `/api/v1/scan?url=${encodeURIComponent(this.targetUrl.trim())}&samples=${encodeURIComponent(this.samples)}`;
+                        const response = await fetch(query);
                         const data = await response.json();
 
                         if (!response.ok) {
                             throw new Error(data.detail || 'Falha ao executar o diagnóstico.');
                         }
 
+                        if (prior && prior.target_url === data.target_url) {
+                            this.previousResult = prior;
+                            this.comparisonDelta = this.computeDelta(prior, data);
+                        } else {
+                            this.previousResult = null;
+                            this.comparisonDelta = null;
+                        }
+
                         this.result = data;
+                        // Seleciona automaticamente as 2 primeiras recomendações para demonstrar a simulação de nota
+                        const missingLen = (data.security?.missing_findings || []).length;
+                        this.selectedFindings = missingLen > 0 ? [0, ...(missingLen > 1 ? [1] : [])] : [];
+                        await this.refreshTargets();
                     } catch (err) {
                         this.errorMessage = err.message;
                     } finally {
@@ -275,13 +1202,347 @@
                     }
                 },
 
-                getPercent(phaseKey) {
-                    if (!this.result || !this.result.timings) return 0;
-                    const total = this.result.timings.total_ms || 1;
-                    const val = this.result.timings[phaseKey] || 0;
-                    return Math.max(2, Math.round((val / total) * 100));
+                async rescanTarget() {
+                    if (this.result?.target_url) {
+                        this.targetUrl = this.result.target_url;
+                    }
+                    await this.runScan(true);
+                },
+
+                computeDelta(oldRes, newRes) {
+                    const oldScore = oldRes.security?.score || 0;
+                    const newScore = newRes.security?.score || 0;
+                    const scoreDiff = newScore - oldScore;
+                    const oldGrade = oldRes.security?.grade || 'F';
+                    const newGrade = newRes.security?.grade || 'F';
+
+                    const oldMs = oldRes.timings?.total_ms || 0;
+                    const newMs = newRes.timings?.total_ms || 0;
+                    const latencyDiffMs = Number((newMs - oldMs).toFixed(2));
+
+                    const scoreSign = scoreDiff >= 0 ? `+${scoreDiff}` : `${scoreDiff}`;
+                    const latSign = latencyDiffMs > 0 ? `+${latencyDiffMs}` : `${latencyDiffMs}`;
+
+                    return {
+                        scoreDiff,
+                        latencyDiffMs,
+                        gradeLabel: `${oldGrade} → ${newGrade} (${scoreSign} pts)`,
+                        latencyLabel: `Δ Latência: ${latSign} ms`,
+                        summary: this.locale === 'pt-BR'
+                            ? `Pontuação variou de ${oldScore}/100 para ${newScore}/100 e latência total foi de ${oldMs} ms para ${newMs} ms.`
+                            : `Score changed from ${oldScore}/100 to ${newScore}/100 and total latency went from ${oldMs} ms to ${newMs} ms.`
+                    };
+                },
+
+                selectCachedTarget(item) {
+                    if (!item) return;
+                    this.previousResult = null;
+                    this.comparisonDelta = null;
+                    this.targetUrl = item.target_url;
+                    this.result = item;
+                    const missingLen = (item.security?.missing_findings || []).length;
+                    this.selectedFindings = missingLen > 0 ? [0, ...(missingLen > 1 ? [1] : [])] : [];
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                },
+
+                getWaterfallPhases() {
+                    if (!this.result || !this.result.timings) return [];
+                    if (Array.isArray(this.result.timings.phases) && this.result.timings.phases.length > 0) {
+                        return this.result.timings.phases;
+                    }
+                    // Fallback caso phases não venha preenchido
+                    const t = this.result.timings;
+                    const raw = [
+                        { phase: 'dns', duration_ms: t.dns_ms || 0 },
+                        { phase: 'tcp', duration_ms: t.tcp_ms || 0 },
+                        { phase: 'tls', duration_ms: t.tls_ms || 0 },
+                        { phase: 'ttfb', duration_ms: t.ttfb_ms || 0 },
+                        { phase: 'transfer', duration_ms: t.transfer_ms || 0 }
+                    ];
+                    let cursor = 0;
+                    return raw.map(item => {
+                        const start = Number(cursor.toFixed(2));
+                        const end = Number((cursor + item.duration_ms).toFixed(2));
+                        cursor = end;
+                        return {
+                            phase: item.phase,
+                            start_ms: start,
+                            duration_ms: item.duration_ms,
+                            end_ms: end,
+                            slo_status: 'ok',
+                            is_dominant: this.result.timings.dominant_phase === item.phase
+                        };
+                    });
+                },
+
+                getWaterfallBarStyle(phase) {
+                    const total = Math.max(this.result?.timings?.total_ms || 1, 0.01);
+                    const startPct = Math.min(96, Math.max(0, (phase.start_ms / total) * 100));
+                    const rawWidthPct = (phase.duration_ms / total) * 100;
+                    const widthPct = phase.duration_ms > 0
+                        ? Math.min(100 - startPct, Math.max(2.5, rawWidthPct))
+                        : 1.5;
+                    return `margin-left: ${startPct.toFixed(2)}%; width: ${widthPct.toFixed(2)}%;`;
+                },
+
+                formatPhaseName(phaseKey) {
+                    const namesPt = {
+                        dns: 'Resolução DNS',
+                        tcp: 'Handshake TCP',
+                        tls: 'Handshake TLS',
+                        ttfb: 'TTFB (Espera do Servidor)',
+                        transfer: 'Transferência de Conteúdo'
+                    };
+                    const namesEn = {
+                        dns: 'DNS Lookup',
+                        tcp: 'TCP Handshake',
+                        tls: 'TLS Handshake',
+                        ttfb: 'TTFB (Server Wait)',
+                        transfer: 'Content Transfer'
+                    };
+                    const map = this.locale === 'en-US' ? namesEn : namesPt;
+                    return map[phaseKey] || phaseKey || 'N/D';
+                },
+
+                getPhaseSloBadgeClass(status) {
+                    if (status === 'critical') return 'bg-red-950/90 text-red-200 border-red-500/60';
+                    if (status === 'warning') return 'bg-amber-950/90 text-amber-200 border-amber-500/60';
+                    return 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60';
+                },
+
+                getPhaseSloIcon(status) {
+                    if (status === 'critical') return '✖';
+                    if (status === 'warning') return '▲';
+                    return '●';
+                },
+
+                getPhaseSloText(status) {
+                    if (status === 'critical') return this.locale === 'en-US' ? 'Critical' : 'Crítico';
+                    if (status === 'warning') return this.locale === 'en-US' ? 'Warning' : 'Atenção';
+                    return 'OK';
+                },
+
+                getPhaseBarColorClass(status, isDominant) {
+                    if (status === 'critical') return 'bg-gradient-to-r from-red-500 to-rose-400';
+                    if (status === 'warning') return 'bg-gradient-to-r from-amber-500 to-orange-400';
+                    if (isDominant) return 'bg-gradient-to-r from-amber-400 to-emerald-400';
+                    return 'bg-gradient-to-r from-emerald-500 to-teal-400';
+                },
+
+                getOverallSloStatus() {
+                    const phases = this.getWaterfallPhases();
+                    if (phases.some(p => p.slo_status === 'critical')) return 'critical';
+                    if (phases.some(p => p.slo_status === 'warning')) return 'warning';
+                    return 'ok';
+                },
+
+                getOverallSloBadgeClass() {
+                    return this.getPhaseSloBadgeClass(this.getOverallSloStatus());
+                },
+
+                getOverallSloIcon() {
+                    return this.getPhaseSloIcon(this.getOverallSloStatus());
+                },
+
+                getOverallSloLabel() {
+                    const st = this.getOverallSloStatus();
+                    if (st === 'critical') return this.t('sloCritical');
+                    if (st === 'warning') return this.t('sloWarning');
+                    return this.t('sloOk');
+                },
+
+                getSecuritySummaryText() {
+                    const presentCount = Object.keys(this.result?.security?.present_headers || {}).length;
+                    const missingCount = (this.result?.security?.missing_findings || []).length;
+                    if (this.locale === 'en-US') {
+                        return `${presentCount} active security headers • ${missingCount} remediation recommendations`;
+                    }
+                    return `${presentCount} cabeçalhos ativos • ${missingCount} recomendações no runbook`;
+                },
+
+                formatSeverity(sev) {
+                    const mapPt = { critical: 'Crítica', high: 'Alta', medium: 'Média', low: 'Baixa', info: 'Info' };
+                    const mapEn = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info' };
+                    return (this.locale === 'en-US' ? mapEn : mapPt)[sev] || sev;
+                },
+
+                getActiveServerLabel() {
+                    const found = this.serverTabs.find(s => s.id === this.activeServer);
+                    return found ? found.label : 'Nginx';
+                },
+
+                getFindingSnippet(finding) {
+                    if (!finding) return '';
+                    if (finding.snippets && finding.snippets[this.activeServer]) {
+                        return finding.snippets[this.activeServer];
+                    }
+                    return finding.remediation || '';
+                },
+
+                async copySnippet(finding, index) {
+                    const text = this.getFindingSnippet(finding);
+                    if (!text) return;
+                    try {
+                        await navigator.clipboard.writeText(text);
+                    } catch (_) {
+                        // Fallback silencioso
+                    }
+                    this.copiedSnippetIndex = index;
+                    setTimeout(() => {
+                        if (this.copiedSnippetIndex === index) {
+                            this.copiedSnippetIndex = null;
+                        }
+                    }, 2000);
+                },
+
+                isFindingSelected(index) {
+                    return this.selectedFindings.includes(index);
+                },
+
+                toggleFinding(index) {
+                    if (this.isFindingSelected(index)) {
+                        this.selectedFindings = this.selectedFindings.filter(i => i !== index);
+                    } else {
+                        this.selectedFindings = [...this.selectedFindings, index].sort((a, b) => a - b);
+                    }
+                },
+
+                selectAllFindings() {
+                    const findings = this.result?.security?.missing_findings || [];
+                    this.selectedFindings = findings.map((_, idx) => idx);
+                },
+
+                clearSelectedFindings() {
+                    this.selectedFindings = [];
+                },
+
+                getSimulatedScore() {
+                    const base = this.result?.security?.score || 0;
+                    const findings = this.result?.security?.missing_findings || [];
+                    let added = 0;
+                    for (const idx of this.selectedFindings) {
+                        if (findings[idx]) {
+                            added += Number(findings[idx].weight || 0);
+                        }
+                    }
+                    return Math.max(0, Math.min(100, base + added));
+                },
+
+                getSimulatedGrade() {
+                    const score = this.getSimulatedScore();
+                    const findings = this.result?.security?.missing_findings || [];
+                    const hasUnfixedLeak = findings.some((f, idx) => f.category === 'leak' && !this.selectedFindings.includes(idx));
+                    if (score >= 95 && !hasUnfixedLeak) return 'A+';
+                    if (score >= 80) return 'A';
+                    if (score >= 65) return 'B';
+                    if (score >= 50) return 'C';
+                    if (score >= 30) return 'D';
+                    return 'F';
+                },
+
+                getProjectedSimulationText() {
+                    if (!this.selectedFindings.length) {
+                        return this.locale === 'en-US'
+                            ? 'Select one or more recommendations (#1, #2...) to preview your new Security Grade.'
+                            : 'Marque uma ou mais recomendações (#1, #2...) para simular sua nova Nota de Segurança.';
+                    }
+                    const nums = this.selectedFindings.map(i => `#${i + 1}`).join(', ');
+                    const grade = this.getSimulatedGrade();
+                    const score = this.getSimulatedScore();
+                    if (this.locale === 'en-US') {
+                        return `By applying ${nums}, your grade rises to ${grade} (${score}/100).`;
+                    }
+                    return `Ao aplicar ${nums}, sua nota sobe para ${grade} (${score}/100).`;
+                },
+
+                async copyPermalink() {
+                    if (!this.result) return;
+                    const target = this.result.target_url || this.targetUrl;
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('scan', target);
+                    url.searchParams.set('samples', String(this.result.sampling?.samples_count || this.samples || 1));
+                    window.history.replaceState({}, '', url.toString());
+                    try {
+                        await navigator.clipboard.writeText(url.toString());
+                    } catch (_) {}
+                    this.permalinkCopied = true;
+                    setTimeout(() => { this.permalinkCopied = false; }, 2200);
+                },
+
+                exportJson() {
+                    if (!this.result) return;
+                    const blob = new Blob([JSON.stringify(this.result, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    const host = (this.result.target_url || 'endpoint').replace(/[^a-zA-Z0-9.-]/g, '_');
+                    a.href = url;
+                    a.download = `anhanga-relatorio-${host}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                },
+
+                exportMarkdown() {
+                    if (!this.result) return;
+                    const r = this.result;
+                    const phases = this.getWaterfallPhases();
+                    const lines = [
+                        `# Relatório de Diagnóstico Anhangá — ${r.final_url || r.target_url}`,
+                        ``,
+                        `- **Status**: ${r.is_up ? 'ONLINE (' + r.status_code + ')' : 'OFFLINE'}`,
+                        `- **IP Resolvido**: \`${r.resolved_ip || 'N/D'}\``,
+                        `- **Protocolo HTTP**: \`${r.http_version || 'N/D'}\``,
+                        `- **Nota de Segurança**: **${r.security?.grade || 'F'}** (\`${r.security?.score || 0}/100\`)`,
+                        `- **Latência Total**: \`${r.timings?.total_ms || 0} ms\` (P50: \`${r.sampling?.p50_ms || 0} ms\`, P95: \`${r.sampling?.p95_ms || 0} ms\`, P99: \`${r.sampling?.p99_ms || 0} ms\`, Jitter: \`${r.sampling?.jitter_ms || 0} ms\`)`,
+                        ``,
+                        `## Waterfall de Latência (Offsets Reais)`,
+                        `| Fase | Início (ms) | Fim (ms) | Duração (ms) | Status SLO | Gargalo |`,
+                        `| :--- | :---: | :---: | :---: | :---: | :---: |`,
+                        ...phases.map(p => `| ${this.formatPhaseName(p.phase)} | ${p.start_ms} | ${p.end_ms} | ${p.duration_ms} | ${p.slo_status.toUpperCase()} | ${p.is_dominant ? 'SIM' : 'NÃO'} |`),
+                        ``,
+                        `## Inspeção TLS`,
+                        r.tls
+                            ? `- **Validade**: ${r.tls.days_remaining ?? 'N/D'} dias restantes\n- **Protocolo / Cifra**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **Emissor**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **Cadeia X.509**: ${(r.tls.cert_chain || []).join(' -> ')}`
+                            : `- TLS não aplicável.`,
+                        ``,
+                        `## Runbook de Remediação (${this.getActiveServerLabel()})`,
+                        ...(r.security?.missing_findings || []).map((f, i) => `### #${i + 1} ${f.header} (+${f.weight} pts)\n${f.description}\n\`\`\`\n${this.getFindingSnippet(f)}\n\`\`\``)
+                    ];
+                    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    const host = (r.target_url || 'endpoint').replace(/[^a-zA-Z0-9.-]/g, '_');
+                    a.href = url;
+                    a.download = `anhanga-runbook-${host}.md`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                },
+
+                buildSparklinePoints(historyMs, fallbackMs) {
+                    const series = Array.isArray(historyMs) && historyMs.length > 0
+                        ? historyMs
+                        : [fallbackMs || 10, fallbackMs || 10];
+                    const pts = series.length === 1 ? [series[0], series[0]] : series;
+                    const min = Math.min(...pts);
+                    const max = Math.max(...pts);
+                    const range = Math.max(max - min, 1);
+                    const width = 172;
+                    const height = 34;
+                    return pts.map((val, idx) => {
+                        const x = 4 + (idx / (pts.length - 1)) * width;
+                        const y = 38 - ((val - min) / range) * height;
+                        return `${x.toFixed(1)},${y.toFixed(1)}`;
+                    }).join(' ');
+                },
+
+                getSparklineRangeLabel(historyMs, fallbackMs) {
+                    const series = Array.isArray(historyMs) && historyMs.length > 0
+                        ? historyMs
+                        : [fallbackMs || 0];
+                    const min = Math.min(...series);
+                    const max = Math.max(...series);
+                    return `${min}–${max} ms (${series.length}x)`;
                 }
-            }
+            };
         }
     </script>
 </body>

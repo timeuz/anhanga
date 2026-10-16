@@ -1,3 +1,6 @@
 .venv
 targets.yaml
 __pycache__
+.pytest_cache
+tests/
+*.sarif

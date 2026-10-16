@@ -17,13 +17,7 @@ dependencies = [
     "prometheus-client>=0.21.0",
     "jinja2>=3.1.4",
     "pyyaml>=6.0.2",
-    "rich>=13.8.0", # Para deixar a CLI bonita no terminal
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
+    "rich>=13.8.0",
 ]
 
 [project.scripts]

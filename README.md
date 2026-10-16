@@ -116,6 +116,15 @@ anhanga check https://seudominio.com --min-grade B --max-ttfb 500ms --samples 3
 # Define limite também para a latência total (ex: 1.5s)
 anhanga check https://api.seudominio.com --min-grade A --max-ttfb 300ms --max-total 1.5s
 
+# Override de resolução DNS para testar IP específico ou ambiente de staging sem alterar /etc/hosts
+anhanga check https://seudominio.com --resolve seudominio.com:443:10.0.1.5 --allow-private
+
+# Asserções funcionais de conteúdo (Content Assertions)
+anhanga check https://api.seudominio.com \
+  --fail-if-body-not-matches-regexp '"status":\s*"ok"' \
+  --fail-if-body-matches-regexp 'error|unauthorized' \
+  --min-payload-bytes 100
+
 # Exporta o resultado em JSON para consumo por scripts da pipeline
 anhanga check https://seudominio.com --min-grade B --format json --output relatorio.json
 
@@ -131,11 +140,12 @@ anhanga check https://seudominio.com \
 ```
 
 ### Exit Codes da CLI
-| Exit Code | Condição |
-| :---: | :--- |
-| `0` | Alvo online e aprovado em todos os critérios (`--min-grade`, `--max-ttfb`, `--max-total`). |
-| `1` | Falha de Quality Gate: alvo indisponível (`HTTP >= 400`), nota de segurança abaixo de `--min-grade` ou latência acima dos limites. |
-| `2` | Erro de execução/configuração, falha de DNS ou bloqueio pelo Guardião Anti-SSRF. |
+| Exit Code | Classificação | Condição |
+| :---: | :--- | :--- |
+| `0` | **Sucesso** | Alvo online e aprovado em todos os Quality Gates e SLOs. |
+| `1` | **Falha de SLO / Conectividade** | Alvo indisponível (`HTTP >= 400` ou timeout), violação de SLO (`--max-ttfb`, `--max-total`) ou falha em Content Assertion. |
+| `2` | **Nota de Segurança Insuficiente** | Nota de segurança abaixo do mínimo exigido pelo parâmetro `--min-grade`. |
+| `3` | **Erro de Execução / Configuração** | Parâmetro inválido, URL malformada, bloqueio pelo Guardião Anti-SSRF ou erro de DNS. |
 
 ---
 

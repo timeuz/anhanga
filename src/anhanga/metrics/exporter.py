@@ -2,10 +2,11 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from prometheus_client import (
-     CONTENT_TYPE_LATEST,
+    CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
     Gauge,
+    Histogram,
     generate_latest,
 )
 
@@ -150,6 +151,28 @@ PROBE_EXECUTIONS_TOTAL = Counter(
     "anhanga_probe_executions_total",
     "Total de sondagens executadas pelo motor do Anhangá",
     ["target", "result"],
+    registry=REGISTRY,
+)
+
+PROBE_DURATION_HISTOGRAM_SECONDS = Histogram(
+    "anhanga_probe_duration_seconds_histogram",
+    "Histograma de distribuição de latência total da sondagem em segundos para uso com histogram_quantile()",
+    ["target"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+    registry=REGISTRY,
+)
+
+PROBE_SERVER_PROCESSING_SECONDS = Gauge(
+    "anhanga_probe_server_processing_seconds",
+    "Tempo estimado de processamento do servidor (TTFB − RTT) em segundos",
+    ["target"],
+    registry=REGISTRY,
+)
+
+PROBE_ESTIMATED_RTT_SECONDS = Gauge(
+    "anhanga_probe_estimated_rtt_seconds",
+    "RTT físico de rede estimado (handshake TCP / TLS) em segundos",
+    ["target"],
     registry=REGISTRY,
 )
 
@@ -313,6 +336,25 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_SECURITY_SCORE.labels(target=target, grade=result.security.grade).set(
         result.security.score
     )
+
+    # Física de Rede e Processamento de Servidor (TTFB - RTT)
+    PROBE_SERVER_PROCESSING_SECONDS.labels(target=target).set(
+        round(result.timings.server_processing_ms / 1000.0, 6)
+    )
+    PROBE_ESTIMATED_RTT_SECONDS.labels(target=target).set(
+        round(result.timings.estimated_rtt_ms / 1000.0, 6)
+    )
+
+    # Histograma em segundos para histogram_quantile() no Grafana
+    if result.sampling and result.sampling.raw_samples:
+        for s in result.sampling.raw_samples:
+            PROBE_DURATION_HISTOGRAM_SECONDS.labels(target=target).observe(
+                round(s.timings.total_ms / 1000.0, 6)
+            )
+    elif result.timings.total_ms > 0:
+        PROBE_DURATION_HISTOGRAM_SECONDS.labels(target=target).observe(
+            round(result.timings.total_ms / 1000.0, 6)
+        )
 
 
 def render_prometheus_metrics() -> tuple[bytes, str]:

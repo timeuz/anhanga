@@ -1,108 +1,156 @@
-# Anhangá 🦌🔥 (v0.2.0 — Main Candidate)
+# Anhangá 🦌🔥
 
-> **Auditor Tático de Borda, TLS, Latência e DevSecOps para SREs e Engenheiros de Infraestrutura**
+> **Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps**
 
-O **Anhangá** é um motor de diagnóstico assíncrono de alta performance projetado para equipes de SRE, Plataforma e DevSecOps que sabem que um `HTTP 200 OK` isolado raramente conta toda a história.
+O **Anhangá** é um motor assíncrono de diagnóstico de rede, auditoria de borda e observabilidade projetado para engenheiros de infraestrutura, SREs e profissionais de DevSecOps que sabem que um `HTTP 200 OK` isolado raramente conta toda a história.
 
-Inspirado no guardião mitológico de olhos de fogo que vigia o perímetro, o Anhangá inspeciona profundamente a pilha de rede — desde a resolução DNS e handshakes TCP/TLS até cadeias de redirecionamento, postura criptográfica, cabeçalhos de segurança e conformidade de SLOs — antes de certificar que um endpoint está saudável.
-
----
-
-## ✨ Capacidades Principais (Fases 1 a 5)
-
-### 1. Motor de Medição Exata de Waterfall & Amostragem Estatística (Fase 1)
-- **Decomposição Real e Não-Cumulativa por Fase:** Mede separadamente `dns_ms`, `tcp_ms`, `tls_ms`, `ttfb_ms` e `transfer_ms` usando instrumentação direta no transporte `httpcore`/`httpx` (`InstrumentedPinnedNetworkBackend` e `InstrumentedAsyncNetworkStream`) e leitura em *streaming* (`aiter_bytes()`), garantindo que `total_ms` seja a soma exata das fases e calculando offsets reais (`start_ms`, `duration_ms`, `end_ms`) e a **Fase Dominante (Gargalo)**.
-- **Amostragem Multi-Sonda (`samples=1..50`):**
-  - **Conexão Fria (*Cold Start*) vs. Reaproveitada (*Keep-Alive*):** Compara o custo da 1ª requisição completa (DNS + TCP + TLS + TTFB + Transfer) com requisições subsequentes na mesma conexão persistente (`dns_ms=0`, `tcp_ms=0`, `tls_ms=0`).
-  - **Estatísticas de Cauda:** Calcula **P50 (Mediana)**, **P95**, **P99**, **Mínimo**, **Máximo**, **Média**, **Desvio Padrão** e **Jitter** (variação média absoluta entre amostras consecutivas).
-- **Rastreamento Hop-by-Hop de Redirecionamentos (`301/302/303/307/308`):** Registra cada salto em `redirect_chain` com status HTTP, URL de destino, IP resolvido, protocolo negociado e breakdown completo de latência por salto.
-- **Inspeção Profunda de Certificados TLS:** Extrai emissor (`Issuer`), titular (`Subject`), **SANs** (`SubjectAltName`), **Cadeia de Certificação** (`Leaf -> Intermediate -> Root`), número de série, **Fingerprint SHA-256**, datas `notBefore`/`notAfter`, dias restantes (`alert_expiring` quando `< 15` dias), versão do protocolo, cifra, bits, **OCSP Stapling** e detecção ativa/passiva de aceitação de **TLS 1.0/1.1 depreciados**.
-
-### 2. Blindagem Anti-SSRF, Anti-DNS Rebinding & Runbook DevSecOps (Fase 2)
-- **Guardião Anti-SSRF Completo (IPv4 & IPv6):**
-  - Bloqueia **Loopback** (`127.0.0.0/8`, `::1/128`), **RFC 1918** (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), **Link-Local / Cloud Metadata** (`169.254.0.0/16`, `fe80::/10`), **CGNAT** (`100.64.0.0/10`), **IPv6 ULA** (`fc00::/7`), **IPv4-mapped IPv6** (`::ffff:127.0.0.1`), **6to4** (`2002::/16`), **Teredo** (`2001::/32`), zonas IPv6 (`%eth0`) e esquemas não-HTTP (`file://`, `gopher://`, `ftp://`, `dict://`, `javascript:`, `data:`).
-- **Defesa Anti-DNS Rebinding (IP Pinning):** Resolve o hostname uma única vez por salto, valida todos os registros `A`/`AAAA` retornados e fixa (*pins*) o IP validado diretamente no socket TCP (`InstrumentedPinnedNetworkBackend`), preservando SNI e header `Host` e revalidando cada salto de redirecionamento.
-- **Salvaguardas Operacionais:** Limite de leitura de payload em *streaming* (`max_body_bytes`, padrão `2 MiB`, teto `5 MiB`), timeouts rígidos por fase/global e **Rate Limiting** em memória por IP (`SlidingWindowRateLimiter`, HTTP `429 Too Many Requests` com `Retry-After`) com limpeza automática de chaves expiradas.
-- **Auditoria DevSecOps Inteligente & Runbook Multi-Servidor:**
-  - **HSTS Progressivo sem falso positivo de `preload`:** Avalia o `Strict-Transport-Security` em estágios seguros (`300s` -> `604800s` -> `2592000s`), concedendo pontuação máxima de HSTS para `max-age >= 2592000` (30 dias) sem exigir `preload` (tratado como *opt-in* opcional).
-  - **Equivalência Moderna de Clickjacking:** Reconhece `Content-Security-Policy: frame-ancestors` como substituto válido para `X-Frame-Options`.
-  - **Permissions-Policy, Cookies, CORS e Fingerprinting:** Audita restrição explícita `camera=()`, múltiplos cabeçalhos `Set-Cookie` (`Secure`, `HttpOnly`, `SameSite`, incluindo `SameSite=None` sem `Secure`), `Access-Control-Allow-Origin: *` e vazamentos de versão (`Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Generator`).
-  - **Snippets Prontos para 5 Servidores:** Gera correções para **Nginx**, **Apache**, **Caddy**, **Traefik** e **Kubernetes Ingress**.
-
-### 3. Dashboard Tático em PT-BR com Simulador de Nota e Re-Scan (Fase 3)
-- **Interface 100% em Português do Brasil (`pt-BR`)** com suporte a internacionalização (`pt-BR` / `en-US`), tipografia semântica (`font-sans` para prosa/descrições e `font-mono` para métricas/código) e contraste acessível **WCAG AA**.
-- **Hero KPIs de Decisão Rápida:** Nota de Segurança (`A+` a `F`) e Latência Total (`P50`, `P95`, `P99`, `Jitter` e comparativo Conexão Fria vs. Reaproveitada) em destaque no topo do dashboard.
-- **Waterfall Tático Real:** Barras proporcionais posicionadas com offsets reais (`start_ms` -> `end_ms`), cores e ícones por limiar de SLO (*Saudável*, *Atenção*, *Crítico*) e destaque visual da **Fase Dominante / Gargalo**.
-- **Runbook Interativo com Simulador de Projeção de Nota:** Permite marcar correções numeradas (`#1`, `#2`, ...) e visualizar em tempo real a projeção de pontuação e nota (*"Ao aplicar #1, #2, sua nota sobe para A (90/100)"*), copiar snippets com 1 clique e executar **Re-escanear Agora** com cálculo de **Delta de Evolução**.
-- **Vigilância Contínua com Sparklines SVG & Exportação:** Cards de monitoramento com minigráficos SVG das últimas sondagens e exportação via **Link Permanente (`?scan=...`)**, **JSON** e **Markdown**.
-
-### 4. CLI CI/CD (`anhanga check`), Métricas `blackbox_exporter` e Webhooks (Fase 4)
-- **Modo CLI Headless para Pipelines CI/CD:**
-  - Quality Gates configuráveis via `--min-grade`, `--max-ttfb` e `--max-total`.
-  - **Exit Codes Padronizados:** `0` (Gates aprovados), `1` (Alvo offline, violação de SLO ou nota abaixo do mínimo), `2` (Parâmetros inválidos, erro de DNS/rede ou bloqueio Anti-SSRF).
-  - **Formatos de Saída:** Tabela **Rich** (`text`), **JSON** estruturado (`json`) e **SARIF v2.1.0** (`sarif`) para integração nativa com **GitHub Code Scanning / Security Tab**.
-- **Compatibilidade com Prometheus `blackbox_exporter`:**
-  - Endpoints `/metrics` e `/probe?target=<url>` expondo métricas em **segundos** com os mesmos nomes e labels do `blackbox_exporter` (`probe_success`, `probe_duration_seconds`, `probe_http_duration_seconds{phase="resolve|connect|tls|processing|transfer"}`, `probe_http_status_code`, `probe_http_redirects`, `probe_http_ssl`, `probe_ssl_earliest_cert_expiry`), além das métricas estendidas `anhanga_probe_*` (quantis P50/P95/P99, jitter, cold vs. warm e security score).
-- **Alertas via Webhooks (Slack, Microsoft Teams e Telegram):**
-  - Construção nativa de payloads (Slack *Block Kit*, Microsoft Teams *MessageCard* e Telegram *HTML* com escape seguro de caracteres especiais) e envio protegido pelo Guardião Anti-SSRF via CLI (`--webhook-url`) ou API (`POST /api/v1/webhooks/notify`).
-
-### 5. Governança Multi-Agente, Revisão Cruzada e Qualidade (Fase 5)
-- Fluxo documentado em [AGENTS.md](AGENTS.md) com isolamento por especialidade, Revisão Cruzada (Backend ↔ Segurança) e suíte automatizada de **28 testes e 54 subtestes** (`pytest -v`).
+Inspirado no guardião mitológico de olhos de fogo que vigia o perímetro, o Anhangá inspeciona toda a pilha de conexão — desde a resolução DNS e handshakes TCP/TLS até cadeias de redirecionamento, postura criptográfica, cabeçalhos de segurança e conformidade de SLOs — tanto via **Dashboard Web**, **CLI para CI/CD** quanto via **Métricas Prometheus**.
 
 ---
 
-## 📦 Instalação e Execução
+## 🚀 Principais Recursos
+
+### 1. Diagnóstico Tático de Latência e Waterfall Real
+- **Decomposição Não-Cumulativa por Fase:** Mede isoladamente o tempo gasto em **DNS Lookup**, **TCP Handshake**, **TLS Handshake**, **TTFB (Processamento no Backend)** e **Transferência de Conteúdo**, apresentando offsets exatos de início e fim (`start_ms` → `end_ms`) e identificando automaticamente a **Fase Dominante (Gargalo)** com classificação visual por SLO.
+- **Amostragem Estatística Multi-Sonda:** Permite executar múltiplas amostras por verificação (`--samples N`), calculando **P50 (Mediana)**, **P95**, **P99**, **Média**, **Min/Max** e **Jitter**, além de comparar o tempo de **Conexão Fria (*Cold Start*)** com **Conexão Reaproveitada (*Keep-Alive*)**.
+- **Rastreamento de Cadeia de Redirects:** Mapeia cada salto (`301`, `302`, `303`, `307`, `308`) de `HTTP -> HTTPS` ou `apex -> www` com status, IP resolvido e latência individual por hop.
+
+### 2. Inspeção Profunda de Certificados TLS
+- Verifica validade temporal, dias restantes até a expiração (com alerta preventivo abaixo de 15 dias), Emissor (`Issuer`), Titular (`Subject`), Número de Série e **Fingerprint SHA-256**.
+- Extrai todos os **SANs (`Subject Alternative Names`)** e reconstrói a **Cadeia de Certificação X.509** (`Leaf -> Intermediate -> Root CA`).
+- Inspeciona versão do protocolo negociado, suíte de cifra (`cipher` e `bits`), status de **OCSP Stapling** e detecta se o servidor ainda aceita versões legadas inseguras (**TLS 1.0 / TLS 1.1**).
+
+### 3. Auditoria DevSecOps de Borda e Runbook Multi-Servidor
+- **Cálculo de Nota de Segurança (`A+` até `F`):** Avalia cabeçalhos essenciais de proteção de borda:
+  - `Strict-Transport-Security` (**HSTS** com recomendações progressivas de rollout: `300s` → `1 semana` → `1 mês+`, tratando `preload` como *opt-in* voluntário).
+  - `Content-Security-Policy` (**CSP**), reconhecendo a diretiva moderna `frame-ancestors` como proteção equivalente ao `X-Frame-Options` contra Clickjacking.
+  - `Permissions-Policy` (incluindo verificação explícita de bloqueio `camera=()`) e `X-Content-Type-Options: nosniff`.
+  - `Referrer-Policy`, flags de segurança em `Set-Cookie` (`Secure`, `HttpOnly`, `SameSite`), políticas de **CORS** permissivas (`Access-Control-Allow-Origin: *`) e vazamento de versão de tecnologia (`Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Generator`).
+- **Runbook de Remediação Interativo:** Gera snippets prontos para copiar e colar em **Nginx**, **Apache**, **Caddy**, **Traefik** e **Kubernetes Ingress**, com **Simulador de Projeção de Nota** em tempo real e botão **Re-escanear** com cálculo de delta de evolução.
+
+### 4. Proteção Nativa Anti-SSRF e Anti-DNS Rebinding
+- Bloqueia por padrão tentativas de sondar redes privadas ou internas: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Link-Local e Cloud Metadata (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), IPv6 ULA (`fc00::/7`) e endereços tunelados/mapeados (`::ffff:127.0.0.1`, 6to4, Teredo), além de esquemas não-HTTP (`file://`, `gopher://`, `ftp://`).
+- Prende (*pins*) a conexão TCP diretamente ao IP validado na resolução única de DNS (prevenindo ataques de *DNS Rebinding*) e revalida o IP a cada redirecionamento.
+- Conta com controle de taxa de requisições (*Rate Limiting* por IP), timeouts rígidos e limite máximo de leitura de payload. Para auditorias em laboratórios ou redes internas autorizadas, oferece a flag explícita `--allow-private` / `allow_private: true`.
+
+---
+
+## 📦 Instalação
+
+Requer **Python 3.11+**. Recomendado utilizar o gerenciador [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-# 1. Crie o ambiente virtual e instale o projeto (com dependências de desenvolvimento/teste)
+# Cria o ambiente virtual e instala o Anhangá
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install -e .
+```
 
-# 2. Inicie o servidor Web + API FastAPI na porta 7890
+---
+
+## 🌐 Executando o Dashboard Web e a API
+
+Para iniciar o servidor web e a API FastAPI na porta `7890`:
+
+```bash
+anhanga serve --host 127.0.0.1 --port 7890
+# Ou diretamente via uvicorn:
 uvicorn anhanga.main:app --reload --host 127.0.0.1 --port 7890
 ```
 
-Acesse o **Dashboard Tático** em `http://127.0.0.1:7890`.
+- **Dashboard Web Interativo (PT-BR / EN):** `http://127.0.0.1:7890`
+  - Permite executar inspeções sob demanda, simular correções no Runbook, comparar re-escaneamentos e exportar relatórios em **Link Permanente**, **JSON** e **Markdown**.
+- **Documentação OpenAPI / Swagger:** `http://127.0.0.1:7890/docs`
+- **Healthcheck (Kubernetes Liveness/Readiness):** `http://127.0.0.1:7890/healthz`
 
 ---
 
-## 🖥️ Uso da CLI em Pipelines CI/CD (`anhanga check`)
+## 🎯 Vigilância Contínua com `targets.yaml`
+
+O arquivo **`targets.yaml`** na raiz do projeto (ou apontado pela variável de ambiente `ANHANGA_CONFIG`) define os endpoints que o Anhangá monitora continuamente em background assim que o servidor é iniciado.
+
+Essa sondagem periódica alimenta automaticamente:
+1. Os cards de **Vigilância Contínua** no Dashboard Web (com gráficos *Sparkline* da evolução de latência);
+2. As métricas exportadas em `/metrics` para coleta pelo Prometheus;
+3. O disparo automático de alertas via **Webhooks** (Slack, Microsoft Teams e Telegram) caso um alvo fique indisponível ou apresente certificado TLS prestes a expirar.
+
+Para começar, copie o arquivo de exemplo:
 
 ```bash
-# Auditoria interativa no terminal com Quality Gates de Segurança e Latência
-anhanga check https://cloudflare.com --min-grade B --max-ttfb 500ms --max-total 1.5s --samples 3
+cp targets.example.yaml targets.yaml
+```
 
-# Exportação em formato JSON para automação
-anhanga check https://cloudflare.com --min-grade A --max-ttfb 300ms --format json --output report.json
+Estrutura do `targets.yaml`:
 
-# Exportação em formato SARIF v2.1.0 para GitHub Code Scanning
-anhanga check https://cloudflare.com --min-grade A --max-ttfb 400ms --format sarif --output anhanga.sarif
+```yaml
+interval_seconds: 30   # Intervalo em segundos entre os ciclos de sondagem em background
+samples: 3             # Quantidade de amostras por ciclo (calcula P50, P95, P99 e Jitter)
+allow_private: false   # Defina como true apenas para monitorar serviços de rede interna/lab
 
-# Disparo automático de alerta via Webhook (Slack, Teams ou Telegram) em caso de violação
-anhanga check https://example.com \
+targets:
+  - https://cloudflare.com
+  - https://github.com
+  - https://news.ycombinator.com
+
+# Opcional: Webhooks para notificações automáticas de incidentes/expiração TLS
+webhooks:
+  - url: "https://hooks.slack.com/services/T000/B000/X000"
+    provider: "slack"
+  - url: "https://outlook.office.com/webhook/..."
+    provider: "teams"
+  - url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
+    provider: "telegram"
+    telegram_chat_id: "-1001234567890"
+```
+
+---
+
+## 🖥️ Modo CLI para Pipelines de CI/CD (`anhanga check`)
+
+Use o comando `anhanga check` em esteiras de CI/CD (GitHub Actions, GitLab CI, Jenkins, Azure DevOps) para validar Quality Gates de performance e segurança após o deploy:
+
+```bash
+# Verifica se o endpoint atinge nota mínima B e TTFB abaixo de 500ms (com 3 amostras)
+anhanga check https://seudominio.com --min-grade B --max-ttfb 500ms --samples 3
+
+# Define limite também para a latência total (ex: 1.5s)
+anhanga check https://api.seudominio.com --min-grade A --max-ttfb 300ms --max-total 1.5s
+
+# Exporta o resultado em JSON para consumo por scripts da pipeline
+anhanga check https://seudominio.com --min-grade B --format json --output relatorio.json
+
+# Exporta em formato SARIF v2.1.0 para integração com a aba Security (Code Scanning) do GitHub
+anhanga check https://seudominio.com --min-grade A --max-ttfb 400ms --format sarif --output anhanga.sarif
+
+# Envia alerta para Slack, Teams ou Telegram se os Quality Gates falharem
+anhanga check https://seudominio.com \
   --min-grade B \
-  --max-ttfb 400ms \
+  --max-ttfb 500ms \
   --webhook-url "https://hooks.slack.com/services/T000/B000/X000" \
   --webhook-provider slack
 ```
 
 ### Exit Codes da CLI
-| Código | Significado |
+| Exit Code | Condição |
 | :---: | :--- |
-| `0` | Todos os Quality Gates (disponibilidade, nota mínima de segurança e SLOs de latência) foram aprovados. |
-| `1` | Falha nos Quality Gates: alvo offline (`HTTP >= 400`), nota de segurança inferior a `--min-grade` ou latência acima de `--max-ttfb`/`--max-total`. |
-| `2` | Erro de execução ou segurança: parâmetros inválidos, falha de resolução DNS ou bloqueio pelo Guardião Anti-SSRF. |
+| `0` | Alvo online e aprovado em todos os critérios (`--min-grade`, `--max-ttfb`, `--max-total`). |
+| `1` | Falha de Quality Gate: alvo indisponível (`HTTP >= 400`), nota de segurança abaixo de `--min-grade` ou latência acima dos limites. |
+| `2` | Erro de execução/configuração, falha de DNS ou bloqueio pelo Guardião Anti-SSRF. |
 
 ---
 
-## 📊 Observabilidade Prometheus (`/metrics` e `/probe`)
+## 📊 Observabilidade Prometheus e Compatibilidade com `blackbox_exporter`
 
-Exemplo de configuração de *scrape* no `prometheus.yml` (compatível com dashboards do `blackbox_exporter`):
+O Anhangá expõe todas as durações em **segundos** e fornece tanto métricas estendidas (`anhanga_probe_*`) quanto as séries nativas do **`blackbox_exporter`** (`probe_success`, `probe_duration_seconds`, `probe_http_duration_seconds{phase="resolve|connect|tls|processing|transfer"}`, `probe_http_status_code`, `probe_http_ssl`, `probe_ssl_earliest_cert_expiry`), permitindo reaproveitar dashboards Grafana existentes sem alterações.
+
+- **`GET /metrics`**: Retorna as métricas consolidadas dos alvos monitorados via `targets.yaml`.
+- **`GET /probe?target=<url>&samples=3`**: Executa uma sondagem sob demanda no padrão multi-target do Prometheus `blackbox_exporter`.
+
+Exemplo de configuração no `prometheus.yml`:
 
 ```yaml
 scrape_configs:
-  - job_name: "anhanga-edge-probe"
+  - job_name: "anhanga-blackbox"
     metrics_path: /probe
     params:
       samples: ["3"]
@@ -117,14 +165,4 @@ scrape_configs:
         target_label: instance
       - target_label: __address__
         replacement: 127.0.0.1:7890
-```
-
----
-
-## 🧪 Suíte de Testes e Qualidade
-
-Para executar a suíte completa de testes unitários e de integração (`pytest`):
-
-```bash
-pytest -v
 ```

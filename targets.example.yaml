@@ -1,7 +1,18 @@
 interval_seconds: 30
+samples: 3
 allow_private: false
 targets:
   - https://cloudflare.com
   - https://github.com
   - https://news.ycombinator.com
   - https://httpbin.org/delay/1
+
+# Opcional: Disparo automático de alertas quando um alvo monitorado fica indisponível ou com certificado TLS expirando
+# webhooks:
+#   - url: "https://hooks.slack.com/services/T000/B000/X000"
+#     provider: "slack"
+#   - url: "https://outlook.office.com/webhook/..."
+#     provider: "teams"
+#   - url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
+#     provider: "telegram"
+#     telegram_chat_id: "-1001234567890"

@@ -194,6 +194,7 @@
                         <span><span x-text="t('resolvedIp')">IP Resolvido</span>: <strong class="font-mono text-zinc-100" x-text="result?.resolved_ip || 'N/D'"></strong></span>
                         <span>•</span>
                         <span><span x-text="t('httpProtocol')">Protocolo HTTP</span>: <strong class="font-mono text-zinc-100" x-text="result?.http_version || 'N/D'"></strong></span>
+                        <span x-show="result?.http_port_80_status">• Porta 80: <strong class="font-mono text-zinc-100" x-text="result?.http_port_80_status"></strong></span>
                         <span>•</span>
                         <span><span x-text="t('payloadRead')">Payload Lido</span>: <strong class="font-mono text-zinc-100" x-text="(result?.payload_bytes || 0) + ' B'"></strong></span>
                         <span x-show="result?.redirect_hops > 0">• <span x-text="t('redirectsCount')">Redirecionamentos</span>: <strong class="font-mono text-amber-200" x-text="result?.redirect_hops"></strong></span>
@@ -263,6 +264,38 @@
                 </div>
             </div>
 
+            <!-- Alerta de Falha de Modo Comum no Provedor / DNS -->
+            <div x-show="result?.common_mode_failure_warning" x-cloak
+                 class="p-4 rounded-xl bg-red-950/90 border border-red-500/80 text-red-200 text-xs flex items-center gap-3 shadow-lg">
+                <span class="text-lg">⚠️</span>
+                <div>
+                    <strong class="font-bold block text-sm">Alerta de Falha de Modo Comum no Provedor / DNS:</strong>
+                    <span x-text="result?.common_mode_failure_warning"></span>
+                </div>
+            </div>
+
+            <!-- Content Assertions Result -->
+            <div x-show="result?.assertions" x-cloak
+                 class="p-4 rounded-xl bg-obsidian border text-xs space-y-2"
+                 :class="result?.assertions?.passed ? 'border-emerald-500/60' : 'border-red-500/60 bg-red-950/20'">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="font-bold text-zinc-100">Validação de Asserções de Conteúdo:</span>
+                        <span class="px-2 py-0.5 rounded text-[11px] font-bold uppercase"
+                              :class="result?.assertions?.passed ? 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' : 'bg-red-950/90 text-red-200 border border-red-500/60'"
+                              x-text="result?.assertions?.passed ? 'Todas Aprovadas' : 'Falha Detectada'"></span>
+                    </div>
+                    <span class="font-mono text-[11px] text-zinc-400" x-text="result?.assertions?.passed ? 'Payload íntegro' : (result?.assertions?.failures?.length || 0) + ' falha(s)'"></span>
+                </div>
+                <div x-show="!result?.assertions?.passed && (result?.assertions?.failures || []).length > 0" class="space-y-1 pt-1">
+                    <template x-for="failMsg in (result?.assertions?.failures || [])" :key="failMsg">
+                        <div class="text-red-300 font-mono text-[11px] flex items-center gap-1.5">
+                            <span>✖</span> <span x-text="failMsg"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
             <!-- 1. HERO KPIs PRINCIPAIS NO TOPO DO DASHBOARD (Nota de Segurança & Latência Total) -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
@@ -326,17 +359,17 @@
                 <div class="bg-surface border border-bordercolor rounded-2xl p-6 flex flex-col justify-between gap-5 shadow-xl relative overflow-hidden">
                     <div class="flex items-start justify-between gap-4">
                         <div class="space-y-1">
-                            <span class="text-xs font-bold uppercase tracking-wider text-zinc-300" x-text="t('heroLatencyTitle')">Latência Total de Ponta a Ponta</span>
+                            <span class="text-xs font-bold uppercase tracking-wider text-zinc-300" x-text="result?.sampling?.headline_label || t('heroLatencyTitle')">Latência Mediana (P50)</span>
                             <div class="flex items-baseline gap-2.5">
-                                <span class="text-3xl sm:text-4xl font-extrabold font-mono text-white" x-text="(result?.timings?.total_ms ?? 0) + ' ms'"></span>
+                                <span class="text-3xl sm:text-4xl font-extrabold font-mono text-white whitespace-nowrap" x-text="(result?.sampling?.headline_total_ms ?? result?.sampling?.p50_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></span>
                                 <span class="text-xs text-zinc-300" x-show="result?.timings?.dominant_phase">
                                     (<span x-text="t('bottleneckLabel')">Gargalo</span>: <strong class="text-amber-200 font-semibold" x-text="formatPhaseName(result?.timings?.dominant_phase)"></strong>)
                                 </span>
                             </div>
                             <p class="text-xs text-zinc-300">
-                                <span x-text="t('coldConnLabel')">Conexão Fria</span>: <strong class="font-mono text-zinc-100" x-text="(result?.sampling?.cold_total_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                                <span x-text="t('coldConnLabel')">Conexão Fria (1ª)</span>: <strong class="font-mono text-zinc-100 whitespace-nowrap" x-text="(result?.sampling?.cold_total_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
                                 <template x-if="result?.sampling?.warm_avg_total_ms !== null && result?.sampling?.warm_avg_total_ms !== undefined">
-                                    <span> | <span x-text="t('warmConnLabel')">Keep-Alive (Reaproveitada)</span>: <strong class="font-mono text-emerald-300" x-text="result.sampling.warm_avg_total_ms + ' ms'"></strong></span>
+                                    <span> | <span x-text="t('warmConnLabel')">Keep-Alive (Reaproveitada)</span>: <strong class="font-mono text-emerald-300 whitespace-nowrap" x-text="result.sampling.warm_avg_total_ms + ' ms'"></strong></span>
                                 </template>
                             </p>
                         </div>
@@ -349,25 +382,36 @@
                         </div>
                     </div>
 
+                    <!-- Decomposição Física: RTT de Rede vs Processamento Servidor -->
+                    <div class="p-2.5 rounded-xl bg-obsidian border border-bordercolor flex flex-wrap items-center justify-between text-xs gap-2">
+                        <span class="text-zinc-300">🌐 RTT Rede: <strong class="font-mono text-cyan-300 whitespace-nowrap" x-text="(result?.timings?.estimated_rtt_ms ?? 0) + ' ms'"></strong></span>
+                        <span class="text-zinc-300">⚙️ Processamento Servidor (TTFB − RTT): <strong class="font-mono text-amber-300 whitespace-nowrap" x-text="(result?.timings?.server_processing_ms ?? 0) + ' ms'"></strong></span>
+                    </div>
+
                     <!-- Mini-cards de Percentis P50 / P95 / P99 / Jitter -->
                     <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
                         <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
                             <span class="text-zinc-300 block">P50 (Mediana)</span>
-                            <strong class="font-mono text-sm text-zinc-100" x-text="(result?.sampling?.p50_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                            <strong class="font-mono text-sm text-zinc-100 whitespace-nowrap" x-text="(result?.sampling?.p50_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
                         </div>
-                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5" :title="result?.sampling?.sample_size_notice || ''">
                             <span class="text-zinc-300 block">P95 (Cauda)</span>
-                            <strong class="font-mono text-sm text-amber-200" x-text="(result?.sampling?.p95_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                            <strong class="font-mono text-sm whitespace-nowrap"
+                                    :class="result?.sampling?.p95_valid ? 'text-amber-200' : 'text-zinc-500'"
+                                    x-text="result?.sampling?.p95_valid ? (result.sampling.p95_ms + ' ms') : 'N/D (n<20)'"></strong>
                         </div>
-                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
+                        <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5" :title="result?.sampling?.sample_size_notice || ''">
                             <span class="text-zinc-300 block">P99 (Extremo)</span>
-                            <strong class="font-mono text-sm text-zinc-100" x-text="(result?.sampling?.p99_ms ?? result?.timings?.total_ms ?? 0) + ' ms'"></strong>
+                            <strong class="font-mono text-sm whitespace-nowrap"
+                                    :class="result?.sampling?.p99_valid ? 'text-zinc-100' : 'text-zinc-500'"
+                                    x-text="result?.sampling?.p99_valid ? (result.sampling.p99_ms + ' ms') : 'N/D (n<100)'"></strong>
                         </div>
                         <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5">
                             <span class="text-zinc-300 block">Jitter (Variação)</span>
-                            <strong class="font-mono text-sm text-sky-300" x-text="(result?.sampling?.jitter_ms ?? 0) + ' ms'"></strong>
+                            <strong class="font-mono text-sm text-sky-300 whitespace-nowrap" x-text="(result?.sampling?.jitter_ms ?? 0) + ' ms'"></strong>
                         </div>
                     </div>
+                    <div x-show="result?.sampling?.sample_size_notice" class="text-[11px] text-zinc-400 italic" x-text="'ℹ️ ' + result?.sampling?.sample_size_notice"></div>
                 </div>
             </div>
 
@@ -742,6 +786,15 @@
                             </div>
 
                             <p class="text-xs text-zinc-200 leading-relaxed" x-text="finding.description"></p>
+
+                            <!-- Alerta de Subdomínios SANs no HSTS -->
+                            <div x-show="(result?.security?.hsts_affected_sans || []).length > 0 && finding.header.includes('Strict-Transport-Security')"
+                                 class="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/50 text-[11px] text-amber-200">
+                                <strong>⚠️ Atenção aos Subdomínios do Certificado (SANs):</strong>
+                                A diretiva <code>includeSubDomains</code> do HSTS forçará HTTPS em todos os subdomínios cobertos pelo certificado:
+                                <span class="font-mono text-zinc-300" x-text="(result?.security?.hsts_affected_sans || []).join(', ')"></span>.
+                                Verifique se todos os subdomínios possuem suporte a HTTPS ativo antes de habilitar em produção.
+                            </div>
 
                             <!-- Etapas Progressivas do HSTS (300s -> 1 semana -> 1 mês -> preload opt-in) -->
                             <div x-show="(finding.progressive_steps || []).length > 0" class="bg-surface border border-bordercolor rounded-xl p-3 space-y-2">
@@ -1123,7 +1176,7 @@
                     { id: 'apache', label: 'Apache' },
                     { id: 'caddy', label: 'Caddy' },
                     { id: 'traefik', label: 'Traefik' },
-                    { id: 'kubernetes', label: 'Ingress do Kubernetes' }
+                    { id: 'kubernetes', label: 'Kubernetes (Gateway API / Ingress)' }
                 ],
 
                 async init() {

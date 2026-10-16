@@ -565,39 +565,6 @@ def _build_parser() -> _NonExitingArgumentParser:
         default=None,
         help="Chat ID opcional para alertas via Telegram Bot API",
     )
-    check_parser.add_argument(
-        "--resolve",
-        action="append",
-        default=None,
-        help="Override de resolução DNS no formato host:port:ip ou host:ip (ex: example.com:443:1.2.3.4)",
-    )
-    check_parser.add_argument(
-        "--fail-if-body-not-matches-regexp",
-        default=None,
-        help="Falha se o corpo da resposta não casar com a expressão regular",
-    )
-    check_parser.add_argument(
-        "--fail-if-body-matches-regexp",
-        default=None,
-        help="Falha se o corpo da resposta casar com a expressão regular",
-    )
-    check_parser.add_argument(
-        "--min-payload-bytes",
-        type=int,
-        default=None,
-        help="Tamanho mínimo em bytes esperado no corpo da resposta",
-    )
-    check_parser.add_argument(
-        "--max-payload-bytes",
-        type=int,
-        default=None,
-        help="Tamanho máximo em bytes esperado no corpo da resposta",
-    )
-    check_parser.add_argument(
-        "--assert-final-url",
-        default=None,
-        help="URL final esperada após redirecionamentos",
-    )
 
     serve_parser = subparsers.add_parser(
         "serve",
@@ -790,7 +757,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             return await _run_check_async(parsed_args)
         else:
             parser.print_help(sys.stderr)
-            return 3
+            return 2
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
         return 3
@@ -806,13 +773,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not raw_args:
         parser.print_help(sys.stderr)
-        return 3
+        return 2
 
     try:
         parsed_args = parser.parse_args(raw_args)
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
-        return 3
+        return 2
     except SystemExit as sys_exit:
         code = sys_exit.code
         return int(code) if isinstance(code, int) else 0
@@ -832,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run_check_async(parsed_args))
     else:
         parser.print_help(sys.stderr)
-        return 3
+        return 2
 
 
 if __name__ == "__main__":

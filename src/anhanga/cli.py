@@ -510,6 +510,37 @@ def _build_parser() -> _NonExitingArgumentParser:
         default=None,
         help="Chat ID opcional para alertas via Telegram Bot API",
     )
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Inicia o servidor Web e a API FastAPI do Anhangá",
+    )
+    serve_parser.add_argument(
+        "--host",
+        "-H",
+        default="127.0.0.1",
+        help="Endereço IP/host de escuta do servidor (default: 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=7890,
+        help="Porta TCP do servidor (default: 7890)",
+    )
+    serve_parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=False,
+        help="Ativa hot-reload automático para desenvolvimento",
+    )
+    serve_parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=1,
+        help="Quantidade de processos workers (default: 1)",
+    )
     return parser
 
 
@@ -609,6 +640,26 @@ async def _run_check_async(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _run_serve(args: argparse.Namespace) -> int:
+    """Executa o servidor web e API do Anhangá via uvicorn."""
+    import uvicorn
+
+    try:
+        uvicorn.run(
+            "anhanga.main:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            workers=args.workers if not args.reload else None,
+        )
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"Erro ao iniciar servidor Anhangá: {exc}", file=sys.stderr)
+        return 1
+
+
 async def async_main(argv: list[str] | None = None) -> int:
     """Versão assíncrona do entrypoint principal da CLI do Anhangá."""
     raw_args = list(sys.argv[1:] if argv is None else argv)
@@ -620,11 +671,14 @@ async def async_main(argv: list[str] | None = None) -> int:
             return 2
 
         parsed_args = parser.parse_args(raw_args)
-        if parsed_args.command != "check":
+        if parsed_args.command == "serve":
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, _run_serve, parsed_args)
+        elif parsed_args.command == "check":
+            return await _run_check_async(parsed_args)
+        else:
             parser.print_help(sys.stderr)
             return 2
-
-        return await _run_check_async(parsed_args)
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
         return 2
@@ -635,16 +689,38 @@ async def async_main(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Entrypoint principal da CLI do Anhangá."""
-    try:
-        asyncio.get_running_loop()
-        loop_running = True
-    except RuntimeError:
-        loop_running = False
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    parser = _build_parser()
 
-    if loop_running:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(async_main(argv))).result()
-    return asyncio.run(async_main(argv))
+    if not raw_args:
+        parser.print_help(sys.stderr)
+        return 2
+
+    try:
+        parsed_args = parser.parse_args(raw_args)
+    except CLIArgumentError as arg_err:
+        print(f"Erro de argumento: {arg_err}", file=sys.stderr)
+        return 2
+    except SystemExit as sys_exit:
+        code = sys_exit.code
+        return int(code) if isinstance(code, int) else 0
+
+    if parsed_args.command == "serve":
+        return _run_serve(parsed_args)
+    elif parsed_args.command == "check":
+        try:
+            asyncio.get_running_loop()
+            loop_running = True
+        except RuntimeError:
+            loop_running = False
+
+        if loop_running:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(lambda: asyncio.run(_run_check_async(parsed_args))).result()
+        return asyncio.run(_run_check_async(parsed_args))
+    else:
+        parser.print_help(sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

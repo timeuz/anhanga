@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anhanga"
-version = "0.1.0"
+version = "0.2.0"
 description = "Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,12 @@ dependencies = [
     "jinja2>=3.1.4",
     "pyyaml>=6.0.2",
     "rich>=13.8.0", # Para deixar a CLI bonita no terminal
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [project.scripts]

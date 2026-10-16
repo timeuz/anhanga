@@ -1,5 +1,7 @@
 import asyncio
+import ipaddress
 import math
+import re
 import socket
 import ssl
 import statistics
@@ -29,9 +31,13 @@ from anhanga.engine.security import (
     parse_tls_certificate,
 )
 
+ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+DEFAULT_MAX_BODY_BYTES: int = 2_097_152  # 2 MiB
+ABSOLUTE_MAX_BODY_BYTES: int = 5_242_880  # 5 MiB
+
 
 class SSRFBlockedError(Exception):
-    """Exceção disparada quando um host resolve para IP privado ou restrito."""
+    """Exceção disparada quando um host ou esquema viola a política Anti-SSRF."""
 
     def __init__(self, ip: str, message: str) -> None:
         super().__init__(message)
@@ -140,6 +146,11 @@ class InstrumentedPinnedNetworkBackend(AsyncNetworkBackend):
         timeout: float | None = None,
         socket_options: typing.Iterable[SOCKET_OPTION] | None = None,
     ) -> AsyncNetworkStream:
+        if not self.allow_private:
+            raise SSRFBlockedError(
+                path,
+                "Bloqueado pelo Guardião Anti-SSRF: conexões Unix Socket não são permitidas.",
+            )
         stream = await self._inner.connect_unix_socket(
             path, timeout=timeout, socket_options=socket_options
         )
@@ -150,16 +161,43 @@ class InstrumentedPinnedNetworkBackend(AsyncNetworkBackend):
 
 
 async def resolve_and_validate_host(
-    host: str, port: int, allow_private: bool = False
+    host: str,
+    port: int,
+    allow_private: bool = False,
+    dns_timeout: float = 3.0,
 ) -> tuple[str, float]:
     """
-    Resolve o hostname via getaddrinfo (IPv4/IPv6), mede dns_ms real e valida
-    TODOS os endereços retornados contra a política Anti-SSRF.
+    Resolve o hostname via getaddrinfo (IPv4/IPv6) uma única vez com timeout próprio,
+    mede dns_ms real e valida TODOS os endereços retornados contra a política Anti-SSRF.
     """
+    clean_host = host.strip()
+    if clean_host.startswith("[") and clean_host.endswith("]"):
+        clean_host = clean_host[1:-1].strip()
+
+    if "%" in clean_host and not allow_private:
+        raise SSRFBlockedError(
+            clean_host,
+            f"Bloqueado pelo Guardião Anti-SSRF: zona IPv6 não permitida ({clean_host}).",
+        )
+
+    # Se já for literal de IP, valida antes mesmo de invocar o resolvedor
+    try:
+        ipaddress.ip_address(clean_host.split("%", 1)[0])
+        if not is_ssrf_safe(clean_host, allow_private):
+            raise SSRFBlockedError(
+                clean_host,
+                f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({clean_host}).",
+            )
+    except ValueError:
+        pass
+
     loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
-    addr_info = await loop.getaddrinfo(
-        host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+    addr_info = await asyncio.wait_for(
+        loop.getaddrinfo(
+            clean_host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+        ),
+        timeout=max(0.5, dns_timeout),
     )
     dns_ms = round((time.perf_counter() - t0) * 1000, 2)
 
@@ -360,10 +398,18 @@ async def _run_probe_session(
     resolved_ip: str | None = None
     last_dns_timings = TimingBreakdown()
 
+    step_timeout = httpx.Timeout(
+        timeout=timeout,
+        connect=min(timeout, 5.0),
+        read=timeout,
+        write=min(timeout, 5.0),
+        pool=min(timeout, 5.0),
+    )
+
     async with httpx.AsyncClient(
         transport=transport,
         follow_redirects=False,
-        timeout=timeout,
+        timeout=step_timeout,
         headers=headers,
     ) as client:
         # 1. Seguir cadeia de redirects manualmente (Amostra 1 / Fria)
@@ -374,18 +420,30 @@ async def _run_probe_session(
 
         for hop_num in range(1, max_redirects + 2):
             parsed = urlparse(current_url)
+            scheme = parsed.scheme.lower()
+            if scheme not in ALLOWED_SCHEMES:
+                return ProbeResult(
+                    target_url=initial_url,
+                    final_url=current_url,
+                    redirect_hops=len(redirect_chain),
+                    redirect_chain=redirect_chain,
+                    error=f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+                )
+
             host = parsed.hostname
             if not host:
                 return ProbeResult(
                     target_url=initial_url,
                     error="URL inválida: hostname não encontrado.",
                 )
-            scheme = parsed.scheme.lower()
             port = parsed.port or (443 if scheme == "https" else 80)
 
             try:
                 hop_ip, dns_ms = await resolve_and_validate_host(
-                    host, port, allow_private=allow_private
+                    host,
+                    port,
+                    allow_private=allow_private,
+                    dns_timeout=min(timeout, 3.0),
                 )
                 resolved_ip = hop_ip
                 backend.pinned_ips[host.lower()] = hop_ip
@@ -443,8 +501,21 @@ async def _run_probe_session(
                         error=f"Limite máximo de redirecionamentos ({max_redirects}) excedido.",
                     )
 
-                raw_location = resp.headers["location"]
+                raw_location = resp.headers["location"].strip()
                 next_url = str(resp.url.join(raw_location))
+                next_parsed = urlparse(next_url)
+                next_scheme = next_parsed.scheme.lower()
+                if next_scheme not in ALLOWED_SCHEMES:
+                    return ProbeResult(
+                        target_url=initial_url,
+                        final_url=next_url,
+                        resolved_ip=resolved_ip,
+                        redirect_hops=len(redirect_chain),
+                        redirect_chain=redirect_chain,
+                        timings=step_timings,
+                        error=f"Bloqueado pelo Guardião Anti-SSRF: redirecionamento para esquema proibido ('{next_scheme}').",
+                    )
+
                 redirect_chain.append(
                     RedirectHop(
                         hop=hop_num,
@@ -564,39 +635,88 @@ async def _run_probe_session(
         )
 
 
+def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
+    """
+    Normaliza a URL garantindo que esquemas proibidos (file://, gopher://, ftp://, etc.)
+    sejam bloqueados imediatamente, antes de qualquer resolução ou auto-prefixo https://.
+    """
+    url = raw_url.strip()
+    if not url:
+        return url, "URL inválida: vazia."
+
+    if "://" in url:
+        scheme = url.split("://", 1)[0].strip().lower()
+        if scheme not in ALLOWED_SCHEMES:
+            return (
+                url,
+                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+            )
+        return url, None
+
+    # Detecta esquemas sem '://' como javascript:, data:, file:, mailto:, etc.
+    # (Cuidado para não confundir 'localhost:8080' ou '[::1]:8080' com esquema)
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$", url)
+    if m:
+        candidate_scheme = m.group(1).lower()
+        rest = m.group(2)
+        if candidate_scheme not in ALLOWED_SCHEMES and not re.match(r"^\d+(/.*)?$", rest):
+            return (
+                url,
+                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{candidate_scheme}' não permitido (apenas http/https).",
+            )
+
+    return f"https://{url}", None
+
+
 async def execute_probe(
     raw_url: str,
     timeout: float = 5.0,
     allow_private: bool = False,
     samples: int = 1,
-    max_body_bytes: int = 2_097_152,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
 ) -> ProbeResult:
-    url = raw_url.strip()
-    if not url.startswith(("http://", "https://")):
-        url = f"https://{url}"
+    url, scheme_err = _normalize_and_validate_scheme(raw_url)
+    if scheme_err:
+        return ProbeResult(target_url=raw_url.strip() or raw_url, error=scheme_err)
 
     parsed = urlparse(url)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        return ProbeResult(
+            target_url=url,
+            error=f"Bloqueado pelo Guardião Anti-SSRF: esquema '{parsed.scheme}' não permitido.",
+        )
     if not parsed.hostname:
         return ProbeResult(
             target_url=url, error="URL inválida: hostname não encontrado."
         )
 
+    timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
+    max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
+    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 2.0, timeout + 1.5))
 
     try:
-        return await _run_probe_session(
-            initial_url=url,
-            timeout=timeout,
-            allow_private=allow_private,
-            samples=samples,
-            max_body_bytes=max_body_bytes,
-            verify_ssl=True,
+        return await asyncio.wait_for(
+            _run_probe_session(
+                initial_url=url,
+                timeout=timeout,
+                allow_private=allow_private,
+                samples=samples,
+                max_body_bytes=max_body_bytes,
+                verify_ssl=True,
+            ),
+            timeout=overall_timeout,
         )
     except SSRFBlockedError as ssrf_err:
         return ProbeResult(
             target_url=url,
             resolved_ip=ssrf_err.ip,
             error=str(ssrf_err),
+        )
+    except (asyncio.TimeoutError, httpx.TimeoutException) as timeout_err:
+        return ProbeResult(
+            target_url=url,
+            error=f"Timeout rígido excedido ({timeout}s): {timeout_err or 'limite de tempo esgotado'}",
         )
     except Exception as exc:
         # Se a falha foi causada por erro de verificação de certificado SSL (ex: self-signed ou expirado),
@@ -608,13 +728,16 @@ async def execute_probe(
         )
         if is_ssl_verify_err:
             try:
-                return await _run_probe_session(
-                    initial_url=url,
-                    timeout=timeout,
-                    allow_private=allow_private,
-                    samples=samples,
-                    max_body_bytes=max_body_bytes,
-                    verify_ssl=False,
+                return await asyncio.wait_for(
+                    _run_probe_session(
+                        initial_url=url,
+                        timeout=timeout,
+                        allow_private=allow_private,
+                        samples=samples,
+                        max_body_bytes=max_body_bytes,
+                        verify_ssl=False,
+                    ),
+                    timeout=overall_timeout,
                 )
             except Exception as inner_exc:
                 return ProbeResult(

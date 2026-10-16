@@ -1,3 +1,4 @@
+import html
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -250,20 +251,24 @@ def build_telegram_payload(
     else:
         badge = "🟢 ONLINE"
 
-    tls_status = _format_tls_status(result)
+    tls_str = html.escape(_format_tls_status(result))
+    target_url_escaped = html.escape(str(result.target_url))
+    http_ver_escaped = html.escape(str(result.http_version or "N/A"))
+    grade_escaped = html.escape(str(result.security.grade))
+
     lines = [
         f"<b>🔥 Anhangá SRE Alert — {badge}</b>",
-        f"<b>Alvo:</b> <code>{result.target_url}</code>",
-        f"<b>HTTP Status:</b> {result.status_code or 'ERR'} ({result.http_version or 'N/A'})",
+        f"<b>Alvo:</b> <code>{target_url_escaped}</code>",
+        f"<b>HTTP Status:</b> {result.status_code or 'ERR'} ({http_ver_escaped})",
         f"<b>Latência Total:</b> {result.timings.total_ms:.2f} ms",
         f"<b>TTFB:</b> {result.timings.ttfb_ms:.2f} ms",
-        f"<b>Nota de Segurança:</b> {result.security.grade} ({result.security.score}/100)",
-        f"<b>Status TLS:</b> {tls_status}",
+        f"<b>Nota de Segurança:</b> {grade_escaped} ({result.security.score}/100)",
+        f"<b>Status TLS:</b> {tls_str}",
     ]
     if all_violations:
         lines.append("<b>Violações:</b>")
         for v in all_violations:
-            lines.append(f"• {v}")
+            lines.append(f"• {html.escape(str(v))}")
 
     return {
         "chat_id": chat_id or "",

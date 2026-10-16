@@ -256,12 +256,23 @@ class SlidingWindowRateLimiter:
         now = time.monotonic()
         cutoff = now - self.window_seconds
         key = (client_ip or "unknown").strip()
-        q = self._hits.setdefault(key, deque())
-        while q and q[0] <= cutoff:
-            q.popleft()
+
+        for k, existing_q in list(self._hits.items()):
+            while existing_q and existing_q[0] <= cutoff:
+                existing_q.popleft()
+            if not existing_q:
+                del self._hits[k]
+
+        q = self._hits.get(key)
+        if q is None:
+            q = deque()
+            self._hits[key] = q
 
         limit = self.max_requests
         if len(q) >= limit:
+            if not q:
+                self._hits.pop(key, None)
+                return False, 1
             retry_after = max(1, int(self.window_seconds - (now - q[0])) + 1)
             return False, retry_after
 

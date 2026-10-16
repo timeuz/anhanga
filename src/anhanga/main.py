@@ -19,11 +19,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("anhanga")
 
-# Cache em memória dos últimos resultados para alimentar a UI instantaneamente
+# Cache em memória dos últimos resultados e série histórica de latências para alimentar a UI
 STATE_CACHE: dict[str, ProbeResult] = {}
+HISTORY_CACHE: dict[str, list[float]] = {}
+MAX_HISTORY_POINTS = 30
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+
+
+def _update_state_and_history(result: ProbeResult) -> ProbeResult:
+    """Atualiza o cache de estado e a série histórica de latências (sparkline) do alvo."""
+    key = result.target_url
+    history = HISTORY_CACHE.setdefault(key, [])
+    if result.sampling and result.sampling.raw_samples and len(result.sampling.raw_samples) > 1:
+        for sample in result.sampling.raw_samples:
+            if sample.timings.total_ms > 0:
+                history.append(sample.timings.total_ms)
+    elif result.timings.total_ms > 0:
+        history.append(result.timings.total_ms)
+
+    if len(history) > MAX_HISTORY_POINTS:
+        del history[:-MAX_HISTORY_POINTS]
+
+    result.history_ms = list(history)
+    STATE_CACHE[key] = result
+    return result
 
 
 def load_targets_config() -> dict:
@@ -57,6 +78,7 @@ async def background_guardian_loop():
     targets: list[str] = config.get("targets", [])
     interval: int = config.get("interval_seconds", 60)
     allow_private: bool = config.get("allow_private", False)
+    samples: int = config.get("samples", 1)
 
     if not targets:
         logger.info("Nenhum targets.yaml detectado. Operando apenas em modo On-Demand/API.")
@@ -66,12 +88,15 @@ async def background_guardian_loop():
     while True:
         try:
             # Dispara todas as sondas em paralelo no event loop
-            tasks = [execute_probe(url, allow_private=allow_private) for url in targets]
+            tasks = [
+                execute_probe(url, allow_private=allow_private, samples=samples)
+                for url in targets
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for res in results:
                 if isinstance(res, ProbeResult):
-                    STATE_CACHE[res.target_url] = res
+                    _update_state_and_history(res)
                     record_probe_metrics(res)
         except asyncio.CancelledError:
             logger.info("Desligando loop de vigilância do Anhangá.")
@@ -109,15 +134,18 @@ async def healthcheck():
 async def api_scan_url(
     url: str = Query(..., description="URL ou hostname alvo para inspeção profunda"),
     timeout: float = Query(5.0, ge=1.0, le=30.0),
+    samples: int = Query(1, ge=1, le=20, description="Quantidade de amostras para cálculo de P50/P95/P99 e Jitter"),
     allow_private: bool = Query(False, description="Permite IPs de rede interna (Lab/Infra)"),
     record_metrics: bool = Query(False, description="Se True, grava no /metrics do Prometheus"),
 ):
-    """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB e Security Headers."""
+    """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects e Security Headers."""
     if not url.strip():
         raise HTTPException(status_code=400, detail="O parâmetro 'url' é obrigatório.")
 
-    result = await execute_probe(url, timeout=timeout, allow_private=allow_private)
-    STATE_CACHE[result.target_url] = result
+    result = await execute_probe(
+        url, timeout=timeout, allow_private=allow_private, samples=samples
+    )
+    _update_state_and_history(result)
 
     # Evita alta cardinalidade por padrão em scans avulsos
     if record_metrics:
@@ -143,9 +171,11 @@ async def prometheus_metrics():
 async def blackbox_compatible_probe(
     target: str = Query(..., description="URL alvo no estilo Blackbox Exporter"),
     allow_private: bool = Query(False),
+    samples: int = Query(1, ge=1, le=20),
 ):
     """Compatível com relabel_configs do Prometheus Blackbox Exporter."""
-    result = await execute_probe(target, allow_private=allow_private)
+    result = await execute_probe(target, allow_private=allow_private, samples=samples)
+    _update_state_and_history(result)
     record_probe_metrics(result)
     payload, content_type = render_prometheus_metrics()
     return Response(content=payload, media_type=content_type)

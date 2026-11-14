@@ -156,7 +156,8 @@ async def _scan_version(
             ciphers.append(c)
             excluded.append(c)
     res.ciphers = ciphers
-    res.ciphers_complete = complete
+    # TLS 1.3: as suítes não são selecionáveis por exclusão (Python não expõe set_ciphersuites): só a negociada é listada.
+    res.ciphers_complete = complete and version != ssl.TLSVersion.TLSv1_3
     res.weak_ciphers = [c for c in ciphers if classify_cipher(c)[0]]
     res.no_forward_secrecy = [c for c in ciphers if classify_cipher(c)[1] and not classify_cipher(c)[0]]
     return res
@@ -180,7 +181,9 @@ async def enumerate_tls(
         TLSProtocolResult(protocol="SSLv3", status="untestable"),
         TLSProtocolResult(protocol="SSLv2", status="untestable"),
     ]
-    out = TLSEnumeration(protocols=protocols, tested_at=time.time())
+    out = TLSEnumeration(
+        protocols=protocols, tested_at=time.time(), legacy_ciphers_untested=not local_ciphers_complete()
+    )
     # Só cacheia resultado conclusivo: com algum `unknown` nas versões testáveis, tenta de novo no ciclo seguinte.
     if all(p.status != "unknown" for p in results):
         if len(_cache) > 512:

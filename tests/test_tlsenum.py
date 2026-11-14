@@ -255,3 +255,33 @@ def test_local_ciphers_complete_needs_both_rc4_and_3des(monkeypatch, names, fail
     finally:
         monkeypatch.undo()
         tlsenum.local_ciphers_complete.cache_clear()
+
+
+# ---- honestidade de cobertura (validação com testssl.sh: TLS 1.3 tem 3 suítes, RC4/3DES invisíveis ao OpenSSL local) ----------------
+def test_tls13_cipher_list_is_never_claimed_complete(server):
+    e = scan(server("-tls1_3"))
+    assert e.get("TLSv1.3").ciphers_complete is False  # só a suíte negociada: as outras não são selecionáveis por exclusão
+
+
+def test_tls12_list_by_exclusion_is_still_complete(server):
+    e = scan(server("-tls1_2"))
+    assert e.get("TLSv1.2").ciphers_complete is True
+
+
+@pytest.mark.parametrize("local_complete", [True, False])
+def test_enumeration_flags_untested_legacy_ciphers(server, monkeypatch, local_complete):
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: local_complete)
+    e = scan(server("-tls1_2"))
+    assert e.legacy_ciphers_untested is (not local_complete)
+
+
+def test_cli_text_warns_when_legacy_ciphers_were_not_testable():
+    from anhanga.cli import _protocols_text
+
+    enum = TLSEnumeration(
+        protocols=[TLSProtocolResult(protocol="TLSv1.2", status="accepted", ciphers=["ECDHE-RSA-AES128-GCM-SHA256"])],
+        legacy_ciphers_untested=True,
+    )
+    assert "RC4/3DES não testáveis" in _protocols_text(TLSInspection(enumeration=enum))
+    enum.legacy_ciphers_untested = False
+    assert "RC4/3DES" not in _protocols_text(TLSInspection(enumeration=enum))

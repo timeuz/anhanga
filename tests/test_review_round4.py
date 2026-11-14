@@ -151,3 +151,21 @@ def test_not_evaluated_assertion_logs_a_warning(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="anhanga.probe"):
         asyncio.run(P._evaluate_content_assertions("body", 4, "https://x/", fail_if_body_not_matches_regexp="a"))
     assert any("não avaliada" in r.message for r in caplog.records)
+
+
+# ---- 8. TimeoutError() sem texto é truthy: a mensagem não pode terminar vazia ("(19.0s): ") ------------------------------
+def test_timeout_message_never_ends_with_an_empty_reason(monkeypatch):
+    async def hang(**kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(P, "_run_probe_session", hang)
+    monkeypatch.setattr(P, "_normalize_and_validate_scheme", lambda u: (u, None))
+    orig = asyncio.wait_for
+
+    async def fast_wait_for(aw, timeout):
+        return await orig(aw, timeout=0.05)
+
+    monkeypatch.setattr(P.asyncio, "wait_for", fast_wait_for)
+    r = asyncio.run(P.execute_probe("https://hang.test/", timeout=0.5))
+    assert not r.error.rstrip().endswith(":"), repr(r.error)
+    assert "limite de tempo esgotado" in r.error

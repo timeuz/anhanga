@@ -60,6 +60,20 @@ class _TargetState:
     problems: dict[str, _ProblemState] = field(default_factory=dict)
 
 
+def effective_ttfb_ms(result: ProbeResult) -> float:
+    """TTFB que vale para o SLO: mediana das amostras quando há mais de uma (o TTFB frio em HTTP/2 é inflado),
+    senão a medida única. Monitor e CLI usam a mesma, para o mesmo limite dar o mesmo veredicto."""
+    stats = result.sampling.phase_stats.get("ttfb") if result.sampling else None
+    return stats.p50_ms if stats and result.sampling.samples_count > 1 else result.timings.ttfb_ms
+
+
+def effective_total_ms(result: ProbeResult) -> float:
+    """Latência total que vale para o SLO (a "manchete" das amostras quando existe)."""
+    if result.sampling and result.sampling.headline_total_ms > 0:
+        return result.sampling.headline_total_ms
+    return result.timings.total_ms
+
+
 def detect_problems(result: ProbeResult, rules: SLORules) -> dict[str, str]:
     """Problemas observáveis NESTE ciclo (chave -> mensagem). Só inclui chaves avaliáveis:
     sem resposta do alvo, apenas `down` é avaliado (SLO/TLS/nota não existem sem medição)."""
@@ -82,17 +96,11 @@ def detect_problems(result: ProbeResult, rules: SLORules) -> dict[str, str]:
         problems["tls_expiring"] = f"Certificado TLS expira em {result.tls.days_remaining} dias"
 
     if rules.max_ttfb_ms is not None:
-        ttfb_stats = result.sampling.phase_stats.get("ttfb") if result.sampling else None
-        # Mediana das amostras quando existem (o TTFB frio em HTTP/2 é inflado), senão a medida única.
-        ttfb = ttfb_stats.p50_ms if ttfb_stats and result.sampling.samples_count > 1 else result.timings.ttfb_ms
+        ttfb = effective_ttfb_ms(result)
         if ttfb > rules.max_ttfb_ms:
             problems["slo_ttfb"] = f"TTFB {ttfb:.0f} ms excede o SLO de {rules.max_ttfb_ms:.0f} ms"
     if rules.max_total_ms is not None:
-        total = (
-            result.sampling.headline_total_ms
-            if result.sampling and result.sampling.headline_total_ms > 0
-            else result.timings.total_ms
-        )
+        total = effective_total_ms(result)
         if total > rules.max_total_ms:
             problems["slo_total"] = f"Latência total {total:.0f} ms excede o SLO de {rules.max_total_ms:.0f} ms"
     if rules.min_grade is not None:

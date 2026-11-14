@@ -463,3 +463,17 @@ use o `testssl.sh` ao lado.
   6 ou 47 dias não ficam mais "expirando" o tempo todo; de 90 dias ou mais, o limiar continua 15 dias.
 - **`POST /api/v1/webhooks/notify`:** `provider` e `chat_id` vêm do `targets.yaml`. Um `chat_id` ou `provider` diferente
   no corpo é recusado (400): quem tem a chave da API não escolhe o chat de destino do bot.
+
+## 🔁 Correções da 2ª revisão da `main` (lote D)
+
+- **Cache da enumeração TLS:** resultado com algum `unknown` (alvo que descarta o ClientHello, alerta de SNI/mTLS) fica em
+  cache por **15 min** (conclusivo: 6 h). Antes, nunca era cacheado e um scan de dezenas de handshakes se repetia a cada 2 min.
+- **Falha em modo comum:** só conectividade conta (DNS, timeout, conexão); 5xx ou asserção reprovada (a aplicação respondeu)
+  não acusa mais "resolvedor da sonda", e uma queda real de DNS/rede agora dispara o aviso (antes era o contrário).
+- **`.env` só no servidor:** `import anhanga` e `anhanga check` não leem mais o `.env` do diretório (um `.env` de outra
+  aplicação injetaria `HTTP_PROXY` etc.). O servidor (`anhanga serve`/`uvicorn anhanga.main:app`) o carrega, e a regex de
+  cookies sensíveis passou a ser lida sob demanda, então o `.env` vale mesmo com o motor já importado.
+- **Gates do CLI = SLO do monitor:** `--max-ttfb` usa a mediana das amostras e `--max-total` a latência "manchete" (mesma
+  função do monitor), em vez da amostra fria única, inflada em HTTP/2.
+- **SARIF:** a regra vem do prefixo da violação e do código de saída (3 = DNS/SSRF), não de substrings soltas.
+- **CLI:** removido código morto (`--resolve` e flags de asserção de conteúdo que o parser nunca definiu).

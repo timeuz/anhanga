@@ -19,6 +19,7 @@ from anhanga import __version__
 from anhanga.engine.alerting import AlertEvent, AlertManager, Evaluation
 from anhanga.engine.config import MonitorConfig, WebhookSpec, find_config_path, load_config
 from anhanga.engine.models import ProbeResult
+from anhanga.engine import revocation, tlsenum
 from anhanga.engine.probe import (
     ABSOLUTE_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES,
@@ -27,7 +28,7 @@ from anhanga.engine.probe import (
     _normalize_and_validate_scheme,
     execute_probe,
 )
-from anhanga.engine.security import RATE_LIMITER
+from anhanga.engine.security import RATE_LIMITER, cancel_extras_background
 from anhanga.engine.webhooks import send_webhook_alert
 from anhanga.storage import Store, webhook_key
 from anhanga.metrics.exporter import (
@@ -485,6 +486,9 @@ async def lifespan(app: FastAPI):
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+    revocation.cancel_background()
+    tlsenum.cancel_background()
+    cancel_extras_background()
     # Entregas em voo: dá uma janela para concluir; as que não acabarem são canceladas e se salvam na
     # outbox (ver `_deliver_event`) ANTES de o banco fechar.
     pending = [t for t in _BACKGROUND_TASKS if not t.done()]

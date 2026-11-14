@@ -136,8 +136,8 @@ def test_invalid_operator_regex_does_not_break_import():
 
 
 def test_valid_operator_regex_is_used():
-    assert S._compile_sensitive_cookie_regex("^mycookie$").search("MYCOOKIE")
-    assert not S._compile_sensitive_cookie_regex("^mycookie$").search("sessionid")
+    rx, custom = S._compile_sensitive_cookie_regex("^mycookie$")
+    assert custom and rx.search("MYCOOKIE") and not rx.search("sessionid")
 
 
 # ---- 4. classificação de erros por marcador, não por substring --------------------------------------------------

@@ -337,6 +337,7 @@ async def _evaluate_content_assertions(
     assert_final_url: str | None = None,
 ) -> ContentAssertionsResult:
     failures: list[str] = []
+    not_evaluated: list[str] = []
 
     for field, pattern, must_match in (
         ("fail_if_body_not_matches_regexp", fail_if_body_not_matches_regexp, True),
@@ -346,9 +347,11 @@ async def _evaluate_content_assertions(
             continue
         status, value = await _regex_search(pattern, body_text)
         if status == "unavailable":
-            failures.append(
-                f"Avaliador de regex indisponível em {field} ({value}); o padrão não foi avaliado "
-                "(falha do Anhangá, não do padrão)"
+            # Falha do monitor, não do alvo: registra como "não avaliado" (visível) sem reprovar a asserção,
+            # senão um problema de fork/arquivo derrubaria e alertaria TODOS os alvos com regex ao mesmo tempo.
+            not_evaluated.append(
+                f"{field}: avaliador de regex indisponível ({value}); o padrão não foi avaliado "
+                "(falha do Anhangá, não do alvo)"
             )
         elif status == "invalid":
             failures.append(f"Regexp inválida em {field}: {value}")
@@ -376,7 +379,7 @@ async def _evaluate_content_assertions(
             f"URL final obtida ('{final_url}') diverge da URL esperada ('{assert_final_url}')"
         )
 
-    return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures)
+    return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures, not_evaluated=not_evaluated)
 
 
 async def resolve_and_validate_host(
@@ -1108,7 +1111,7 @@ def _failure_result(url: str, exc: BaseException, timeout: float) -> ProbeResult
     if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({timeout}s): {exc or 'limite de tempo esgotado'}",
+            error=f"Timeout rígido excedido ({timeout:.1f}s): {exc or 'limite de tempo esgotado'}",
         )
     return None
 
@@ -1293,6 +1296,17 @@ async def execute_probe(
             verify_reason = (
                 reason_match.group(1).strip() if reason_match else "falha na verificação do certificado"
             )
+            # prazo RESTANTE do total (o retry não pode dobrar o tempo máximo da requisição). Sem folga
+            # suficiente nem tenta, em vez de forçar um piso que estoura o prazo global.
+            remaining = overall_timeout - (time.monotonic() - started)
+            if remaining < 1.0:
+                return ProbeResult(
+                    target_url=url,
+                    error=(
+                        f"Timeout rígido excedido ({overall_timeout:.0f}s): prazo total esgotado antes de "
+                        f"repetir sem verificação do certificado ({verify_reason})"
+                    ),
+                )
             try:
                 return await asyncio.wait_for(
                     _run_probe_session(
@@ -1310,11 +1324,10 @@ async def execute_probe(
                         max_payload_bytes=max_payload_bytes,
                         assert_final_url=assert_final_url,
                     ),
-                    # prazo RESTANTE: o retry não pode dobrar o tempo máximo da requisição
-                    timeout=max(1.0, overall_timeout - (time.monotonic() - started)),
+                    timeout=remaining,
                 )
             except Exception as inner_exc:
-                return _failure_result(url, inner_exc, timeout) or ProbeResult(
+                return _failure_result(url, inner_exc, remaining) or ProbeResult(
                     target_url=url,
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )

@@ -328,7 +328,24 @@ padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `tim
   não cobrem (por tópico, não por igualdade de texto), e em lembrete/recuperação nada é acrescentado.
 - **Cadeia/OCSP grampeado:** `openssl s_client` tem cache de 5 min por `host:porta` (invalidado se o certificado da
   conexão mudou, ou seja, após uma renovação) e no máximo 8 execuções simultâneas.
-- **Cookies:** `csrftoken`/`XSRF-TOKEN` (double-submit) não exigem `HttpOnly`: precisam ser legíveis por JS.
-  `ANHANGA_SENSITIVE_COOKIE_REGEX` inválida é registrada e ignorada (usa o padrão), em vez de derrubar a aplicação.
+- **Cookies:** só os *nomes* de token de double-submit (`csrftoken`, `XSRF-TOKEN`, `X-CSRF-TOKEN`, `csrf_token`) não
+  exigem `HttpOnly` (precisam ser legíveis por JS). `_csrf` (segredo do csurf), `csrf_session`, `auth_xsrf_sid` etc.
+  continuam sensíveis. `ANHANGA_SENSITIVE_COOKIE_REGEX` inválida é registrada e ignorada (usa o padrão, com as
+  exceções do padrão), em vez de derrubar a aplicação; válida, vale como escrita.
 - **Erros:** `tls_error` só para marcadores reais de TLS (nunca por um hostname como `classless.example`). O retry
   após certificado inválido usa só o prazo que sobrou, e timeout/SSRF nele recebem o mesmo tratamento do 1º passe.
+
+## ⚖️ Concorrência, prazos e contratos (revisão 3)
+
+- **Cadeia/OCSP grampeado (`openssl s_client`):** no máx. 8 simultâneos, com a espera pela vaga dentro do prazo da
+  etapa (se não houver vaga, a etapa degrada para "não verificado" naquele ciclo, nunca derruba a sondagem),
+  *single-flight* por `host:porta` e cache que só vale quando o certificado da conexão atual é conhecido e igual.
+- **Revogação em segundo plano:** no máx. 4 checagens simultâneas; no desligamento as pendentes são canceladas
+  (e os `openssl` mortos). Tarefas herdadas de outro event loop são ignoradas.
+- **Asserções de regex:** se o *avaliador* falhar (fork/arquivo), a asserção fica em `assertions.not_evaluated`
+  (visível no dashboard), sem reprovar o alvo nem disparar alerta: é falha do Anhangá, não do alvo.
+- **`error_code`:** `tls_error` cobre também `EOF occurred in violation of protocol (_ssl.c:...)` e alertas
+  `tlsv1x/sslv3 alert ...`; um hostname parecido (`tlsv13-alert.example`) não conta.
+- **Retry após certificado inválido:** só tenta com ≥ 1 s de prazo total restante; a mensagem de timeout cita o
+  prazo realmente usado.
+- **Webhooks:** o motivo do OFFLINE é completado em qualquer evento (alerta, lembrete, reenvio).

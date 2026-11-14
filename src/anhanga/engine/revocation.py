@@ -44,7 +44,24 @@ def enabled() -> bool:
 
 
 BACKGROUND_DEADLINE = 25.0  # teto do trabalho que continua em segundo plano após o orçamento da sondagem
+MAX_CONCURRENT_CHECKS = 4  # checagens simultâneas (cada uma = `openssl` + download de CRL/OCSP)
 _inflight: dict[str, "asyncio.Future[RevocationInspection]"] = {}
+_sem: "tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None" = None
+
+
+def _semaphore() -> asyncio.Semaphore:
+    global _sem
+    loop = asyncio.get_running_loop()
+    if _sem is None or _sem[0] is not loop:
+        _sem = (loop, asyncio.Semaphore(MAX_CONCURRENT_CHECKS))
+    return _sem[1]
+
+
+def cancel_background() -> None:
+    """Cancela as checagens em segundo plano (desligamento): sem isso sobram tarefas pendentes e `openssl`."""
+    for task in list(_inflight.values()):
+        task.cancel()
+    _inflight.clear()
 
 
 def endpoints_allow_private() -> bool:
@@ -55,9 +72,11 @@ def endpoints_allow_private() -> bool:
 
 
 def clear_caches() -> None:
+    global _sem
     _RESULT_CACHE.clear()
     _CRL_CACHE.clear()
     _inflight.clear()
+    _sem = None
 
 
 def _parse_openssl_time(raw: str) -> datetime | None:
@@ -241,12 +260,15 @@ async def check_revocation(
     if cached and cached[0] > now_ts:
         return cached[1]
     task = _inflight.get(key)
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        task = None  # herdada de outro event loop (testes/reinício): aguardar travaria ou levantaria
     if task is None:
         task = asyncio.ensure_future(_compute_and_cache(key, chain_der, allow_private, timeout))
         _inflight[key] = task
 
         def _done(t: "asyncio.Future") -> None:
-            _inflight.pop(key, None)
+            if _inflight.get(key) is t:
+                _inflight.pop(key, None)
             if not t.cancelled():
                 t.exception()  # consome (evita "exception was never retrieved")
 
@@ -268,14 +290,17 @@ async def check_revocation(
 async def _compute_and_cache(
     key: str, chain_der: list[bytes], allow_private: bool, timeout: float
 ) -> RevocationInspection:
-    try:
-        result = await asyncio.wait_for(
-            _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
-        )
-    except asyncio.TimeoutError:
-        result = RevocationInspection(
-            status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
-        )
+    # A vaga é disputada FORA do prazo: o relógio de 25 s só começa quando a checagem de fato roda
+    # (esperar na fila não pode virar "tempo esgotado" em cache por 5 min). Isto roda destacado da sondagem.
+    async with _semaphore():
+        try:
+            result = await asyncio.wait_for(
+                _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
+            )
+        except asyncio.TimeoutError:
+            result = RevocationInspection(
+                status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
+            )
     now_ts = time.time()
     ttl = CACHE_TTL.get(result.status, CACHE_TTL_DEFAULT)
     if result.next_update is not None:

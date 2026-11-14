@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
@@ -324,6 +325,9 @@ class SecurityAudit(BaseModel):
 class ContentAssertionsResult(BaseModel):
     passed: bool = True
     failures: list[str] = Field(default_factory=list)
+    # Asserções que NÃO puderam ser avaliadas por falha do próprio Anhangá (ex.: o subprocesso do avaliador de
+    # regex não subiu). Não são falha do alvo: não reprovam `passed` nem disparam alerta, mas ficam visíveis.
+    not_evaluated: list[str] = Field(default_factory=list)
 
 
 class ProbeResult(BaseModel):
@@ -380,10 +384,12 @@ class ProbeResult(BaseModel):
 
 _TLS_ERROR_MARKERS = (
     "[ssl", "sslerror", "sslcertverificationerror", "certificate verify failed", "certificate_verify_failed",
-    "handshake", "tls alert", "ssl/tls alert", "tlsv1 alert", "sslv3 alert", "wrong version number",
-    "bad dh value", "unsupported protocol", "certificate has expired", "self-signed certificate",
-    "hostname mismatch", "unable to get local issuer",
+    "handshake", "tls alert", "ssl/tls alert", "wrong version number", "_ssl.c",
+    "eof occurred in violation of protocol", "bad dh value", "unsupported protocol", "certificate has expired",
+    "self-signed certificate", "hostname mismatch", "unable to get local issuer",
 )
+# "tlsv13 alert certificate required", "sslv3 alert handshake failure", "tlsv1.2 alert ...": versão variável
+_TLS_ALERT_RE = re.compile(r"\b(?:tls|ssl)v?\d+(?:\.\d+)? alert\b")
 
 
 def classify_error_message(message: str) -> str:
@@ -403,7 +409,7 @@ def classify_error_message(message: str) -> str:
         return "redirect_loop"
     # Marcadores específicos de erro de TLS, não substring solta: um hostname "classless.example" ou
     # "tls-proxy.example" numa falha de conexão não pode virar `tls_error`.
-    if any(k in m for k in _TLS_ERROR_MARKERS):
+    if any(k in m for k in _TLS_ERROR_MARKERS) or _TLS_ALERT_RE.search(m):
         return "tls_error"
     if m.startswith("erro http/conexão"):
         return "connect_error"

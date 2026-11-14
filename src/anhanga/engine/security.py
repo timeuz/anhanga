@@ -587,9 +587,17 @@ _extras_cache: dict[tuple[str, int], tuple[float, list[bytes], bool | None]] = {
 _extras_sem: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
 
+def cancel_extras_background() -> None:
+    """Desligamento: cancela as execuções destacadas de `openssl s_client` (que matam o filho ao cancelar)."""
+    for task in list(_extras_inflight.values()):
+        task.cancel()
+    _extras_inflight.clear()
+
+
 def clear_extras_cache() -> None:
     global _extras_sem
     _extras_cache.clear()
+    _extras_inflight.clear()
     _extras_sem = None
 
 
@@ -601,20 +609,65 @@ def _get_extras_semaphore() -> asyncio.Semaphore:
     return _extras_sem[1]
 
 
+_extras_inflight: dict[tuple[str, int], "asyncio.Future[tuple[list[bytes], bool | None]]"] = {}
+
+
 async def fetch_tls_extras(
     ip: str, port: int, server_hostname: str, timeout: float = 4.0, expected_leaf: bytes | None = None
 ) -> tuple[list[bytes], bool | None]:
-    """Com cache (5 min, por host:porta) e no máx. 8 `openssl s_client` simultâneos: sem isso, N alvos geravam
-    N forks + N handshakes extras a cada ciclo. `expected_leaf` (certificado da conexão atual) invalida o
-    cache quando o certificado foi renovado, para a cadeia/revogação nunca descreverem o certificado antigo."""
+    """Cadeia + OCSP grampeado, com cache, limite de concorrência e prazo TOTAL de `timeout`.
+
+    - Cache de 5 min por host:porta. Só vale se `expected_leaf` (certificado da conexão atual) for conhecido
+      e igual ao da cadeia em cache: leaf desconhecido = miss (falhar aberto atribuiria a cadeia/revogação do
+      certificado antigo ao novo após uma renovação).
+    - No máx. 8 `openssl s_client` simultâneos; a espera pela vaga conta no prazo e, se estourar, a etapa
+      degrada para ([], None) neste ciclo (não segura nem derruba a sondagem). Quem rodou já preencheu o cache.
+    - Single-flight por host:porta: chamadas concorrentes dividem a mesma execução."""
     key = (server_hostname.lower(), port)
     hit = _extras_cache.get(key)
-    if hit and time.monotonic() - hit[0] < EXTRAS_CACHE_TTL and (
-        expected_leaf is None or (hit[1] and hit[1][0] == expected_leaf)
+    if (
+        hit
+        and expected_leaf is not None
+        and time.monotonic() - hit[0] < EXTRAS_CACHE_TTL
+        and hit[1]
+        and hit[1][0] == expected_leaf
     ):
         return hit[1], hit[2]
-    async with _get_extras_semaphore():
-        chain, stapled = await _fetch_tls_extras_uncached(ip, port, server_hostname, timeout)
+    loop = asyncio.get_running_loop()
+    task = _extras_inflight.get(key)
+    if task is not None and task.get_loop() is not loop:
+        task = None  # herdado de outro event loop (testes/reinício): não aguardar
+    if task is None:
+        task = asyncio.ensure_future(_extras_task(key, ip, port, server_hostname, timeout))
+        _extras_inflight[key] = task
+
+        def _done(t: "asyncio.Future") -> None:
+            if _extras_inflight.get(key) is t:
+                _extras_inflight.pop(key, None)
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_done)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout + 0.5)
+    except Exception:  # noqa: BLE001
+        return [], None
+
+
+async def _extras_task(
+    key: tuple[str, int], ip: str, port: int, server_hostname: str, timeout: float
+) -> tuple[list[bytes], bool | None]:
+    started = time.monotonic()
+    sem = _get_extras_semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=timeout * 0.5)
+    except asyncio.TimeoutError:
+        return [], None  # fila cheia: degrada neste ciclo
+    try:
+        remaining = max(0.5, timeout - (time.monotonic() - started))
+        chain, stapled = await _fetch_tls_extras_uncached(ip, port, server_hostname, remaining)
+    finally:
+        sem.release()
     if chain:
         if len(_extras_cache) > 512:
             _extras_cache.pop(next(iter(_extras_cache)))
@@ -880,32 +933,39 @@ def parse_tls_certificate(
 
 # csrf/xsrf ficam FORA de propósito: cookies de double-submit (csrftoken do Django, XSRF-TOKEN do Angular)
 # precisam ser legíveis por JS; exigir HttpOnly neles seria um falso positivo que penaliza o design correto.
-_DEFAULT_SENSITIVE_COOKIE_PATTERN = r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|identity|account)"
+# `_csrf` (segredo do csurf/Express) é o contrário do double-submit: deve ser HttpOnly, então entra.
+_DEFAULT_SENSITIVE_COOKIE_PATTERN = (
+    r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|identity|account|^_csrf$)"
+)
 
 
-def _compile_sensitive_cookie_regex(custom: str | None) -> "re.Pattern[str]":
-    """Regex do operador inválida não pode derrubar a importação do módulo (e a app inteira): cai no padrão."""
+def _compile_sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str], bool]":
+    """(regex, é_do_operador). Regex do operador inválida não derruba a importação (e a app inteira): cai no
+    padrão, e então `é_do_operador` é False, para que as exceções do padrão (CSRF) continuem valendo."""
     if custom:
         try:
-            return re.compile(custom, re.I)
+            return re.compile(custom, re.I), True
         except re.error as exc:
             logging.getLogger("anhanga").error(
                 f"ANHANGA_SENSITIVE_COOKIE_REGEX inválida ({exc}); usando o padrão."
             )
-    return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I)
+    return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I), False
 
 
-_CUSTOM_COOKIE_REGEX = os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX")
-_SENSITIVE_COOKIE_RE = _compile_sensitive_cookie_regex(_CUSTOM_COOKIE_REGEX)
-_CSRF_COOKIE_RE = re.compile(r"csrf|xsrf", re.I)
+_SENSITIVE_COOKIE_RE, _CUSTOM_COOKIE_ACTIVE = _compile_sensitive_cookie_regex(
+    os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX")
+)
+# Só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). Não basta conter
+# "csrf": `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
+_CSRF_TOKEN_COOKIE_RE = re.compile(r"^(x-)?(csrf|xsrf)[-_]?token$", re.I)
 
 
 def _is_sensitive_cookie(name: str) -> bool:
-    """Cookie de sessão/autenticação. No padrão, cookies CSRF de double-submit ficam de fora mesmo casando
-    com `token` (csrftoken, XSRF-TOKEN): precisam ser legíveis por JS. Regex do operador vale como escrita."""
+    """Cookie de sessão/autenticação. No padrão, tokens CSRF de double-submit ficam de fora mesmo casando com
+    `token`: precisam ser legíveis por JS. Regex válida do operador vale como escrita."""
     if not _SENSITIVE_COOKIE_RE.search(name):
         return False
-    return bool(_CUSTOM_COOKIE_REGEX) or not _CSRF_COOKIE_RE.search(name)
+    return _CUSTOM_COOKIE_ACTIVE or not _CSRF_TOKEN_COOKIE_RE.match(name)
 
 
 def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditItem]:

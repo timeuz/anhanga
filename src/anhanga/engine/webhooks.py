@@ -75,15 +75,17 @@ def _collect_violations(
     ("expira em" × "expirando em") e a linha saía duplicada. Em lembrete e recuperação nada é acrescentado:
     as mensagens já descrevem o que persiste ou foi resolvido ("...: resolvido")."""
     items = list(violations) if violations else []
-    if event in ("recovery", "reminder"):
-        return items
 
     def covered(*needles: str) -> bool:
         return any(all(n in v.lower() for n in needles) for v in items)
 
+    # O motivo do OFFLINE vale em qualquer evento: um lembrete/reenvio cujas mensagens estejam vazias ou
+    # genéricas não pode mostrar o selo vermelho sem razão.
     if not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
+    if event in ("recovery", "reminder"):
+        return items  # TLS: as mensagens do evento já descrevem o que persiste/foi resolvido
     if result.health == "degraded" and not covered("certificado tls", "inválid"):
         reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
         items.append(f"Certificado TLS inválido: {reason}")

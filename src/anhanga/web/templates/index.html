@@ -575,6 +575,22 @@
                                                 :class="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? 'bg-red-950/90 text-red-200 border-red-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
                                                 x-text="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? t('tlsLegacyAccepted') : t('tlsLegacyBlocked')"></strong>
                                     </div>
+                                    <template x-if="result.tls.enumeration">
+                                        <div class="space-y-1">
+                                            <div class="flex items-center justify-between gap-2">
+                                                <span class="text-zinc-300" x-text="t('tlsProtocols')">Protocolos aceitos:</span>
+                                                <span class="flex flex-wrap justify-end gap-1">
+                                                    <template x-for="p in result.tls.enumeration.protocols" :key="p.protocol">
+                                                        <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
+                                                                :class="protoClass(p)" :title="protoTitle(p)"
+                                                                x-text="p.protocol.replace('TLSv','TLS ') + ' ' + protoMark(p)"></strong>
+                                                    </template>
+                                                </span>
+                                            </div>
+                                            <div class="text-[11px] text-zinc-400" x-show="weakCipherCount(result.tls) > 0"
+                                                 x-text="t('tlsWeakCiphers') + ' ' + weakCipherCount(result.tls)"></div>
+                                        </div>
+                                    </template>
                                 </div>
                             </div>
 
@@ -1078,6 +1094,8 @@
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADADO (TLS inválido)',
                 tlsRevocation: 'Revogação:',
+                tlsProtocols: 'Protocolos aceitos:',
+                tlsWeakCiphers: 'Cifras fracas aceitas:',
                 reportOnlyBadge: 'Só reporta',
                 revGood: 'Não revogado',
                 revRevoked: 'REVOGADO',
@@ -1220,6 +1238,8 @@
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADED (invalid TLS)',
                 tlsRevocation: 'Revocation:',
+                tlsProtocols: 'Accepted protocols:',
+                tlsWeakCiphers: 'Weak ciphers accepted:',
                 reportOnlyBadge: 'Report-only',
                 revGood: 'Not revoked',
                 revRevoked: 'REVOKED',
@@ -1688,6 +1708,28 @@
                     if (st === 'revoked') return 'bg-red-950/90 text-red-200 border-red-500/60';
                     if (st === 'error' || st === 'unknown') return 'bg-amber-950/90 text-amber-200 border-amber-500/60';
                     return 'bg-zinc-800 text-zinc-200 border-zinc-600';
+                },
+                protoClass(p) {
+                    const legacy = p.protocol === 'TLSv1' || p.protocol === 'TLSv1.1';
+                    if (p.status === 'accepted') {
+                        return (legacy || (p.weak_ciphers || []).length)
+                            ? 'bg-red-950/90 text-red-200 border-red-500/60'
+                            : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60';
+                    }
+                    if (p.status === 'unknown') return 'bg-amber-950/90 text-amber-200 border-amber-500/60';
+                    return 'bg-zinc-800 text-zinc-200 border-zinc-600';
+                },
+                protoMark(p) {
+                    return ({ accepted: '✔', rejected: '✖', unknown: '?', untestable: '–' })[p.status] || '?';
+                },
+                protoTitle(p) {
+                    const st = { accepted: 'aceito', rejected: 'recusado', unknown: 'não foi possível testar', untestable: 'não testável (removido do OpenSSL moderno)' }[p.status];
+                    const c = (p.ciphers || []).join(', ');
+                    return st + (c ? ' | ' + c + (p.ciphers_complete === false ? ' …' : '') : '');
+                },
+                weakCipherCount(tls) {
+                    const e = tls && tls.enumeration;
+                    return e ? new Set(e.protocols.flatMap(p => p.weak_ciphers || [])).size : 0;
                 },
                 revocationTitle(tls) {
                     const r = tls?.revocation;

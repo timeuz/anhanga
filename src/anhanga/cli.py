@@ -303,6 +303,21 @@ def _revocation_text(tls: Any) -> str:
     return labels.get(rev.status, rev.status) + method
 
 
+def _protocols_text(tls: Any) -> str | None:
+    enum = getattr(tls, "enumeration", None)
+    if enum is None:
+        return None
+    parts = []
+    for p in enum.protocols:
+        if p.status == "accepted":
+            bad = p.protocol in ("TLSv1", "TLSv1.1") or p.weak_ciphers
+            tag = f"{p.protocol} ({len(p.ciphers)} cifras" + (f", {len(p.weak_ciphers)} fracas" if p.weak_ciphers else "") + ")"
+            parts.append(f"[bold red]{tag}[/bold red]" if bad else f"[green]{tag}[/green]")
+        elif p.status == "unknown":
+            parts.append(f"[yellow]{p.protocol}?[/yellow]")
+    return ", ".join(parts) if parts else "nenhum protocolo testável aceito"
+
+
 def render_rich_report(
     result: ProbeResult,
     violations: list[str],
@@ -441,6 +456,7 @@ def render_rich_report(
                 f"({'N/A' if result.tls.relative_validity_percent_remaining is None else format(result.tls.relative_validity_percent_remaining, '.1f')}% restante)  |  "
                 f"OCSP: {result.tls.ocsp_status}  |  "
                 f"Revogação: {_revocation_text(result.tls)}"
+                + (f"\nProtocolos aceitos: {_protocols_text(result.tls)}" if _protocols_text(result.tls) else "")
                 + (f"\nMotivo da invalidez: {result.tls.validation_error}" if not result.tls.valid and result.tls.validation_error else ""),
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",

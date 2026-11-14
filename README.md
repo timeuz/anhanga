@@ -260,3 +260,22 @@ Ter CSP não basta. `security.csp_analysis` classifica a política (`strong` / `
 
 - **Report-Only não conta como proteção** (não bloqueia nada); antes uma CSP só em Report-Only ganhava a nota cheia.
 - A pontuação da CSP é proporcional à qualidade (forte 100%, moderada 80%, fraca 50%) e gera o finding `SEC-CSP-WEAK` com snippet de política mais rígida.
+
+## 🔒 Protocolos e cifras TLS
+
+Cada sondagem HTTPS enumera, com handshakes restritos a cada versão, quais protocolos (TLS 1.0–1.3) e
+cifras o servidor aceita. As cifras de TLS ≤ 1.2 são descobertas por exclusão iterativa (máx. 24
+handshakes por versão). O resultado fica em cache por 6 h por `ip:porta:host`, então o custo extra no
+alvo é de ~10–40 handshakes a cada 6 h, e não a cada ciclo. `ANHANGA_TLS_ENUM=0` desliga.
+
+- **Findings:** `SEC-TLS-LEGACY` (TLS 1.0/1.1 aceito), `SEC-TLS-WEAK-CIPHER` (NULL, anônimas,
+  RC4/DES/3DES, EXPORT, MD5) e `SEC-TLS-NO-PFS` (RSA estática, sem forward secrecy). Legado ou cifra fraca
+  limitam a dimensão de transporte a 10/40; falta de PFS desconta 5 pontos.
+- **Handshake que falha:** em vez de só "offline", o erro diz o que o servidor aceita (ex.: "aceita apenas:
+  TLSv1") e o resultado traz a enumeração.
+- **Estados:** `accepted`, `rejected` (só um alerta TLS do servidor conta), `unknown` (timeout, falha de
+  rede ou limitação do cliente; nunca vira "recusado" nem entra no cache) e `untestable` (SSLv2/SSLv3).
+
+**Limites:** o teste usa o OpenSSL do sistema, que não oferece RC4/3DES/EXPORT nem SSLv3. Um servidor que só
+aceita essas cifras aparece como "nenhum protocolo testável aceito", não como "usa RC4". "Recusado" significa
+"recusou todas as cifras que este cliente oferece".

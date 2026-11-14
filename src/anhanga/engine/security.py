@@ -631,6 +631,7 @@ def parse_tls_certificate(
     ssl_obj: Any,
     verified: bool = True,
     tls10_11_accepted: bool = False,
+    enumeration: Any = None,
     chain_der: list[bytes] | None = None,
     ocsp_stapled: bool | None = None,
     validation_error: str | None = None,
@@ -811,6 +812,7 @@ def parse_tls_certificate(
         protocol=protocol,
         deprecated_protocol=deprecated_protocol,
         tls10_11_accepted=legacy_accepted,
+        enumeration=enumeration,
         cipher=cipher_name,
         cipher_bits=cipher_bits,
         issuer=issuer,
@@ -967,6 +969,53 @@ _CSP_REPORT_ONLY_NOTE = (
     " Atenção: há uma política em Report-Only, mas ela apenas reporta violações; promova-a para "
     "Content-Security-Policy para que passe a bloquear."
 )
+
+
+def _tls_enum_findings(tls: TLSInspection | None) -> tuple[list[SecurityFinding], int | None, int]:
+    """Findings da enumeração de protocolos/cifras → (findings, teto do transporte, penalidade)."""
+    enum = getattr(tls, "enumeration", None) if tls else None
+    if enum is None:
+        return [], None, 0
+    out: list[SecurityFinding] = []
+    cap: int | None = None
+    penalty = 0
+    legacy = [p.protocol for p in enum.protocols if p.protocol in ("TLSv1", "TLSv1.1") and p.status == "accepted"]
+    weak = sorted({c for p in enum.protocols for c in p.weak_ciphers})
+    nofs = sorted({c for p in enum.protocols for c in p.no_forward_secrecy})
+    if legacy:
+        out.append(SecurityFinding(
+            id="SEC-TLS-LEGACY", header="TLS (protocolos legados)", category="tls", severity="high", weight=15,
+            description=f"O servidor aceita {', '.join(legacy)}, protocolos obsoletos (RFC 8996) sujeitos a ataques como BEAST/POODLE-TLS.",
+            remediation="Desative TLS 1.0/1.1 e mantenha apenas TLS 1.2 e 1.3.",
+            snippets={
+                "nginx": "ssl_protocols TLSv1.2 TLSv1.3;",
+                "apache": "SSLProtocol -all +TLSv1.2 +TLSv1.3",
+                "haproxy": "ssl-default-bind-options ssl-min-ver TLSv1.2",
+            },
+        ))
+        cap = 10
+    if weak:
+        shown = ", ".join(weak[:8]) + (f" (+{len(weak) - 8})" if len(weak) > 8 else "")
+        out.append(SecurityFinding(
+            id="SEC-TLS-WEAK-CIPHER", header="TLS (cifras fracas)", category="tls", severity="high", weight=15,
+            description=f"O servidor aceita {len(weak)} cifra(s) fraca(s) (NULL, anônimas, RC4/DES/3DES, EXPORT ou MD5): {shown}.",
+            remediation="Restrinja as cifras a suítes AEAD com forward secrecy (ECDHE + AES-GCM/ChaCha20).",
+            snippets={
+                "nginx": "ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;\nssl_prefer_server_ciphers off;",
+                "apache": "SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384",
+            },
+        ))
+        cap = 10 if cap is None else min(cap, 10)
+    if nofs and not weak:
+        shown = ", ".join(nofs[:6]) + (f" (+{len(nofs) - 6})" if len(nofs) > 6 else "")
+        out.append(SecurityFinding(
+            id="SEC-TLS-NO-PFS", header="TLS (forward secrecy)", category="tls", severity="low", weight=5,
+            description=f"O servidor aceita cifras sem forward secrecy (troca de chaves RSA estática): {shown}. Capturas de tráfego passadas ficam decifráveis se a chave privada vazar.",
+            remediation="Remova as suítes sem ECDHE/DHE.",
+            snippets={},
+        ))
+        penalty = 5
+    return out, cap, penalty
 
 
 def _csp_points(base: int, analysis: CSPAnalysis) -> int:
@@ -1339,6 +1388,9 @@ def audit_http_security(
         )
 
     # Garante limites e soma total
+    tls_findings, tls_cap, tls_penalty = _tls_enum_findings(tls)
+    missing_findings.extend(tls_findings)
+    transport_score -= tls_penalty
     transport_score = max(0, min(40, transport_score))
     headers_score = max(0, min(40, headers_score))
     hygiene_score = max(0, min(20, hygiene_score))
@@ -1349,6 +1401,8 @@ def audit_http_security(
         or tls.tls10_11_accepted
     ):
         transport_score = min(transport_score, 10)
+    if tls_cap is not None:
+        transport_score = min(transport_score, tls_cap)
 
     total_score = max(0, min(100, transport_score + headers_score + hygiene_score))
 

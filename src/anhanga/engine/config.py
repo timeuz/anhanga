@@ -107,6 +107,14 @@ _TRUE = {"true", "yes", "on", "1"}
 _FALSE = {"false", "no", "off", "0"}
 
 
+def safe_urlparse(url: str):
+    """`urlparse` que devolve None em vez de levantar ValueError (ex.: `https://[bad`, colchete IPv6 sem fechar)."""
+    try:
+        return urlparse(url)
+    except ValueError:
+        return None
+
+
 _TEAMS_DOMAINS = ("office.com", "outlook.com", "logic.azure.com", "teams.microsoft.com")
 
 
@@ -115,7 +123,7 @@ def webhook_provider_from_url(url: str) -> str | None:
     `alerts.myteams.example` ou `telegram-relay.internal` não são Teams/Telegram."""
     try:
         host = (urlparse(url or "").hostname or "").lower().rstrip(".")
-    except ValueError:
+    except ValueError:  # colchete IPv6 malformado
         return None
     if host == "api.telegram.org":
         return "telegram"
@@ -200,7 +208,9 @@ def _valid_target_url(raw_url: str) -> str | None:
     normalized, err = _normalize_and_validate_scheme(raw_url)
     if err:
         return err
-    parsed = urlparse(normalized)
+    parsed = safe_urlparse(normalized)
+    if parsed is None:
+        return "URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar)."
     if not parsed.hostname:
         return "URL inválida: hostname não encontrado."
     try:
@@ -337,7 +347,8 @@ def parse_config(raw: Any) -> MonitorConfig:
                 f"{where}: URL vazia (variável de ambiente ${{...}} não definida?); descartado."
             )
             continue
-        if urlparse(url).scheme.lower() not in ("http", "https") or not urlparse(url).hostname:
+        parsed_hook = safe_urlparse(url)
+        if parsed_hook is None or parsed_hook.scheme.lower() not in ("http", "https") or not parsed_hook.hostname:
             cfg.errors.append(f"{where}: URL de webhook inválida (http/https com host); descartado.")
             continue
         provider = str(entry.get("provider", "auto")).lower()
@@ -390,4 +401,10 @@ def load_config(path: Path | None) -> MonitorConfig:
         cfg.errors.append(f"Falha ao ler {path}: {exc}")
         cfg.load_failed = True
         return cfg
-    return parse_config(_interpolate_env_vars(raw))
+    try:
+        return parse_config(_interpolate_env_vars(raw))
+    except Exception as exc:  # noqa: BLE001  (contrato: ler a configuração nunca derruba o monitor)
+        cfg = MonitorConfig()
+        cfg.errors.append(f"Erro inesperado ao validar {path}: {type(exc).__name__}: {exc}")
+        cfg.load_failed = True
+        return cfg

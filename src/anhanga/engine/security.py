@@ -736,6 +736,24 @@ async def _fetch_tls_extras_uncached(
     return chain, stapled
 
 
+EXPIRING_DAYS = 15.0
+EXPIRING_FRACTION = 0.20
+
+
+def _cert_expiring(expires_at: datetime | None, total_validity_days: int | None) -> bool:
+    """Alerta de expiração: menos de 15 dias OU de 20% da vida do certificado, o que for menor.
+
+    Um limiar fixo de 15 dias deixaria certificados de vida curta (6 ou 47 dias) em "expirando" o tempo todo, com
+    renovação automática saudável. Em certificados de 90 dias ou mais o limiar continua sendo 15 dias."""
+    if expires_at is None:
+        return False
+    remaining_days = (expires_at - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    threshold = EXPIRING_DAYS
+    if total_validity_days:
+        threshold = min(EXPIRING_DAYS, EXPIRING_FRACTION * total_validity_days)
+    return remaining_days < threshold
+
+
 def parse_tls_certificate(
     ssl_obj: Any,
     verified: bool = True,
@@ -933,7 +951,7 @@ def parse_tls_certificate(
         days_remaining=days_remaining,
         total_validity_days=total_validity_days,
         relative_validity_percent_remaining=relative_validity_percent_remaining,
-        alert_expiring=(days_remaining is not None and days_remaining < 15),
+        alert_expiring=_cert_expiring(expires_at, total_validity_days),
         alert_relative_expiring=alert_relative_expiring,
         sans=sans,
         cert_chain=cert_chain,

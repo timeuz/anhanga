@@ -279,3 +279,11 @@ alvo é de ~10–40 handshakes a cada 6 h, e não a cada ciclo. `ANHANGA_TLS_ENU
 **Limites:** o teste usa o OpenSSL do sistema, que não oferece RC4/3DES/EXPORT nem SSLv3. Um servidor que só
 aceita essas cifras aparece como "nenhum protocolo testável aceito", não como "usa RC4". "Recusado" significa
 "recusou todas as cifras que este cliente oferece".
+
+## 🧱 Isolamento de origem cruzada (COOP / COEP / CORP)
+
+Os três headers são lidos da resposta HTTPS e aparecem em `present_headers`. A ausência de COOP/COEP gera
+findings `SEC-COOP`/`SEC-COEP` com severidade `info` e **peso 0**: são endurecimentos opcionais (o COEP quebra
+embeds de terceiros sem CORP/CORS), então não alteram a nota. Valor inválido (que o navegador ignora) vira `low`.
+`unsafe-none` conta como ausente. A ausência de CORP não é apontada, já que só faz sentido para recursos
+(imagens, scripts) e não para páginas HTML.

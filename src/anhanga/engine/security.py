@@ -1018,6 +1018,51 @@ def _tls_enum_findings(tls: TLSInspection | None) -> tuple[list[SecurityFinding]
     return out, cap, penalty
 
 
+_COOP_OK = {"same-origin", "same-origin-allow-popups"}
+_COEP_OK = {"require-corp", "credentialless"}
+_CORP_VALUES = {"same-origin", "same-site", "cross-origin"}
+
+
+def _isolation_findings(headers: httpx.Headers) -> list[SecurityFinding]:
+    """COOP/COEP/CORP. Sempre `info`/peso 0: são endurecimentos opcionais que podem quebrar embeds de
+    terceiros, então não penalizam a nota. Valores inválidos viram `low` (o navegador os ignora)."""
+    out: list[SecurityFinding] = []
+    coop = headers.get("Cross-Origin-Opener-Policy", "").split(";")[0].strip().lower()
+    coep = headers.get("Cross-Origin-Embedder-Policy", "").split(";")[0].strip().lower()
+    corp = headers.get("Cross-Origin-Resource-Policy", "").strip().lower()
+
+    def add(fid: str, header: str, sev: str, desc: str, fix: str, value: str) -> None:
+        out.append(SecurityFinding(
+            id=fid, header=header, category="header", severity=sev,  # type: ignore[arg-type]
+            weight=0, description=desc, remediation=fix, safe_default=value,
+            snippets=_build_header_snippets(header, value),
+        ))
+
+    if not coop or coop == "unsafe-none":
+        add("SEC-COOP", "Cross-Origin-Opener-Policy", "info",
+            "COOP ausente: janelas de outras origens que abrem seu site (ou que ele abre) mantêm referência umas às outras, "
+            "o que expõe a ataques de canal lateral (XS-Leaks, Spectre) e é pré-requisito do isolamento de origem cruzada.",
+            "Use same-origin. Use same-origin-allow-popups se o site depende de popups de login/pagamento de terceiros.",
+            "same-origin")
+    elif coop not in _COOP_OK:
+        add("SEC-COOP", "Cross-Origin-Opener-Policy", "low",
+            f"COOP com valor inválido ({coop!r}): o navegador o ignora.", "Use same-origin.", "same-origin")
+    if not coep or coep == "unsafe-none":
+        add("SEC-COEP", "Cross-Origin-Embedder-Policy", "info",
+            "COEP ausente: sem COOP+COEP o site não fica 'cross-origin isolated' (necessário para SharedArrayBuffer e "
+            "temporizadores de alta resolução). Ative apenas se todos os recursos de terceiros enviarem CORP/CORS, "
+            "senão eles deixam de carregar.",
+            "Teste primeiro com Cross-Origin-Embedder-Policy-Report-Only: require-corp.",
+            "require-corp")
+    elif coep not in _COEP_OK:
+        add("SEC-COEP", "Cross-Origin-Embedder-Policy", "low",
+            f"COEP com valor inválido ({coep!r}): o navegador o ignora.", "Use require-corp.", "require-corp")
+    if corp and corp not in _CORP_VALUES:
+        add("SEC-CORP", "Cross-Origin-Resource-Policy", "low",
+            f"CORP com valor inválido ({corp!r}): o navegador o ignora.", "Use same-origin, same-site ou cross-origin.", "same-origin")
+    return out
+
+
 def _csp_points(base: int, analysis: CSPAnalysis) -> int:
     """Pontos da CSP aplicada, proporcionais à qualidade (CSP com 'unsafe-inline'/'*' vale metade)."""
     return round(base * _CSP_QUALITY_FACTOR.get(analysis.strength, 1.0))
@@ -1315,6 +1360,13 @@ def audit_http_security(
     # Referrer-Policy informativo
     if "Referrer-Policy" in headers:
         present["Referrer-Policy"] = headers["Referrer-Policy"]
+
+    # Isolamento de origem cruzada (COOP/COEP/CORP): informativo, não altera a nota.
+    for iso_name in ("Cross-Origin-Opener-Policy", "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy"):
+        if iso_name in headers:
+            present[iso_name] = headers[iso_name]
+    if is_https:
+        missing_findings.extend(_isolation_findings(headers))
 
     # 3. Dimensão: Higiene de Aplicação (até 20 pontos)
     hygiene_score = 20

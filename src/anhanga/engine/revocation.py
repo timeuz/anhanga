@@ -45,6 +45,8 @@ def enabled() -> bool:
 
 BACKGROUND_DEADLINE = 25.0  # teto do trabalho que continua em segundo plano após o orçamento da sondagem
 MAX_CONCURRENT_CHECKS = 4  # checagens simultâneas (cada uma = `openssl` + download de CRL/OCSP)
+MAX_QUEUED_CHECKS = 32  # checagens pendentes (rodando + esperando vaga); acima disso, falha rápido
+QUEUE_WAIT_SECONDS = 60.0  # espera máxima por uma vaga; depois a checagem é descartada (não cacheada)
 _inflight: dict[str, "asyncio.Future[RevocationInspection]"] = {}
 _sem: "tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None" = None
 
@@ -263,6 +265,8 @@ async def check_revocation(
     if task is not None and task.get_loop() is not asyncio.get_running_loop():
         task = None  # herdada de outro event loop (testes/reinício): aguardar travaria ou levantaria
     if task is None:
+        if len(_inflight) >= MAX_QUEUED_CHECKS:
+            return RevocationInspection(status="unavailable", detail="fila de verificação cheia; tenta no próximo ciclo")
         task = asyncio.ensure_future(_compute_and_cache(key, chain_der, allow_private, timeout))
         _inflight[key] = task
 
@@ -292,15 +296,22 @@ async def _compute_and_cache(
 ) -> RevocationInspection:
     # A vaga é disputada FORA do prazo: o relógio de 25 s só começa quando a checagem de fato roda
     # (esperar na fila não pode virar "tempo esgotado" em cache por 5 min). Isto roda destacado da sondagem.
-    async with _semaphore():
-        try:
-            result = await asyncio.wait_for(
-                _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
-            )
-        except asyncio.TimeoutError:
-            result = RevocationInspection(
-                status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
-            )
+    sem = _semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=QUEUE_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        # Sem vaga a tempo: o resultado seria velho. Não cacheia, para o próximo ciclo tentar de novo.
+        return RevocationInspection(status="unavailable", detail="fila de verificação saturada; tenta no próximo ciclo")
+    try:
+        result = await asyncio.wait_for(
+            _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
+        )
+    except asyncio.TimeoutError:
+        result = RevocationInspection(
+            status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
+        )
+    finally:
+        sem.release()
     now_ts = time.time()
     ttl = CACHE_TTL.get(result.status, CACHE_TTL_DEFAULT)
     if result.next_update is not None:

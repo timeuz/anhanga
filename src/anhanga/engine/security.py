@@ -649,9 +649,13 @@ async def fetch_tls_extras(
 
         task.add_done_callback(_done)
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout + 0.5)
+        chain, stapled = await asyncio.wait_for(asyncio.shield(task), timeout=timeout + 0.5)
     except Exception:  # noqa: BLE001
         return [], None
+    if expected_leaf is not None and chain and chain[0] != expected_leaf:
+        # Entrou numa execução iniciada antes de uma renovação: a cadeia é do certificado antigo.
+        return [], None
+    return chain, stapled
 
 
 async def _extras_task(
@@ -957,7 +961,7 @@ _SENSITIVE_COOKIE_RE, _CUSTOM_COOKIE_ACTIVE = _compile_sensitive_cookie_regex(
 )
 # Só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). Não basta conter
 # "csrf": `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
-_CSRF_TOKEN_COOKIE_RE = re.compile(r"^(x-)?(csrf|xsrf)[-_]?token$", re.I)
+_CSRF_TOKEN_COOKIE_RE = re.compile(r"^(?:__(?:host|secure)-)?_?(?:x-)?(?:csrf|xsrf)[-_]?token$", re.I)
 
 
 def _is_sensitive_cookie(name: str) -> bool:

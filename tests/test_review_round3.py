@@ -273,10 +273,10 @@ def test_retry_is_skipped_when_less_than_a_second_of_budget_remains(monkeypatch)
     assert r.error_code == "timeout" and "prazo total esgotado" in r.error
 
 
-def test_retry_timeout_message_reports_the_remaining_budget_not_the_request_timeout(monkeypatch):
-    r, calls = _retry_scenario(monkeypatch, spent=8.3)  # sobram ~1.2 s
+def test_retry_timeout_message_reports_the_total_budget_not_the_request_timeout(monkeypatch):
+    r, calls = _retry_scenario(monkeypatch, spent=8.3)  # sobram ~1.2 s do total de 9.5 s
     assert calls == [True, False] and r.error_code == "timeout"
-    assert "(1.2s)" in r.error and "(0.5s)" not in r.error, r.error
+    assert "(9.5s)" in r.error and "(0.5s)" not in r.error, r.error
 
 
 # ---- 9. OFFLINE sempre tem motivo, em qualquer evento ------------------------------------------------------------------

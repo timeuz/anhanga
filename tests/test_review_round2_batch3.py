@@ -62,7 +62,7 @@ def test_extras_cached_and_invalidated_on_renewal(monkeypatch):
     async def scenario():
         a = await S.fetch_tls_extras("203.0.113.1", 443, "a.test", expected_leaf=b"LEAF-1")
         b = await S.fetch_tls_extras("203.0.113.1", 443, "a.test", expected_leaf=b"LEAF-1")  # cache
-        c = await S.fetch_tls_extras("203.0.113.1", 443, "a.test", expected_leaf=b"LEAF-NEW")  # renovado
+        c = await S.fetch_tls_extras("203.0.113.1", 443, "a.test", expected_leaf=b"LEAF-2")  # renovado (o servidor passa a enviar LEAF-2)
         return a, b, c
 
     a, b, c = asyncio.run(scenario())

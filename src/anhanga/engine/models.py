@@ -384,7 +384,7 @@ class ProbeResult(BaseModel):
 
 _TLS_ERROR_MARKERS = (
     "[ssl", "sslerror", "sslcertverificationerror", "certificate verify failed", "certificate_verify_failed",
-    "handshake", "tls alert", "ssl/tls alert", "wrong version number", "_ssl.c",
+    "handshake", "tls alert", "ssl/tls alert", "wrong version number", "(_ssl.c:",
     "eof occurred in violation of protocol", "bad dh value", "unsupported protocol", "certificate has expired",
     "self-signed certificate", "hostname mismatch", "unable to get local issuer",
 )

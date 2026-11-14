@@ -10,6 +10,7 @@ O `ip` já foi validado pela política Anti-SSRF pelo chamador (mesmo contrato d
 """
 
 import asyncio
+import functools
 import os
 import ssl
 import time
@@ -39,9 +40,28 @@ _SERVER_REJECT_MARKERS = (
     "ALERT_INSUFFICIENT_SECURITY", "ALERT_ILLEGAL_PARAMETER", "NO_SHARED_CIPHER",
     "UNKNOWN_PROTOCOL", "ALERT_UNEXPECTED_MESSAGE", "ALERT_DECODE_ERROR",
 )
+# Alertas que dizem "não falo esta VERSÃO". Os demais (handshake_failure, sem cifra em comum...) são ambíguos:
+# o servidor pode falar a versão e só não ter cifra em comum com o que ESTE OpenSSL oferece (ex.: servidor só-RC4).
+_VERSION_REJECT_MARKERS = (
+    "ALERT_PROTOCOL_VERSION", "WRONG_VERSION_NUMBER", "UNSUPPORTED_PROTOCOL", "NO_PROTOCOLS_AVAILABLE_SERVER",
+    "UNKNOWN_PROTOCOL",
+)
 _CLIENT_SIDE_MARKERS = ("NO_PROTOCOLS_AVAILABLE", "NO_CIPHERS_AVAILABLE", "INVALID_SESSION_ID")
 
 _WEAK_TOKENS = ("RC4", "NULL", "EXPORT", "EXP-", "MD5", "anon", "ADH", "AECDH", "DES-CBC", "DES-CBC3", "3DES", "SEED", "IDEA", "RC2")
+
+
+@functools.lru_cache(maxsize=1)
+def local_ciphers_complete() -> bool:
+    """O OpenSSL local sabe oferecer RC4 e 3DES? Sem isso, "handshake failure" não prova que o servidor
+    recusou a versão: um servidor que só aceita RC4/3DES responde igual."""
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.set_ciphers("ALL:COMPLEMENTOFALL:@SECLEVEL=0")
+        names = {c["name"].upper() for c in ctx.get_ciphers()}
+    except (ssl.SSLError, ValueError):
+        return False
+    return any("RC4" in n for n in names) and any("DES-CBC3" in n or "3DES" in n for n in names)
 
 
 def enabled() -> bool:
@@ -93,8 +113,12 @@ async def _handshake(
         text = f"{getattr(exc, 'reason', '')} {exc}".upper()
         if any(m in text for m in _CLIENT_SIDE_MARKERS) and "SERVER" not in text:
             return "unknown", None, None
-        if any(m in text for m in _SERVER_REJECT_MARKERS) or "ALERT" in text:
+        if any(m in text for m in _VERSION_REJECT_MARKERS):
             return "rejected", None, None
+        if any(m in text for m in _SERVER_REJECT_MARKERS) or "ALERT" in text:
+            # Alerta ambíguo (sem cifra em comum etc.): só é "recusa" se não houver cifra que este cliente não ofereça.
+            if version == ssl.TLSVersion.TLSv1_3 or exclude or local_ciphers_complete():
+                return "rejected", None, None
         return "unknown", None, None
     except (ConnectionResetError, EOFError, BrokenPipeError):
         return "rejected", None, None  # RST/EOF no ClientHello: comportamento comum de recusa

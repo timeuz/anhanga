@@ -282,6 +282,13 @@
                     </div>
                     <span class="font-mono text-[11px] text-zinc-400" x-text="result?.assertions?.passed ? 'Payload íntegro' : (result?.assertions?.failures?.length || 0) + ' falha(s)'"></span>
                 </div>
+                <div x-show="(result?.assertions?.not_evaluated || []).length > 0" class="space-y-1 pt-1">
+                    <template x-for="note in (result?.assertions?.not_evaluated || [])" :key="note">
+                        <div class="text-amber-200 font-mono text-[11px] flex items-center gap-1.5">
+                            <span>?</span> <span x-text="t('assertionNotEvaluated') + ' ' + note"></span>
+                        </div>
+                    </template>
+                </div>
                 <div x-show="!result?.assertions?.passed && (result?.assertions?.failures || []).length > 0" class="space-y-1 pt-1">
                     <template x-for="failMsg in (result?.assertions?.failures || [])" :key="failMsg">
                         <div class="text-red-300 font-mono text-[11px] flex items-center gap-1.5">
@@ -1095,6 +1102,7 @@
                 statusDegraded: 'DEGRADADO (TLS inválido)',
                 tlsRevocation: 'Revogação:',
                 tlsProtocols: 'Protocolos aceitos:',
+                assertionNotEvaluated: 'Não avaliado:',
                 tlsWeakCiphers: 'Cifras fracas aceitas:',
                 reportOnlyBadge: 'Só reporta',
                 revGood: 'Não revogado',
@@ -1239,6 +1247,7 @@
                 statusDegraded: 'DEGRADED (invalid TLS)',
                 tlsRevocation: 'Revocation:',
                 tlsProtocols: 'Accepted protocols:',
+                assertionNotEvaluated: 'Not evaluated:',
                 tlsWeakCiphers: 'Weak ciphers accepted:',
                 reportOnlyBadge: 'Report-only',
                 revGood: 'Not revoked',

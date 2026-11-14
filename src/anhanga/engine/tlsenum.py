@@ -181,6 +181,8 @@ async def enumerate_tls_bounded(
     if hit and time.monotonic() - hit[0] < CACHE_TTL:
         return hit[1]
     task = _inflight.get(key)
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        task = None  # herdada de outro event loop
     if task is None:
         now = time.monotonic()
         last = _last_scan.get((ip, port))
@@ -195,7 +197,8 @@ async def enumerate_tls_bounded(
         _inflight[key] = task
 
         def _done(t: "asyncio.Future") -> None:
-            _inflight.pop(key, None)
+            if _inflight.get(key) is t:
+                _inflight.pop(key, None)
             if not t.cancelled():
                 t.exception()  # consome: evita "exception was never retrieved"
 
@@ -204,6 +207,13 @@ async def enumerate_tls_bounded(
         return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
     except Exception:  # noqa: BLE001  (inclui TimeoutError do orçamento e falhas da própria enumeração)
         return None
+
+
+def cancel_background() -> None:
+    """Cancela as enumerações em segundo plano (desligamento)."""
+    for task in list(_inflight.values()):
+        task.cancel()
+    _inflight.clear()
 
 
 def clear_cache() -> None:

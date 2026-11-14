@@ -30,9 +30,11 @@ def test_regex_evaluator_failure_is_not_blamed_on_the_users_pattern(monkeypatch)
     status, detail = P._regex_search_isolated("a+", "aaa")
     assert status == "unavailable" and "encerrou com erro" in detail
     res = asyncio.run(P._evaluate_content_assertions("aaa", 3, "https://x/", fail_if_body_not_matches_regexp="a+"))
-    assert not res.passed
-    msg = res.failures[0]
-    assert "indisponível" in msg and "inválida" not in msg and "não do padrão" in msg
+    # falha do monitor ≠ falha do alvo: não reprova a asserção, mas fica registrada como "não avaliado"
+    assert res.passed and not res.failures
+    assert len(res.not_evaluated) == 1
+    msg = res.not_evaluated[0]
+    assert "indisponível" in msg and "inválida" not in msg and "não do alvo" in msg
 
 
 def test_real_invalid_pattern_still_reported_as_invalid():
@@ -68,16 +70,28 @@ def test_fetch_tls_extras_kills_openssl_on_cancellation(monkeypatch):
     monkeypatch.setattr(S.asyncio, "create_subprocess_exec", spy)
 
     async def scenario():
-        task = asyncio.create_task(S.fetch_tls_extras("127.0.0.1", port, "localhost", timeout=60.0))
+        # (a) cancelar a execução em si mata o filho
+        inner = asyncio.create_task(S._fetch_tls_extras_uncached("127.0.0.1", port, "localhost", timeout=60.0))
         await asyncio.sleep(0.6)
-        task.cancel()
+        inner.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await inner
         await asyncio.sleep(0.5)
-        return spawned[0].returncode
+        first = spawned[0].returncode
+        # (b) no desligamento, `cancel_extras_background` alcança a execução destacada (single-flight/shield)
+        S.clear_extras_cache()
+        outer = asyncio.create_task(S.fetch_tls_extras("127.0.0.1", port, "localhost", timeout=60.0))
+        await asyncio.sleep(0.6)
+        S.cancel_extras_background()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        await asyncio.sleep(0.5)
+        return first, spawned[-1].returncode
 
     try:
-        assert asyncio.run(scenario()) is not None, "openssl s_client continuou vivo após o cancelamento"
+        first, second = asyncio.run(scenario())
+        assert first is not None, "openssl s_client continuou vivo após cancelar a execução"
+        assert second is not None, "openssl s_client continuou vivo após cancel_extras_background()"
     finally:
         srv.close()
 

@@ -375,9 +375,26 @@ padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `tim
   o bloco pode vir vazio ("não avaliado"), nunca "sem protocolos".
 - **Transferência que não termina:** se o servidor envia a resposta mas não a encerra (visto em `www.gnu.org`, onde o
   `curl` também trava), a sondagem estoura o prazo total e o alvo é dado como OFFLINE. É o comportamento do alvo, não do monitor.
-- **Autenticação sem `ANHANGA_API_KEY`:** só conexões diretas por loopback são aceitas, e uma requisição que traga
-  `X-Forwarded-For`, `Forwarded` ou `X-Real-IP` é tratada como externa. Atrás de um proxy reverso que **não** envie
-  nenhum desses cabeçalhos, o proxy aparece como loopback e a API fica aberta: configure sempre `ANHANGA_API_KEY` ao
-  expor o serviço, e não publique `/probe` e `/api/v1/scan` sem ela (eles conectam a hosts escolhidos pelo chamador).
+- **Autenticação sem `ANHANGA_API_KEY`:** só é aceito acesso direto por loopback **com** `Host` de loopback
+  (`localhost`, `127.0.0.1`, `::1`) e sem `X-Forwarded-For`/`Forwarded`/`X-Real-IP`. Um proxy reverso na mesma máquina
+  encaminha o `Host` público e é tratado como externo. `anhanga serve` em endereço fora do loopback **recusa iniciar**
+  sem chave. Gere uma com `anhanga keygen` (veja abaixo) e não publique `/probe` e `/api/v1/scan` sem ela
+  (eles conectam a hosts escolhidos pelo chamador).
 - **Revisão de segurança:** uma leitura automatizada do código (subprocessos, SSRF, autenticação, SQL, XSS, YAML) não
   encontrou vulnerabilidade de alta confiança. Não é um teste de intrusão.
+
+## 🔑 Chave da API, `.env`, backup e Docker
+
+- **Chave:** `anhanga keygen` gera 256 bits aleatórios e grava `ANHANGA_API_KEY` em `./.env` (permissão `0600`,
+  já no `.gitignore`); não sobrescreve sem `--force`. O servidor lê o `.env` ao iniciar (variáveis já definidas no
+  ambiente têm precedência). A interface pede a chave uma vez por aba; nas chamadas use `Authorization: Bearer <chave>`.
+  A chave só é obrigatória para escutar fora do loopback ou atrás de proxy.
+- **`/docs`, `/redoc`, `/openapi.json`:** desligados por padrão; `ANHANGA_DOCS=1` os liga. **`/healthz`** só responde
+  `{"status":"alive"}`. **`/metrics`** exige a chave; o botão da interface busca com ela.
+- **Sem recursos externos:** a interface não carrega fontes do Google (usa as fontes do sistema).
+- **Backup:** `anhanga backup destino.db` copia o banco de forma consistente (API de backup do SQLite; pode rodar com o
+  servidor ativo), grava com `0600` e não sobrescreve sem `--force`. A retenção (`storage.retention_days`, padrão 14
+  dias) já limita o tamanho. Agende o backup no cron do host.
+- **Docker:** `docker build -t anhanga .` e
+  `docker run -d -p 7890:7890 --env-file .env -v "$PWD/data:/data" anhanga` (coloque `targets.yaml` em `data/`; o diretório
+  precisa ser gravável pelo uid 10001). Roda sem privilégios, tem `HEALTHCHECK` e **não inicia sem `ANHANGA_API_KEY`**.

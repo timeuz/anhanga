@@ -19,7 +19,7 @@ def _clean(monkeypatch):
 
 
 def local_client():
-    return TestClient(app_main.app, client=("127.0.0.1", 50000))
+    return TestClient(app_main.app, base_url="http://localhost", client=("127.0.0.1", 50000))
 
 
 def test_fail_closed_without_key_rejects_non_loopback():

@@ -9,3 +9,5 @@ AGENTS.md
 *.db
 *.db-wal
 *.db-shm
+
+.env

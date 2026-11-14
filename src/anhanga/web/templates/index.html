@@ -5,9 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Anhangá // Auditoria Tática de Borda, TLS e Latência</title>
     <!-- Google Fonts: Inter (Sans) & JetBrains Mono (Mono) -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- TailwindCSS v3 compilado localmente (web/static/tailwind.css) -->
     <link rel="stylesheet" href="/static/tailwind.css">
     <!-- Alpine.js -->
@@ -28,6 +25,13 @@
                 }
             }
             return resp;
+        }
+        // /metrics exige a chave: um link comum não envia o cabeçalho (401), então busca com ela e abre o texto.
+        async function openMetrics() {
+            const resp = await apiFetch('/metrics');
+            if (!resp.ok) { console.error('/metrics: HTTP ' + resp.status); return; }
+            const url = URL.createObjectURL(new Blob([await resp.text()], { type: 'text/plain' }));
+            window.open(url, '_blank', 'noopener');
         }
     </script>
     <style>
@@ -86,13 +90,15 @@
                     </button>
                 </div>
 
+                {% if docs_enabled %}
                 <a href="/docs" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-lg bg-obsidian hover:bg-zinc-800 text-zinc-200 border border-bordercolor transition flex items-center gap-1.5 text-xs font-medium">
                     <span x-text="t('apiDocs')">Documentação da API</span>
                 </a>
-                <a href="/metrics" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-lg bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 border border-zinc-600 transition flex items-center gap-2 text-xs font-medium">
+                {% endif %}
+                <button type="button" onclick="openMetrics()" class="px-3 py-1.5 rounded-lg bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 border border-zinc-600 transition flex items-center gap-2 text-xs font-medium cursor-pointer">
                     <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
                     <span class="font-mono">/metrics</span>
-                </a>
+                </button>
             </nav>
         </div>
     </header>

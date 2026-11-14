@@ -356,3 +356,34 @@ class Store:
                 self._conn.execute("PRAGMA incremental_vacuum")
                 self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return n
+
+
+def backup_database(src: str, dest: str, force: bool = False) -> Path:
+    """Cópia consistente do banco (API de backup do SQLite: segura com o servidor rodando e com WAL).
+
+    O destino é gravado num arquivo temporário (0600) e só então renomeado; nunca sobrescreve sem `force`."""
+    src_path, dest_path = Path(src), Path(dest)
+    if not src_path.is_file():
+        raise FileNotFoundError(f"banco não encontrado: {src_path}")
+    if dest_path.exists() and not force:
+        raise FileExistsError(f"{dest_path} já existe; use --force para sobrescrever")
+    if dest_path.resolve() == src_path.resolve():
+        raise ValueError("o destino não pode ser o próprio banco")
+    tmp = dest_path.with_name(dest_path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    source = sqlite3.connect(f"file:{src_path.resolve()}?mode=ro", uri=True)
+    target = sqlite3.connect(tmp)
+    try:
+        source.backup(target)
+    except BaseException:
+        target.close()
+        source.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    target.close()
+    source.close()
+    os.replace(tmp, dest_path)
+    return dest_path
+

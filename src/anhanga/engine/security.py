@@ -309,6 +309,9 @@ class SlidingWindowRateLimiter:
         self._explicit_max = max_requests
         self.window_seconds = window_seconds
         self._hits: dict[str, deque[float]] = {}
+        self._last_sweep = 0.0
+
+    SWEEP_INTERVAL = 5.0  # varredura global de chaves ociosas: no máx. 1 vez a cada 5 s (não a cada chamada)
 
     @property
     def max_requests(self) -> int:
@@ -330,16 +333,20 @@ class SlidingWindowRateLimiter:
         cutoff = now - self.window_seconds
         key = (client_ip or "unknown").strip()
 
-        for k, existing_q in list(self._hits.items()):
-            while existing_q and existing_q[0] <= cutoff:
-                existing_q.popleft()
-            if not existing_q:
-                del self._hits[k]
+        if now - self._last_sweep >= self.SWEEP_INTERVAL:
+            self._last_sweep = now
+            for k, existing_q in list(self._hits.items()):
+                while existing_q and existing_q[0] <= cutoff:
+                    existing_q.popleft()
+                if not existing_q:
+                    del self._hits[k]
 
         q = self._hits.get(key)
         if q is None:
             q = deque()
             self._hits[key] = q
+        while q and q[0] <= cutoff:  # a janela do próprio cliente é sempre exata
+            q.popleft()
 
         limit = self.max_requests
         if len(q) + cost > limit:
@@ -414,6 +421,7 @@ class SlidingWindowRateLimiter:
 
     def reset(self) -> None:
         self._hits.clear()
+        self._last_sweep = 0.0
 
 
 RATE_LIMITER = SlidingWindowRateLimiter()

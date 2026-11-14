@@ -193,6 +193,14 @@ WEBHOOK_DELIVERY_TIMEOUT = 10.0
 SHUTDOWN_DRAIN_SECONDS = 5.0
 
 
+def _mtime(path: Path | None) -> float | None:
+    """mtime do arquivo de configuração; None se não há caminho ou o arquivo (ainda) não existe."""
+    try:
+        return path.stat().st_mtime if path else None
+    except OSError:
+        return None
+
+
 def _config_path() -> Path | None:
     return find_config_path([BASE_DIR.parent.parent / "targets.yaml"])
 
@@ -411,7 +419,7 @@ async def background_guardian_loop():
     cfg = load_config(path)
     _CONFIG = cfg
     _log_config_issues(cfg, path)
-    mtime = path.stat().st_mtime if path else None
+    mtime = _mtime(path)
     manager = AlertManager(cfg.policy)
 
     if not cfg.targets and path is None:
@@ -422,7 +430,7 @@ async def background_guardian_loop():
         try:
             # Recarga a quente: só quando o arquivo mudou (stat é barato).
             new_path = _config_path()
-            new_mtime = new_path.stat().st_mtime if new_path else None
+            new_mtime = _mtime(new_path)
             if new_path is not None and (new_path, new_mtime) != (path, mtime):
                 path, mtime = new_path, new_mtime
                 new_cfg = load_config(path)

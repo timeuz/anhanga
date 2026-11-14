@@ -6,6 +6,7 @@ Nada aqui lança exceção por configuração ruim: erros viram mensagens em `Mo
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ def parse_duration_ms(val: str | int | float) -> float:
     """Converte '500ms', '0.5s', '1m' ou '250' (ms) em milissegundos. ValueError se inválido ou <= 0."""
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         fval = float(val)
+        if not math.isfinite(fval):
+            raise ValueError(f"Duração deve ser um número finito: {val}")
         if fval <= 0:
             raise ValueError(f"Duração deve ser maior que zero: {val}")
         return round(fval, 2)
@@ -104,6 +107,23 @@ _TRUE = {"true", "yes", "on", "1"}
 _FALSE = {"false", "no", "off", "0"}
 
 
+_TEAMS_DOMAINS = ("office.com", "outlook.com", "logic.azure.com", "teams.microsoft.com")
+
+
+def webhook_provider_from_url(url: str) -> str | None:
+    """Provedor pelo HOSTNAME (igualdade/sufixo em fronteira de ponto), nunca por substring da URL inteira:
+    `alerts.myteams.example` ou `telegram-relay.internal` não são Teams/Telegram."""
+    try:
+        host = (urlparse(url or "").hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if host == "api.telegram.org":
+        return "telegram"
+    if any(host == d or host.endswith("." + d) for d in _TEAMS_DOMAINS):
+        return "teams"
+    return None
+
+
 def _as_bool(value: Any, name: str, default: bool, cfg: MonitorConfig) -> bool:
     """Booleano estrito. `bool("false")` é True, e `${VAR}` interpolado chega sempre como string:
     aceita só bool real ou true/false/yes/no/on/off/1/0; qualquer outra coisa vira erro + `default`."""
@@ -129,7 +149,8 @@ def _interpolate_env_vars(obj: Any) -> Any:
 
 
 def _as_int(value: Any, name: str, default: int, lo: int, hi: int, cfg: MonitorConfig) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    # `.inf`/`.nan` do YAML são floats: int() deles levanta OverflowError/ValueError (a config nunca pode lançar)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         cfg.errors.append(f"{name}: valor inválido {value!r}; usando {default}.")
         return default
     ivalue = int(value)
@@ -222,7 +243,7 @@ def parse_config(raw: Any) -> MonitorConfig:
                 if key not in _KNOWN_ALERTING:
                     cfg.warnings.append(f"alerting: chave desconhecida ignorada: '{key}'.")
             cooldown = alerting.get("cooldown_seconds", cfg.policy.cooldown_seconds)
-            if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
+            if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or not math.isfinite(cooldown) or cooldown < 0:
                 cfg.errors.append(f"alerting.cooldown_seconds: valor inválido {cooldown!r}; usando 3600.")
                 cooldown = 3600.0
             cfg.policy = AlertPolicy(
@@ -327,7 +348,7 @@ def parse_config(raw: Any) -> MonitorConfig:
             continue
         chat_id = entry.get("chat_id", entry.get("telegram_chat_id"))
         chat_id = str(chat_id) if chat_id not in (None, "") else None
-        if "api.telegram.org" in url or provider == "telegram":
+        if provider == "telegram" or (provider == "auto" and webhook_provider_from_url(url) == "telegram"):
             if not chat_id:
                 cfg.errors.append(f"{where}: Telegram exige 'telegram_chat_id'; descartado.")
                 continue
@@ -343,7 +364,12 @@ def parse_config(raw: Any) -> MonitorConfig:
 
 
 def find_config_path(extra_candidates: list[Path] | None = None) -> Path | None:
-    candidates = [Path(os.getenv("ANHANGA_CONFIG", "targets.yaml")), Path("targets.yaml")]
+    explicit = os.getenv("ANHANGA_CONFIG", "").strip()
+    if explicit:
+        # Caminho explícito do operador: se não existir (typo, volume não montado) é erro, nunca um fallback silencioso
+        # para outro targets.yaml. `load_config` reporta "Falha ao ler ..." e a recarga a quente o pega se aparecer.
+        return Path(explicit)
+    candidates = [Path("targets.yaml")]
     candidates += list(extra_candidates or [])
     candidates.append(Path.cwd() / "targets.yaml")
     for path in candidates:

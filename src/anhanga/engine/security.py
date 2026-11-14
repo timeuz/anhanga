@@ -1043,15 +1043,17 @@ async def audit_cors_active(
     """
     test_origin = "https://evil.anhanga.test"
     try:
-        resp = await client.get(
+        # stream: só os cabeçalhos importam; `client.get` baixaria o corpo inteiro (sem teto) a cada ciclo.
+        async with client.stream(
+            "GET",
             target_url,
             headers={"Origin": test_origin},
             timeout=timeout,
-        )
-        allow_origin = resp.headers.get("access-control-allow-origin", "").strip()
-        allow_creds = (
-            resp.headers.get("access-control-allow-credentials", "").strip().lower() == "true"
-        )
+        ) as resp:
+            allow_origin = resp.headers.get("access-control-allow-origin", "").strip()
+            allow_creds = (
+                resp.headers.get("access-control-allow-credentials", "").strip().lower() == "true"
+            )
         if not allow_origin:
             return CORSInspection(
                 tested=True,

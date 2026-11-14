@@ -14,8 +14,8 @@ RUN pip install --no-cache-dir .
 RUN useradd --system --uid 10001 --home-dir /data anhanga && mkdir -p /data && chown anhanga /data
 USER anhanga
 WORKDIR /data
-ENV ANHANGA_CONFIG=/data/targets.yaml \
-    ANHANGA_DB_PATH=/data/anhanga.db \
+# targets.yaml é achado em /data (WORKDIR); ANHANGA_CONFIG explícito e inexistente é erro, então não o fixamos aqui.
+ENV ANHANGA_DB_PATH=/data/anhanga.db \
     PYTHONUNBUFFERED=1
 VOLUME /data
 EXPOSE 7890

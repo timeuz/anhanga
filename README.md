@@ -437,3 +437,17 @@ use o `testssl.sh` ao lado.
   importação (`ANHANGA_SENSITIVE_COOKIE_REGEX` no `.env` era ignorada).
 - **`anhanga serve` sem `--workers`:** instância única. Cada worker rodaria o loop de monitoramento, e uma queda geraria
   um alerta por worker. Também não use `uvicorn anhanga.main:app --workers N` nem `WEB_CONCURRENCY` > 1.
+
+## 🔁 Correções da revisão da `main` (lote B)
+
+- **`ANHANGA_CONFIG`:** se for definido e o arquivo não existir (typo, volume não montado), o erro "Falha ao ler ..." é
+  logado e nenhum outro `targets.yaml` é usado. Sem a variável, o `targets.yaml` do diretório atual segue valendo. A
+  imagem Docker não fixa mais `ANHANGA_CONFIG`: ela acha `/data/targets.yaml` pelo diretório de trabalho.
+- **Sonda CORS:** lê só os cabeçalhos (`stream`); antes baixava o corpo inteiro, sem teto, a cada ciclo de cada alvo.
+- **YAML:** `.inf`/`.nan` em `interval_seconds`, `samples`, `slo`, `alerting.*` viram erro de configuração com o valor
+  padrão (antes levantavam exceção e podiam derrubar o laço de monitoramento ou desativar um SLO em silêncio).
+- **Provedor do webhook:** detectado pelo **hostname** (`api.telegram.org`; `office.com`, `outlook.com`,
+  `logic.azure.com`, `teams.microsoft.com` e subdomínios). `alerts.myteams.example` e `telegram-relay.internal` são
+  tratados como Slack-compatíveis; o `telegram_chat_id` só é exigido para o Telegram de verdade.
+- **Métrica `probe_ssl_earliest_cert_expiry`:** é removida quando o ciclo não observa certificado (último salto http,
+  TLS não inspecionado), em vez de exportar o valor do ciclo anterior.

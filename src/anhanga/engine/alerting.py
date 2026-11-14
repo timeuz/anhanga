@@ -38,11 +38,21 @@ class AlertEvent:
 
 
 @dataclass
+class Evaluation:
+    """Resultado de um ciclo: o que notificar e quais incidentes abrir/fechar."""
+
+    events: list[AlertEvent] = field(default_factory=list)
+    opened: list[tuple[str, str, float]] = field(default_factory=list)  # (problema, mensagem, início)
+    closed: list[str] = field(default_factory=list)  # problemas resolvidos (independe de notify_recovery)
+
+
+@dataclass
 class _ProblemState:
     streak: int = 0
     clear_streak: int = 0
     active: bool = False
     last_notified: float = 0.0
+    first_seen: float = 0.0
 
 
 @dataclass
@@ -93,12 +103,16 @@ def detect_problems(result: ProbeResult, rules: SLORules) -> dict[str, str]:
 
 
 class AlertManager:
-    def __init__(self, policy: AlertPolicy, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, policy: AlertPolicy, clock: Callable[[], float] = time.time) -> None:
+        # Relógio de parede: os timestamps são persistidos e precisam fazer sentido após reinício.
         self.policy = policy
         self._clock = clock
         self._targets: dict[str, _TargetState] = {}
 
     def evaluate(self, result: ProbeResult, rules: SLORules) -> list[AlertEvent]:
+        return self.evaluate_full(result, rules).events
+
+    def evaluate_full(self, result: ProbeResult, rules: SLORules) -> Evaluation:
         now = self._clock()
         state = self._targets.setdefault(result.target_url, _TargetState())
         problems = detect_problems(result, rules)
@@ -107,16 +121,21 @@ class AlertManager:
         new_msgs: list[str] = []
         remind_msgs: list[str] = []
         recovered: list[str] = []
+        opened: list[tuple[str, str, float]] = []
+        closed: list[str] = []
 
         for key, message in problems.items():
             st = state.problems.setdefault(key, _ProblemState())
             st.streak += 1
             st.clear_streak = 0
+            if st.streak == 1:
+                st.first_seen = now
             if not st.active:
                 if st.streak >= self.policy.failure_threshold:
                     st.active = True
                     st.last_notified = now
                     new_msgs.append(message)
+                    opened.append((key, message, st.first_seen))
             elif self.policy.cooldown_seconds > 0 and now - st.last_notified >= self.policy.cooldown_seconds:
                 st.last_notified = now
                 remind_msgs.append(message)
@@ -133,6 +152,7 @@ class AlertManager:
                 st.clear_streak += 1
                 if st.clear_streak >= self.policy.recovery_threshold:
                     recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
+                    closed.append(key)
                     del state.problems[key]
             else:
                 del state.problems[key]  # problema que nunca chegou a alertar: some em silêncio
@@ -144,13 +164,44 @@ class AlertManager:
             )
         if recovered and self.policy.notify_recovery:
             events.append(AlertEvent("recovery", result.target_url, recovered))
-        return events
+        return Evaluation(events=events, opened=opened, closed=closed)
+
+    # -------------------------------------------------------------- persistência do estado
+    def snapshot(self, target: str) -> list[dict]:
+        st = self._targets.get(target)
+        if not st:
+            return []
+        return [
+            {
+                "problem": key,
+                "streak": p.streak,
+                "clear_streak": p.clear_streak,
+                "active": p.active,
+                "last_notified": p.last_notified,
+                "first_seen": p.first_seen,
+            }
+            for key, p in st.problems.items()
+        ]
+
+    def restore(self, rows: list[dict]) -> None:
+        """Recarrega o estado salvo (ex.: após reinício) — evita repetir alertas ainda ativos."""
+        for r in rows:
+            state = self._targets.setdefault(r["target"], _TargetState())
+            state.problems[r["problem"]] = _ProblemState(
+                streak=r["streak"],
+                clear_streak=r["clear_streak"],
+                active=bool(r["active"]),
+                last_notified=r["last_notified"],
+                first_seen=r["first_seen"],
+            )
 
     def active_problems(self, target: str) -> list[str]:
         st = self._targets.get(target)
         return sorted(k for k, p in st.problems.items() if p.active) if st else []
 
-    def forget(self, keep_targets: set[str]) -> None:
-        """Descarta o estado de alvos removidos da configuração."""
-        for target in [t for t in self._targets if t not in keep_targets]:
+    def forget(self, keep_targets: set[str]) -> list[str]:
+        """Descarta o estado de alvos removidos da configuração e devolve quais foram."""
+        removed = [t for t in self._targets if t not in keep_targets]
+        for target in removed:
             del self._targets[target]
+        return removed

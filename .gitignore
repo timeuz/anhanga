@@ -5,3 +5,7 @@ __pycache__
 AGENTS.md
 *.sarif
 *.swp
+
+*.db
+*.db-wal
+*.db-shm

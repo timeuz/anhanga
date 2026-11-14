@@ -27,6 +27,12 @@ alerting:
   cooldown_seconds: 3600    # intervalo entre lembretes enquanto persistir (0 = sem lembretes)
   notify_recovery: true
 
+# Persistência (SQLite): histórico, uptime, estado dos alertas, incidentes e outbox. ANHANGA_DB_PATH sobrescreve 'path'.
+storage:
+  enabled: true
+  path: anhanga.db
+  retention_days: 14
+
 # Destinos dos alertas (também a allowlist de POST /api/v1/webhooks/notify)
 # webhooks:
 #   - url: "${SLACK_WEBHOOK_URL}"          # ${VAR}: variável de ambiente

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from anhanga import __version__
-from anhanga.engine.alerting import AlertEvent, AlertManager
+from anhanga.engine.alerting import AlertEvent, AlertManager, Evaluation
 from anhanga.engine.config import MonitorConfig, WebhookSpec, find_config_path, load_config
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
@@ -27,8 +28,11 @@ from anhanga.engine.probe import (
 )
 from anhanga.engine.security import RATE_LIMITER
 from anhanga.engine.webhooks import send_webhook_alert
+from anhanga.storage import Store, webhook_key
 from anhanga.metrics.exporter import (
     ALERT_NOTIFICATIONS_TOTAL,
+    ALERT_OUTBOX_PENDING,
+    STORAGE_ERRORS_TOTAL,
     forget_target,
     record_probe_metrics,
     render_adhoc_probe_metrics,
@@ -196,53 +200,169 @@ def _log_config_issues(cfg: MonitorConfig, path: Path | None) -> None:
         logger.warning(f"Configuração{origin}: {msg}")
 
 
-async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
-    """Entrega um evento a todos os webhooks em paralelo, com timeout e uma nova tentativa."""
+_STORE: Store | None = None
+_OUTBOX_RUNNING = False
+_LAST_PRUNE = 0.0
+PRUNE_INTERVAL_SECONDS = 3600.0
 
-    async def _one(wh: WebhookSpec) -> bool:
+
+async def _store_try(fn, *args) -> tuple[bool, object]:
+    """Executa uma operação do SQLite fora do event loop -> (ok, valor). Nunca propaga exceção."""
+    if _STORE is None:
+        return False, None
+    try:
+        return True, await asyncio.to_thread(fn, *args)
+    except Exception as exc:  # noqa: BLE001
+        STORAGE_ERRORS_TOTAL.inc()
+        logger.error(f"Persistência SQLite falhou ({getattr(fn, '__name__', fn)}): {exc}")
+        return False, None
+
+
+async def _store_call(fn, *args):
+    """Como `_store_try`, mas devolve só o valor (None se falhou ou se não há persistência)."""
+    return (await _store_try(fn, *args))[1]
+
+
+async def _send_to_webhook(
+    wh: WebhookSpec, kind: str, messages: list[str], result: ProbeResult, timeout: float
+) -> None:
+    await asyncio.wait_for(
+        send_webhook_alert(
+            webhook_url=wh.url,
+            result=result,
+            provider=wh.provider,
+            violations=messages,
+            chat_id=wh.chat_id,
+            allow_private=wh.allow_private,
+            timeout=timeout / 2,
+            event=kind,
+        ),
+        timeout=timeout,
+    )
+
+
+async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
+    """Entrega um evento a todos os webhooks em paralelo (timeout + 1 nova tentativa).
+
+    Quem falhar vai para a outbox persistente e é reenviado com backoff: o alerta não se perde."""
+
+    async def _one(wh: WebhookSpec) -> str:
         for attempt in (1, 2):
             try:
-                await asyncio.wait_for(
-                    send_webhook_alert(
-                        webhook_url=wh.url,
-                        result=result,
-                        provider=wh.provider,
-                        violations=event.messages,
-                        chat_id=wh.chat_id,
-                        allow_private=wh.allow_private,
-                        timeout=WEBHOOK_DELIVERY_TIMEOUT / 2,
-                        event=event.kind,
-                    ),
-                    timeout=WEBHOOK_DELIVERY_TIMEOUT,
-                )
-                return True
+                await _send_to_webhook(wh, event.kind, event.messages, result, WEBHOOK_DELIVERY_TIMEOUT)
+                return "sent"
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     f"Webhook {event.kind} para {event.target} falhou (tentativa {attempt}/2): {exc}"
                 )
                 if attempt == 1:
                     await asyncio.sleep(2.0)
-        return False
+        if _STORE is not None:
+            ok, _ = await _store_try(
+                _STORE.enqueue, webhook_key(wh.url), event.target, event.kind, event.messages, result.model_dump_json()
+            )
+            if ok:
+                return "queued"
+        return "failed"
 
-    outcomes = await asyncio.gather(*(_one(wh) for wh in webhooks))
-    for ok in outcomes:
-        ALERT_NOTIFICATIONS_TOTAL.labels(kind=event.kind, result="sent" if ok else "failed").inc()
+    for outcome in await asyncio.gather(*(_one(wh) for wh in webhooks)):
+        ALERT_NOTIFICATIONS_TOTAL.labels(kind=event.kind, result=outcome).inc()
+
+
+async def _process_outbox(cfg: MonitorConfig) -> None:
+    """Reenvia notificações pendentes que já venceram o backoff. Uma execução por vez."""
+    global _OUTBOX_RUNNING
+    if _STORE is None or _OUTBOX_RUNNING:
+        return
+    _OUTBOX_RUNNING = True
+    try:
+        rows = await _store_call(_STORE.due) or []
+        by_key = {webhook_key(w.url): w for w in cfg.webhooks}
+        for row in rows:
+            kind = row["kind"]
+            wh = by_key.get(row["webhook_key"])
+            try:
+                result = ProbeResult.model_validate_json(row["result_json"])
+            except ValueError:
+                result = None
+            if wh is None or result is None:  # destino removido da config ou item corrompido
+                await _store_call(_STORE.mark_done, row["id"])
+                ALERT_NOTIFICATIONS_TOTAL.labels(kind=kind, result="dropped").inc()
+                continue
+            created = datetime.fromtimestamp(row["created_ts"], timezone.utc).strftime("%H:%M:%SZ")
+            messages = [f"⏱ Reenvio: entrega original falhou (alerta gerado às {created})", *row["messages"]]
+            try:
+                await _send_to_webhook(wh, kind, messages, result, WEBHOOK_DELIVERY_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001
+                gave_up = await _store_call(_STORE.reschedule, row["id"])
+                logger.warning(f"Reenvio de {kind} ({row['target']}) falhou: {exc}")
+                if gave_up:
+                    ALERT_NOTIFICATIONS_TOTAL.labels(kind=kind, result="dropped").inc()
+                    logger.error(f"Desistindo de {kind} para {row['target']}: tentativas esgotadas ou alerta antigo.")
+            else:
+                await _store_call(_STORE.mark_done, row["id"])
+                ALERT_NOTIFICATIONS_TOTAL.labels(kind=kind, result="sent").inc()
+        size = await _store_call(_STORE.outbox_size)
+        ALERT_OUTBOX_PENDING.set(size or 0)
+    finally:
+        _OUTBOX_RUNNING = False
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 def _dispatch_events(events: list[AlertEvent], result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
     """Agenda a entrega em background: webhook lento nunca atrasa o ciclo de sondagem."""
-    if not webhooks:
-        return
     for event in events:
         logger.info(f"Alerta [{event.kind}] {event.target}: {'; '.join(event.messages)}")
-        task = asyncio.create_task(_deliver_event(event, result, webhooks))
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        if webhooks:
+            _spawn(_deliver_event(event, result, webhooks))
+
+
+def _persist_batch(store: Store, items: list[tuple[ProbeResult, Evaluation, list[dict]]], now: float) -> None:
+    """Grava, numa única passagem, histórico + incidentes + estado de alertas do ciclo."""
+    for res, ev, snapshot in items:
+        store.record_probe(res)
+        for problem, message, started in ev.opened:
+            store.open_incident(res.target_url, problem, started, message)
+        for problem in ev.closed:
+            store.close_incident(res.target_url, problem, now)
+        store.save_alert_state(res.target_url, snapshot)
+
+
+async def _open_store(cfg: MonitorConfig, manager: AlertManager) -> None:
+    """Abre a persistência (só quando há alvos monitorados) e repovoa sparkline e estado de alertas."""
+    global _STORE
+    if _STORE is not None or not cfg.storage.enabled or not cfg.targets:
+        return
+    try:
+        store = await asyncio.to_thread(Store, cfg.storage.path, cfg.storage.retention_days)
+    except Exception as exc:  # noqa: BLE001
+        STORAGE_ERRORS_TOTAL.inc()
+        logger.error(f"Persistência desativada: não foi possível abrir '{cfg.storage.path}': {exc}")
+        return
+    _STORE = store
+    expected = [_normalize_and_validate_scheme(t.url)[0] for t in cfg.targets]
+    for url in expected:
+        totals = await _store_call(store.recent_totals, url, MAX_HISTORY_POINTS)
+        if totals:
+            HISTORY_CACHE[url] = list(totals)
+    rows = await _store_call(store.load_alert_state) or []
+    manager.restore(rows)
+    pending = await _store_call(store.outbox_size) or 0
+    ALERT_OUTBOX_PENDING.set(pending)
+    logger.info(
+        f"Persistência SQLite ativa em '{cfg.storage.path}' (retenção {cfg.storage.retention_days}d): "
+        f"{len(rows)} estado(s) de alerta restaurado(s), {pending} notificação(ões) pendente(s)."
+    )
 
 
 async def background_guardian_loop():
     """Loop assíncrono que sonda os alvos do targets.yaml, avalia alertas com estado e recarrega a config."""
-    global _CONFIG
+    global _CONFIG, _LAST_PRUNE
     path = _config_path()
     cfg = load_config(path)
     _CONFIG = cfg
@@ -261,11 +381,18 @@ async def background_guardian_loop():
             new_mtime = new_path.stat().st_mtime if new_path else None
             if new_path is not None and (new_path, new_mtime) != (path, mtime):
                 path, mtime = new_path, new_mtime
-                cfg = load_config(path)
+                new_cfg = load_config(path)
+                _log_config_issues(new_cfg, path)
+                logger.info(
+                    f"Configuração recarregada: {len(new_cfg.targets)} alvo(s), {len(new_cfg.webhooks)} webhook(s)."
+                )
+                if new_cfg.storage != cfg.storage and _STORE is not None:
+                    logger.warning("Configuração 'storage' alterada: requer reiniciar o servidor para valer.")
+                cfg = new_cfg
                 _CONFIG = cfg
-                _log_config_issues(cfg, path)
-                logger.info(f"Configuração recarregada: {len(cfg.targets)} alvo(s), {len(cfg.webhooks)} webhook(s).")
                 manager.policy = cfg.policy
+
+            await _open_store(cfg, manager)
 
             if cfg.targets:
                 results = await asyncio.gather(
@@ -275,21 +402,36 @@ async def background_guardian_loop():
                     ),
                     return_exceptions=True,
                 )
+                batch: list[tuple[ProbeResult, Evaluation, list[dict]]] = []
                 for spec, res in zip(cfg.targets, results):
                     if not isinstance(res, ProbeResult):
                         logger.error(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}")
                         continue
                     _update_state_and_history(res, is_continuous=True)
                     record_probe_metrics(res)
-                    _dispatch_events(manager.evaluate(res, spec.rules), res, cfg.webhooks)
+                    ev = manager.evaluate_full(res, spec.rules)
+                    _dispatch_events(ev.events, res, cfg.webhooks)
+                    batch.append((res, ev, manager.snapshot(res.target_url)))
+                if batch and _STORE is not None:
+                    await _store_call(_persist_batch, _STORE, batch, time.time())
 
-            # Alvos removidos da config somem do dashboard, das métricas e do estado de alertas.
+            # Alvos removidos da config somem do dashboard, das métricas, do estado de alertas e dos incidentes abertos.
             expected = {_normalize_and_validate_scheme(t.url)[0] for t in cfg.targets}
             for stale in [k for k in STATE_CACHE if k not in expected]:
                 STATE_CACHE.pop(stale, None)
                 HISTORY_CACHE.pop(stale, None)
                 forget_target(stale)
-            manager.forget(expected)
+            removed = manager.forget(expected)
+            if removed and _STORE is not None:
+                await _store_call(_STORE.forget_targets, removed)
+
+            if _STORE is not None:
+                _spawn(_process_outbox(cfg))
+                if time.monotonic() - _LAST_PRUNE >= PRUNE_INTERVAL_SECONDS:
+                    _LAST_PRUNE = time.monotonic()
+                    deleted = await _store_call(_STORE.prune)
+                    if deleted:
+                        logger.info(f"Retenção: {deleted} registro(s) de histórico expirado(s) removido(s).")
         except asyncio.CancelledError:
             logger.info("Desligando loop de vigilância do Anhangá.")
             break
@@ -303,11 +445,15 @@ async def background_guardian_loop():
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _STORE
     task = asyncio.create_task(background_guardian_loop())
     yield
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+    if _STORE is not None:
+        store, _STORE = _STORE, None
+        await asyncio.to_thread(store.close)
 
 
 app = FastAPI(
@@ -419,6 +565,48 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
 async def list_cached_targets():
     """Retorna o último estado conhecido de todos os alvos monitorados."""
     return list(STATE_CACHE.values())
+
+
+def _require_store() -> Store:
+    if _STORE is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Persistência indisponível (desabilitada, sem alvos configurados ou falha ao abrir o banco).",
+        )
+    return _STORE
+
+
+@app.get("/api/v1/history", tags=["Persistence"])
+async def api_history(
+    target: str = Query(..., description="target_url exatamente como aparece em /api/v1/targets"),
+    hours: float = Query(24.0, ge=0.1, le=24 * 365),
+    max_points: int = Query(300, ge=10, le=2000),
+):
+    """Série histórica agregada (checks, up/degraded/down e latência média/mín/máx por bucket)."""
+    store = _require_store()
+    until = time.time()
+    points = await asyncio.to_thread(store.history, target, until - hours * 3600, until, max_points)
+    return {"target": target, "hours": hours, "points": points}
+
+
+@app.get("/api/v1/uptime", tags=["Persistence"])
+async def api_uptime(target: str | None = Query(None, description="Omitir = todos os alvos monitorados")):
+    """Uptime (health=up) e disponibilidade HTTP (up+degraded) em 24h, 7d e 30d, com a cobertura real dos dados."""
+    store = _require_store()
+    targets = [target] if target else sorted(STATE_CACHE)
+    data = await asyncio.to_thread(lambda: {t: store.uptime(t) for t in targets})
+    return {"targets": data}
+
+
+@app.get("/api/v1/incidents", tags=["Persistence"])
+async def api_incidents(
+    target: str | None = Query(None),
+    open_only: bool = Query(False),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Incidentes (alertas que passaram do limiar) abertos e encerrados, com duração."""
+    store = _require_store()
+    return {"incidents": await asyncio.to_thread(store.incidents, target, open_only, limit)}
 
 
 @app.get("/metrics", tags=["Observability"])

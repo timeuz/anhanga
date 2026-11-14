@@ -22,7 +22,7 @@ MAX_INTERVAL_SECONDS = 86_400
 MAX_SAMPLES = 20
 WEBHOOK_PROVIDERS = ("auto", "slack", "teams", "telegram")
 _KNOWN_TOP_LEVEL = {
-    "interval_seconds", "samples", "allow_private", "targets", "webhooks", "alerting", "slo", "min_grade",
+    "interval_seconds", "samples", "allow_private", "targets", "webhooks", "alerting", "slo", "min_grade", "storage",
 }
 _KNOWN_ALERTING = {"failure_threshold", "recovery_threshold", "cooldown_seconds", "notify_recovery"}
 
@@ -80,6 +80,13 @@ class AlertPolicy:
     notify_recovery: bool = True
 
 
+@dataclass(frozen=True)
+class StorageSpec:
+    enabled: bool = True
+    path: str = "anhanga.db"  # ANHANGA_DB_PATH sobrescreve; ":memory:" para efêmero
+    retention_days: int = 14
+
+
 @dataclass
 class MonitorConfig:
     interval_seconds: int = 60
@@ -87,6 +94,7 @@ class MonitorConfig:
     targets: list[TargetSpec] = field(default_factory=list)
     webhooks: list[WebhookSpec] = field(default_factory=list)
     policy: AlertPolicy = field(default_factory=AlertPolicy)
+    storage: StorageSpec = field(default_factory=StorageSpec)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -208,6 +216,23 @@ def parse_config(raw: Any) -> MonitorConfig:
                 cooldown_seconds=float(cooldown),
                 notify_recovery=bool(alerting.get("notify_recovery", True)),
             )
+
+    # storage
+    storage = raw.get("storage")
+    path = os.getenv("ANHANGA_DB_PATH") or "anhanga.db"
+    enabled, retention = True, 14
+    if storage is not None:
+        if not isinstance(storage, dict):
+            cfg.errors.append("'storage' deve ser um mapa (enabled, path, retention_days).")
+        else:
+            for key in storage:
+                if key not in ("enabled", "path", "retention_days"):
+                    cfg.warnings.append(f"storage: chave desconhecida ignorada: '{key}'.")
+            enabled = bool(storage.get("enabled", True))
+            if isinstance(storage.get("path"), str) and storage["path"].strip() and not os.getenv("ANHANGA_DB_PATH"):
+                path = storage["path"].strip()
+            retention = _as_int(storage.get("retention_days", 14), "storage.retention_days", 14, 1, 3650, cfg)
+    cfg.storage = StorageSpec(enabled=enabled, path=path, retention_days=retention)
 
     # targets
     raw_targets = raw.get("targets") or []

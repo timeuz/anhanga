@@ -133,6 +133,26 @@ PROBE_TLS_EXPIRY_DAYS = Gauge(
     registry=REGISTRY,
 )
 
+ALERT_NOTIFICATIONS_TOTAL = Counter(
+    "anhanga_alert_notifications_total",
+    "Notificações de alerta aos webhooks (kind: alert|reminder|recovery; "
+    "result: sent|queued (falhou, na outbox p/ reenvio)|dropped (desistiu)|failed (falhou, sem persistência))",
+    ["kind", "result"],
+    registry=REGISTRY,
+)
+
+ALERT_OUTBOX_PENDING = Gauge(
+    "anhanga_alert_outbox_pending",
+    "Notificações aguardando reenvio na outbox persistente",
+    registry=REGISTRY,
+)
+
+STORAGE_ERRORS_TOTAL = Counter(
+    "anhanga_storage_errors_total",
+    "Erros de leitura/escrita na persistência SQLite (o monitoramento continua sem persistir)",
+    registry=REGISTRY,
+)
+
 PROBE_TLS_VALID = Gauge(
     "anhanga_probe_tls_valid",
     "1 se a cadeia/hostname/validade do certificado TLS foram validados com sucesso",
@@ -158,6 +178,13 @@ PROBE_EXECUTIONS_TOTAL = Counter(
     "anhanga_probe_executions_total",
     "Total de sondagens executadas pelo motor do Anhangá",
     ["target", "result"],
+    registry=REGISTRY,
+)
+
+PROBE_ASSERTIONS_NOT_EVALUATED_TOTAL = Counter(
+    "anhanga_assertions_not_evaluated_total",
+    "Asserções de corpo (regex) que o Anhangá NÃO conseguiu avaliar (falha do monitor, não do alvo). Alerte em rate() > 0",
+    ["target"],
     registry=REGISTRY,
 )
 
@@ -216,6 +243,17 @@ def _remove_series(gauge: Gauge, target: str) -> None:
         pass
 
 
+def forget_target(target: str) -> None:
+    """Remove TODAS as séries (gauges, counters e histogramas) de um alvo retirado da configuração."""
+    for collector in set(REGISTRY._names_to_collectors.values()):  # noqa: SLF001
+        labelnames = getattr(collector, "_labelnames", ())
+        if "target" not in labelnames:
+            continue
+        idx = list(labelnames).index("target")
+        for key in [k for k in list(collector._metrics) if k[idx] == target]:  # noqa: SLF001
+            collector.remove(*key)
+
+
 def _clear_measurements(target: str) -> None:
     """Alvo sem resposta: não existe latência, status, nota nem TLS a reportar (e 0 seria mentira)."""
     for g in (
@@ -245,6 +283,9 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         PROBE_UP.labels(target=target).set(0)
         _clear_measurements(target)
         return
+
+    if result.assertions.not_evaluated:
+        PROBE_ASSERTIONS_NOT_EVALUATED_TOTAL.labels(target=target).inc(len(result.assertions.not_evaluated))
 
     dns_s = round(result.timings.dns_ms / 1000.0, 6)
     tcp_s = round(result.timings.tcp_ms / 1000.0, 6)

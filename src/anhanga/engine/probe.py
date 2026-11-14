@@ -1,12 +1,17 @@
 import asyncio
+import contextvars
 import contextlib
 import ipaddress
 import math
-import multiprocessing
+import json
+import logging
 import re
 import socket
 import ssl
 import statistics
+import subprocess
+from pathlib import Path
+import sys
 import time
 import typing
 from urllib.parse import urlparse
@@ -20,17 +25,20 @@ from collections import deque
 import os
 
 from anhanga import __version__
+from anhanga.engine import revocation
 from anhanga.engine.models import (
     ContentAssertionsResult,
     PhasePercentiles,
     ProbeResult,
     RedirectHop,
+    RevocationInspection,
     SampleMeasurement,
     SamplingStats,
     TimingBreakdown,
     TLSInspection,
     build_timing_breakdown,
 )
+from anhanga.engine.tlsenum import enumerate_tls_bounded
 from anhanga.engine.security import (
     audit_cors_active,
     audit_http_security,
@@ -187,7 +195,15 @@ def _detect_system_dns_resolver() -> str:
     return "127.0.0.53 (systemd-resolved)"
 
 
+# True só dentro das sondagens da vigilância contínua (definido pelo loop do servidor). Scans avulsos
+# (API, /probe, CLI) não alimentam nem recebem o aviso: um terceiro varrendo 3 hosts ruins não pode
+# acusar "resolvedor quebrado" nos alvos monitorados.
+MONITORED_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar("anhanga_monitored_probe", default=False)
+
+
 def _check_common_mode_failure(current_host: str, dns_ms: float, has_error: bool) -> str | None:
+    if not MONITORED_PROBE.get():
+        return None
     now = time.monotonic()
     _GLOBAL_PROBE_HISTORY.append((now, current_host.lower(), dns_ms, has_error))
     cutoff = now - 60.0
@@ -264,31 +280,45 @@ MAX_REGEX_LENGTH: int = 512
 REGEX_TIMEOUT_SECONDS: float = 2.0
 
 
+_REGEX_WORKER = Path(__file__).with_name("_regex_worker.py")
+
+
+def _regex_worker_argv() -> list[str]:
+    """`python -I <arquivo>`: o worker só usa `re`/`json`, então roda por CAMINHO. `-I` ignora PYTHONPATH
+    e o cwd, então `-m anhanga...` só funcionava com o pacote instalado: em execução via `PYTHONPATH=src`
+    toda asserção de regex virava "Regexp inválida"."""
+    return [sys.executable, "-I", str(_REGEX_WORKER)]
+
+
 def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     """Executa re.search em subprocesso descartável com timeout rígido (anti-ReDoS).
 
-    Retorna ("ok", bool) | ("invalid", msg) | ("timeout", None).
+    Subprocesso (e não multiprocessing/spawn, que reimporta o `__main__` do processo-pai e quebra conforme
+    a forma de execução). Retorna ("ok", bool) | ("invalid", msg: padrão inválido) | ("timeout", None) |
+    ("unavailable", msg: o avaliador em si falhou; isso NÃO é culpa do padrão do usuário).
     """
     if len(pattern) > MAX_REGEX_LENGTH:
         return "invalid", f"padrão excede {MAX_REGEX_LENGTH} caracteres"
-    from anhanga.engine import _regex_worker
-
-    ctx = multiprocessing.get_context("spawn")
-    parent, child = ctx.Pipe(duplex=False)
-    proc = ctx.Process(target=_regex_worker.run, args=(child, pattern, text), daemon=True)
-    proc.start()
-    child.close()
     try:
-        if parent.poll(REGEX_TIMEOUT_SECONDS):
-            return parent.recv()
+        proc = subprocess.run(
+            _regex_worker_argv(),
+            input=json.dumps({"pattern": pattern, "text": text}).encode("utf-8"),
+            capture_output=True,
+            timeout=REGEX_TIMEOUT_SECONDS,
+            check=False,
+        )  # TimeoutExpired mata o filho antes de propagar
+    except subprocess.TimeoutExpired:
         return "timeout", None
-    except EOFError:
-        return "invalid", "worker encerrado inesperadamente"
-    finally:
-        if proc.is_alive():
-            proc.kill()
-        proc.join(1.0)
-        parent.close()
+    except OSError as err:
+        return "unavailable", f"não foi possível iniciar o avaliador de regex: {err}"
+    if proc.returncode != 0:
+        tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or ["sem detalhe"]
+        return "unavailable", f"o avaliador de regex encerrou com erro (código {proc.returncode}): {tail[0][:160]}"
+    try:
+        status, value = json.loads(proc.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return "unavailable", "resposta inválida do avaliador de regex"
+    return status, value
 
 
 async def _regex_search(pattern: str, text: str) -> tuple[str, typing.Any]:
@@ -308,6 +338,7 @@ async def _evaluate_content_assertions(
     assert_final_url: str | None = None,
 ) -> ContentAssertionsResult:
     failures: list[str] = []
+    not_evaluated: list[str] = []
 
     for field, pattern, must_match in (
         ("fail_if_body_not_matches_regexp", fail_if_body_not_matches_regexp, True),
@@ -316,7 +347,17 @@ async def _evaluate_content_assertions(
         if not pattern:
             continue
         status, value = await _regex_search(pattern, body_text)
-        if status == "invalid":
+        if status == "unavailable":
+            # Falha do monitor, não do alvo: registra como "não avaliado" (visível) sem reprovar a asserção,
+            # senão um problema de fork/arquivo derrubaria e alertaria TODOS os alvos com regex ao mesmo tempo.
+            logging.getLogger("anhanga.probe").warning(
+                "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
+            )
+            not_evaluated.append(
+                f"{field}: avaliador de regex indisponível ({value}); o padrão não foi avaliado "
+                "(falha do Anhangá, não do alvo)"
+            )
+        elif status == "invalid":
             failures.append(f"Regexp inválida em {field}: {value}")
         elif status == "timeout":
             failures.append(
@@ -342,7 +383,7 @@ async def _evaluate_content_assertions(
             f"URL final obtida ('{final_url}') diverge da URL esperada ('{assert_final_url}')"
         )
 
-    return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures)
+    return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures, not_evaluated=not_evaluated)
 
 
 async def resolve_and_validate_host(
@@ -894,21 +935,12 @@ async def _run_probe_session(
             final_port = final_parsed.port or 443
             target_ip_for_tls = backend.pinned_ips.get(final_host.lower(), resolved_ip or final_host)
 
-            legacy_tls_accepted = False
-            if ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"):
-                legacy_tls_accepted = True
-            elif target_ip_for_tls and final_host:
-                legacy_tls_accepted = await check_tls10_11_accepted_async(
-                    ip=target_ip_for_tls,
-                    server_hostname=final_host,
-                    port=final_port,
-                    timeout=min(0.8, timeout * 0.25),
-                )
-
-            # Cadeia/OCSP via openssl (o módulo ssl não os expõe) e porta 80, em paralelo.
-            (chain_der, ocsp_stapled), http_port_80_status = await asyncio.gather(
+            # Cadeia/OCSP via openssl (o módulo ssl não os expõe), porta 80 e enumeração de
+            # protocolos/cifras (em cache por 6 h), em paralelo.
+            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
                 fetch_tls_extras(
-                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout)
+                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
+                    expected_leaf=_peer_leaf_der(ssl_obj),
                 ),
                 _check_port_80(
                     final_host,
@@ -916,7 +948,24 @@ async def _run_probe_session(
                     timeout=min(timeout, 2.0),
                     ip=target_ip_for_tls,
                 ),
+                enumerate_tls_bounded(
+                    target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
+                ),
             )
+
+            legacy_tls_accepted = bool(ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"))
+            if tls_enum is not None:
+                legacy_tls_accepted = legacy_tls_accepted or any(
+                    (tls_enum.get(v) is not None and tls_enum.get(v).status == "accepted")  # type: ignore[union-attr]
+                    for v in ("TLSv1", "TLSv1.1")
+                )
+            elif not legacy_tls_accepted and target_ip_for_tls and final_host:
+                legacy_tls_accepted = await check_tls10_11_accepted_async(
+                    ip=target_ip_for_tls,
+                    server_hostname=final_host,
+                    port=final_port,
+                    timeout=min(0.8, timeout * 0.25),
+                )
 
             if ssl_obj is not None:
                 tls_info = parse_tls_certificate(
@@ -927,11 +976,24 @@ async def _run_probe_session(
                     ocsp_stapled=ocsp_stapled,
                     validation_error=tls_validation_error,
                 )
+                tls_info.enumeration = tls_enum
             else:
                 tls_info = TLSInspection(
                     valid=False,
                     validation_error=tls_validation_error or "handshake TLS sem objeto SSL",
                     tls10_11_accepted=legacy_tls_accepted,
+                    enumeration=tls_enum,
+                )
+
+            # Revogação (OCSP ativo, CRL de fallback): só faz sentido se o certificado ainda é válido.
+            if tls_info.valid and revocation.enabled():
+                _apply_revocation(
+                    tls_info,
+                    await revocation.check_revocation(
+                        # OCSP/CRL/AIA vêm do certificado do alvo: nunca herdam o allow_private dele.
+                        chain_der, allow_private=revocation.endpoints_allow_private(),
+                        timeout=min(timeout, 5.0), deadline=min(timeout, 4.0),
+                    ),
                 )
 
         # Sonda ativa de CORS enviando Origin hostil
@@ -1039,6 +1101,90 @@ def _validate_hostname_syntax(host: str) -> str | None:
     return None
 
 
+def _peer_leaf_der(ssl_obj: typing.Any) -> bytes | None:
+    try:
+        return ssl_obj.getpeercert(binary_form=True) if ssl_obj is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _failure_result(url: str, exc: BaseException, timeout: float) -> ProbeResult | None:
+    """Resultado de falha para SSRF/timeout (mesmo tratamento no 1º passe e no retry sem verificação)."""
+    if isinstance(exc, SSRFBlockedError):
+        return ProbeResult(target_url=url, resolved_ip=exc.ip, error=str(exc))
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
+        return ProbeResult(
+            target_url=url,
+            error=f"Timeout rígido excedido ({timeout:.1f}s): {str(exc) or 'limite de tempo esgotado'}",
+        )
+    return None
+
+
+def _is_tls_handshake_error(exc: BaseException) -> bool:
+    """Por tipo (não por texto: um hostname 'ssl.exemplo.com' não é erro de TLS): há um ssl.SSLError na cadeia?"""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, ssl.SSLError):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+async def _diagnose_tls_failure(
+    url: str, exc_str: str, allow_private: bool, timeout: float,
+    resolve_override: dict[str, str] | None,
+) -> ProbeResult | None:
+    """Handshake falhou: enumera protocolos/cifras para explicar *por quê* (ex.: só TLS 1.0, só cifras
+    fracas) em vez de reduzir tudo a "offline". None se não for possível diagnosticar."""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return None
+    port = parsed.port or 443
+    try:
+        ip = (await resolve_and_validate_host(
+            parsed.hostname, port, allow_private=allow_private, dns_timeout=min(3.0, timeout),
+            resolve_override=resolve_override,
+        ))[0]
+        # Roda fora do prazo global: o orçamento acompanha o `timeout` pedido (antes era 10 s fixos,
+        # então `?timeout=1` num host com handshake ruim levava 15-20 s).
+        enum = await enumerate_tls_bounded(
+            ip, port, parsed.hostname, budget=min(10.0, max(1.0, 2 * timeout)), timeout=min(3.0, timeout)
+        )
+    except Exception:
+        return None
+    if enum is None:
+        return None
+    accepted = [p for p in enum.protocols if p.status == "accepted"]
+    if accepted:
+        detail = "; ".join(
+            f"{p.protocol}" + (f" ({len(p.weak_ciphers)} cifra(s) fraca(s))" if p.weak_ciphers else "")
+            for p in accepted
+        )
+        hint = f"servidor aceita apenas: {detail}"
+    elif any(p.status == "unknown" for p in enum.protocols):
+        hint = "não foi possível determinar os protocolos aceitos"
+    else:
+        hint = "nenhum protocolo TLS 1.0–1.3 testável é aceito (cifras/curvas incompatíveis com este cliente?)"
+    return ProbeResult(
+        target_url=url,
+        resolved_ip=ip,
+        error=f"Erro HTTP/Conexão: falha no handshake TLS ({hint}). Detalhe: {exc_str}",
+        tls=TLSInspection(valid=False, validation_error="handshake TLS falhou", enumeration=enum,
+                          tls10_11_accepted=any(p.protocol in ("TLSv1", "TLSv1.1") for p in accepted)),
+    )
+
+
+def _apply_revocation(tls: TLSInspection, rev: "RevocationInspection") -> None:
+    """Anexa o resultado da revogação ao TLS; certificado REVOGADO deixa de ser válido (health -> degraded)."""
+    tls.revocation = rev
+    if rev.status == "revoked":
+        when = f" em {rev.revoked_at:%Y-%m-%d}" if rev.revoked_at else ""
+        tls.valid = False
+        tls.validation_error = f"certificate revoked ({(rev.method or '').upper()}{when})"
+
+
 def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
     """
     Normaliza a URL garantindo que esquemas proibidos (file://, gopher://, ftp://, etc.)
@@ -1109,8 +1255,11 @@ async def execute_probe(
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
-    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 3.0, timeout + 2.0))
+    # Folga para o que roda após a sondagem HTTP (enumeração TLS ≤ 3 s em paralelo com openssl/porta 80,
+    # depois revogação ≤ 4 s): cada etapa tem prazo próprio e degrada sozinha, então o prazo global não a corta.
+    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 9.0, timeout + 8.0))
 
+    started = time.monotonic()
     try:
         return await asyncio.wait_for(
             _run_probe_session(
@@ -1138,7 +1287,7 @@ async def execute_probe(
     except (asyncio.TimeoutError, httpx.TimeoutException) as timeout_err:
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({timeout}s): {timeout_err or 'limite de tempo esgotado'}",
+            error=f"Timeout rígido excedido ({overall_timeout:.1f}s): {str(timeout_err) or 'limite de tempo esgotado'}",
         )
     except Exception as exc:
         exc_str = str(exc)
@@ -1151,6 +1300,17 @@ async def execute_probe(
             verify_reason = (
                 reason_match.group(1).strip() if reason_match else "falha na verificação do certificado"
             )
+            # prazo RESTANTE do total (o retry não pode dobrar o tempo máximo da requisição). Sem folga
+            # suficiente nem tenta, em vez de forçar um piso que estoura o prazo global.
+            remaining = overall_timeout - (time.monotonic() - started)
+            if remaining < 1.0:
+                return ProbeResult(
+                    target_url=url,
+                    error=(
+                        f"Timeout rígido excedido ({overall_timeout:.0f}s): prazo total esgotado antes de "
+                        f"repetir sem verificação do certificado ({verify_reason})"
+                    ),
+                )
             try:
                 return await asyncio.wait_for(
                     _run_probe_session(
@@ -1168,13 +1328,21 @@ async def execute_probe(
                         max_payload_bytes=max_payload_bytes,
                         assert_final_url=assert_final_url,
                     ),
-                    timeout=overall_timeout,
+                    timeout=remaining,
                 )
             except Exception as inner_exc:
-                return ProbeResult(
+                return _failure_result(url, inner_exc, overall_timeout) or ProbeResult(
                     target_url=url,
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )
+
+        if _is_tls_handshake_error(exc):
+            diagnosed = await _diagnose_tls_failure(
+                url, exc_str, allow_private=allow_private, timeout=timeout,
+                resolve_override=resolve_override,
+            )
+            if diagnosed is not None:
+                return diagnosed
 
         return ProbeResult(
             target_url=url,

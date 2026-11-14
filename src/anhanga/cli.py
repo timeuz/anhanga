@@ -14,17 +14,9 @@ from rich.text import Text
 
 from anhanga import __version__
 from anhanga.engine.models import ProbeResult
+from anhanga.engine.config import GRADE_RANK, parse_duration_ms
 from anhanga.engine.probe import execute_probe
 from anhanga.engine.webhooks import send_webhook_alert
-
-GRADE_RANK: dict[str, int] = {
-    "A+": 6,
-    "A": 5,
-    "B": 4,
-    "C": 3,
-    "D": 2,
-    "F": 1,
-}
 
 SARIF_SCHEMA_URI = "https://json.schemastore.org/sarif-2.1.0.json"
 
@@ -36,42 +28,6 @@ class CLIArgumentError(ValueError):
 class _NonExitingArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise CLIArgumentError(message)
-
-
-def parse_duration_ms(val: str | int | float) -> float:
-    """
-    Converte strings de duração ('500ms', '0.5s', '1.5s', '250') para milissegundos (float).
-    Levanta ValueError se o formato for inválido ou <= 0.
-    """
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        fval = float(val)
-        if fval <= 0:
-            raise ValueError(f"Duração deve ser maior que zero: {val}")
-        return round(fval, 2)
-
-    if not isinstance(val, str):
-        raise ValueError(f"Formato de duração inválido: {val!r}")
-
-    raw = val.strip().lower()
-    if not raw:
-        raise ValueError("Formato de duração vazio.")
-
-    m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*(ms|s|m)?$", raw)
-    if not m:
-        raise ValueError(f"Formato de duração inválido: '{val}'. Use ex: '500ms', '0.5s' ou '500'.")
-
-    number = float(m.group(1))
-    unit = m.group(2) or "ms"
-    if number <= 0:
-        raise ValueError(f"Duração deve ser positiva: '{val}'.")
-
-    if unit == "ms":
-        return round(number, 2)
-    if unit == "s":
-        return round(number * 1000.0, 2)
-    if unit == "m":
-        return round(number * 60_000.0, 2)
-    raise ValueError(f"Unidade de duração desconhecida: '{unit}'.")
 
 
 def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = None) -> bool:
@@ -337,6 +293,31 @@ def build_json_report(
     }
 
 
+def _revocation_text(tls: Any) -> str:
+    rev = getattr(tls, "revocation", None)
+    if rev is None:
+        return "não verificada"
+    labels = {"good": "não revogado", "revoked": "[bold red]REVOGADO[/bold red]", "unknown": "desconhecido pelo respondedor",
+              "unavailable": "não verificável", "error": "falha na checagem"}
+    method = f" ({rev.method.upper()})" if rev.method and rev.status != "unavailable" else ""
+    return labels.get(rev.status, rev.status) + method
+
+
+def _protocols_text(tls: Any) -> str | None:
+    enum = getattr(tls, "enumeration", None)
+    if enum is None:
+        return None
+    parts = []
+    for p in enum.protocols:
+        if p.status == "accepted":
+            bad = p.protocol in ("TLSv1", "TLSv1.1") or p.weak_ciphers
+            tag = f"{p.protocol} ({len(p.ciphers)} cifras" + (f", {len(p.weak_ciphers)} fracas" if p.weak_ciphers else "") + ")"
+            parts.append(f"[bold red]{tag}[/bold red]" if bad else f"[green]{tag}[/green]")
+        elif p.status == "unknown":
+            parts.append(f"[yellow]{p.protocol}?[/yellow]")
+    return ", ".join(parts) if parts else "nenhum protocolo testável aceito"
+
+
 def render_rich_report(
     result: ProbeResult,
     violations: list[str],
@@ -473,7 +454,9 @@ def render_rich_report(
                 f"Emissor: {result.tls.issuer or 'N/A'}  |  "
                 f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold] "
                 f"({'N/A' if result.tls.relative_validity_percent_remaining is None else format(result.tls.relative_validity_percent_remaining, '.1f')}% restante)  |  "
-                f"OCSP: {result.tls.ocsp_status}"
+                f"OCSP: {result.tls.ocsp_status}  |  "
+                f"Revogação: {_revocation_text(result.tls)}"
+                + (f"\nProtocolos aceitos: {_protocols_text(result.tls)}" if _protocols_text(result.tls) else "")
                 + (f"\nMotivo da invalidez: {result.tls.validation_error}" if not result.tls.valid and result.tls.validation_error else ""),
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",

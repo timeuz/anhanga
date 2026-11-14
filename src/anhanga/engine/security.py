@@ -4,6 +4,7 @@ import shutil
 from collections import deque
 import hashlib
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -16,7 +17,9 @@ from typing import Any
 
 import httpx
 
+from anhanga.engine.csp import analyze_csp
 from anhanga.engine.models import (
+    CSPAnalysis,
     CORSInspection,
     CookieAuditItem,
     SecurityAudit,
@@ -578,7 +581,105 @@ _HOSTNAME_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
 _PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
 
 
+EXTRAS_CACHE_TTL = 300.0
+EXTRAS_MAX_CONCURRENCY = 8
+_extras_cache: dict[tuple[str, int], tuple[float, list[bytes], bool | None]] = {}
+_extras_sem: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def cancel_extras_background() -> None:
+    """Desligamento: cancela as execuções destacadas de `openssl s_client` (que matam o filho ao cancelar)."""
+    for task in list(_extras_inflight.values()):
+        task.cancel()
+    _extras_inflight.clear()
+
+
+def clear_extras_cache() -> None:
+    global _extras_sem
+    _extras_cache.clear()
+    _extras_inflight.clear()
+    _extras_sem = None
+
+
+def _get_extras_semaphore() -> asyncio.Semaphore:
+    global _extras_sem
+    loop = asyncio.get_running_loop()
+    if _extras_sem is None or _extras_sem[0] is not loop:
+        _extras_sem = (loop, asyncio.Semaphore(EXTRAS_MAX_CONCURRENCY))
+    return _extras_sem[1]
+
+
+_extras_inflight: dict[tuple[str, int], "asyncio.Future[tuple[list[bytes], bool | None]]"] = {}
+
+
 async def fetch_tls_extras(
+    ip: str, port: int, server_hostname: str, timeout: float = 4.0, expected_leaf: bytes | None = None
+) -> tuple[list[bytes], bool | None]:
+    """Cadeia + OCSP grampeado, com cache, limite de concorrência e prazo TOTAL de `timeout`.
+
+    - Cache de 5 min por host:porta. Só vale se `expected_leaf` (certificado da conexão atual) for conhecido
+      e igual ao da cadeia em cache: leaf desconhecido = miss (falhar aberto atribuiria a cadeia/revogação do
+      certificado antigo ao novo após uma renovação).
+    - No máx. 8 `openssl s_client` simultâneos; a espera pela vaga conta no prazo e, se estourar, a etapa
+      degrada para ([], None) neste ciclo (não segura nem derruba a sondagem). Quem rodou já preencheu o cache.
+    - Single-flight por host:porta: chamadas concorrentes dividem a mesma execução."""
+    key = (server_hostname.lower(), port)
+    hit = _extras_cache.get(key)
+    if (
+        hit
+        and expected_leaf is not None
+        and time.monotonic() - hit[0] < EXTRAS_CACHE_TTL
+        and hit[1]
+        and hit[1][0] == expected_leaf
+    ):
+        return hit[1], hit[2]
+    loop = asyncio.get_running_loop()
+    task = _extras_inflight.get(key)
+    if task is not None and task.get_loop() is not loop:
+        task = None  # herdado de outro event loop (testes/reinício): não aguardar
+    if task is None:
+        task = asyncio.ensure_future(_extras_task(key, ip, port, server_hostname, timeout))
+        _extras_inflight[key] = task
+
+        def _done(t: "asyncio.Future") -> None:
+            if _extras_inflight.get(key) is t:
+                _extras_inflight.pop(key, None)
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_done)
+    try:
+        chain, stapled = await asyncio.wait_for(asyncio.shield(task), timeout=timeout + 0.5)
+    except Exception:  # noqa: BLE001
+        return [], None
+    if expected_leaf is not None and chain and chain[0] != expected_leaf:
+        # Entrou numa execução iniciada antes de uma renovação: a cadeia é do certificado antigo.
+        return [], None
+    return chain, stapled
+
+
+async def _extras_task(
+    key: tuple[str, int], ip: str, port: int, server_hostname: str, timeout: float
+) -> tuple[list[bytes], bool | None]:
+    started = time.monotonic()
+    sem = _get_extras_semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=timeout * 0.5)
+    except asyncio.TimeoutError:
+        return [], None  # fila cheia: degrada neste ciclo
+    try:
+        remaining = max(0.5, timeout - (time.monotonic() - started))
+        chain, stapled = await _fetch_tls_extras_uncached(ip, port, server_hostname, remaining)
+    finally:
+        sem.release()
+    if chain:
+        if len(_extras_cache) > 512:
+            _extras_cache.pop(next(iter(_extras_cache)))
+        _extras_cache[key] = (time.monotonic(), chain, stapled)
+    return chain, stapled
+
+
+async def _fetch_tls_extras_uncached(
     ip: str, port: int, server_hostname: str, timeout: float = 4.0
 ) -> tuple[list[bytes], bool | None]:
     """Obtém (cadeia DER enviada pelo servidor, OCSP grampeado?) via `openssl s_client`.
@@ -605,10 +706,12 @@ async def fetch_tls_extras(
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(b""), timeout=timeout)
-    except Exception:
+    except BaseException as exc:  # inclui CancelledError: o `openssl s_client` não pode ficar órfão
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
         return [], None
     text = out.decode("utf-8", errors="replace")
     chain: list[bytes] = []
@@ -629,6 +732,7 @@ def parse_tls_certificate(
     ssl_obj: Any,
     verified: bool = True,
     tls10_11_accepted: bool = False,
+    enumeration: Any = None,
     chain_der: list[bytes] | None = None,
     ocsp_stapled: bool | None = None,
     validation_error: str | None = None,
@@ -809,6 +913,7 @@ def parse_tls_certificate(
         protocol=protocol,
         deprecated_protocol=deprecated_protocol,
         tls10_11_accepted=legacy_accepted,
+        enumeration=enumeration,
         cipher=cipher_name,
         cipher_bits=cipher_bits,
         issuer=issuer,
@@ -830,13 +935,41 @@ def parse_tls_certificate(
     )
 
 
-_SENSITIVE_COOKIE_RE = re.compile(
-    os.getenv(
-        "ANHANGA_SENSITIVE_COOKIE_REGEX",
-        r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|csrf|xsrf|identity|account)",
-    ),
-    re.I,
+# csrf/xsrf ficam FORA de propósito: cookies de double-submit (csrftoken do Django, XSRF-TOKEN do Angular)
+# precisam ser legíveis por JS; exigir HttpOnly neles seria um falso positivo que penaliza o design correto.
+# `_csrf` (segredo do csurf/Express) é o contrário do double-submit: deve ser HttpOnly, então entra.
+_DEFAULT_SENSITIVE_COOKIE_PATTERN = (
+    r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|identity|account|^_csrf$)"
 )
+
+
+def _compile_sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str], bool]":
+    """(regex, é_do_operador). Regex do operador inválida não derruba a importação (e a app inteira): cai no
+    padrão, e então `é_do_operador` é False, para que as exceções do padrão (CSRF) continuem valendo."""
+    if custom:
+        try:
+            return re.compile(custom, re.I), True
+        except re.error as exc:
+            logging.getLogger("anhanga").error(
+                f"ANHANGA_SENSITIVE_COOKIE_REGEX inválida ({exc}); usando o padrão."
+            )
+    return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I), False
+
+
+_SENSITIVE_COOKIE_RE, _CUSTOM_COOKIE_ACTIVE = _compile_sensitive_cookie_regex(
+    os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX")
+)
+# Só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). Não basta conter
+# "csrf": `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
+_CSRF_TOKEN_COOKIE_RE = re.compile(r"^(?:__(?:host|secure)-)?_?(?:x-)?(?:csrf|xsrf)[-_]?token$", re.I)
+
+
+def _is_sensitive_cookie(name: str) -> bool:
+    """Cookie de sessão/autenticação. No padrão, tokens CSRF de double-submit ficam de fora mesmo casando com
+    `token`: precisam ser legíveis por JS. Regex válida do operador vale como escrita."""
+    if not _SENSITIVE_COOKIE_RE.search(name):
+        return False
+    return _CUSTOM_COOKIE_ACTIVE or not _CSRF_TOKEN_COOKIE_RE.match(name)
 
 
 def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditItem]:
@@ -865,7 +998,7 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
             issues.append("Ausência da flag Secure")
         # HttpOnly só é exigido de cookies de sessão/autenticação; analytics/preferências
         # (ex.: _octo, _ga) precisam ser legíveis por JS e não são falha.
-        sensitive = bool(_SENSITIVE_COOKIE_RE.search(cookie_name))
+        sensitive = _is_sensitive_cookie(cookie_name)
         if sensitive and not httponly:
             issues.append("Ausência da flag HttpOnly (cookie de sessão/autenticação)")
         if not samesite:
@@ -958,6 +1091,131 @@ async def audit_cors_active(
             status="Não testado (Falha na requisição)",
             details=str(exc),
         )
+
+
+_CSP_QUALITY_FACTOR = {"strong": 1.0, "moderate": 0.8, "weak": 0.5}
+_CSP_REPORT_ONLY_NOTE = (
+    " Atenção: há uma política em Report-Only, mas ela apenas reporta violações; promova-a para "
+    "Content-Security-Policy para que passe a bloquear."
+)
+
+
+def _tls_enum_findings(tls: TLSInspection | None) -> tuple[list[SecurityFinding], int | None, int]:
+    """Findings da enumeração de protocolos/cifras → (findings, teto do transporte, penalidade)."""
+    enum = getattr(tls, "enumeration", None) if tls else None
+    if enum is None:
+        return [], None, 0
+    out: list[SecurityFinding] = []
+    cap: int | None = None
+    penalty = 0
+    legacy = [p.protocol for p in enum.protocols if p.protocol in ("TLSv1", "TLSv1.1") and p.status == "accepted"]
+    weak = sorted({c for p in enum.protocols for c in p.weak_ciphers})
+    nofs = sorted({c for p in enum.protocols for c in p.no_forward_secrecy})
+    if legacy:
+        out.append(SecurityFinding(
+            id="SEC-TLS-LEGACY", header="TLS (protocolos legados)", category="tls", severity="high", weight=15,
+            description=f"O servidor aceita {', '.join(legacy)}, protocolos obsoletos (RFC 8996) sujeitos a ataques como BEAST/POODLE-TLS.",
+            remediation="Desative TLS 1.0/1.1 e mantenha apenas TLS 1.2 e 1.3.",
+            snippets={
+                "nginx": "ssl_protocols TLSv1.2 TLSv1.3;",
+                "apache": "SSLProtocol -all +TLSv1.2 +TLSv1.3",
+                "haproxy": "ssl-default-bind-options ssl-min-ver TLSv1.2",
+            },
+        ))
+        cap = 10
+    if weak:
+        shown = ", ".join(weak[:8]) + (f" (+{len(weak) - 8})" if len(weak) > 8 else "")
+        out.append(SecurityFinding(
+            id="SEC-TLS-WEAK-CIPHER", header="TLS (cifras fracas)", category="tls", severity="high", weight=15,
+            description=f"O servidor aceita {len(weak)} cifra(s) fraca(s) (NULL, anônimas, RC4/DES/3DES, EXPORT ou MD5): {shown}.",
+            remediation="Restrinja as cifras a suítes AEAD com forward secrecy (ECDHE + AES-GCM/ChaCha20).",
+            snippets={
+                "nginx": "ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;\nssl_prefer_server_ciphers off;",
+                "apache": "SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384",
+            },
+        ))
+        cap = 10 if cap is None else min(cap, 10)
+    if nofs and not weak:
+        shown = ", ".join(nofs[:6]) + (f" (+{len(nofs) - 6})" if len(nofs) > 6 else "")
+        out.append(SecurityFinding(
+            id="SEC-TLS-NO-PFS", header="TLS (forward secrecy)", category="tls", severity="low", weight=5,
+            description=f"O servidor aceita cifras sem forward secrecy (troca de chaves RSA estática): {shown}. Capturas de tráfego passadas ficam decifráveis se a chave privada vazar.",
+            remediation="Remova as suítes sem ECDHE/DHE.",
+            snippets={},
+        ))
+        penalty = 5
+    return out, cap, penalty
+
+
+_COOP_OK = {"same-origin", "same-origin-allow-popups"}
+_COEP_OK = {"require-corp", "credentialless"}
+_CORP_VALUES = {"same-origin", "same-site", "cross-origin"}
+
+
+def _isolation_findings(headers: httpx.Headers) -> list[SecurityFinding]:
+    """COOP/COEP/CORP. Sempre `info`/peso 0: são endurecimentos opcionais que podem quebrar embeds de
+    terceiros, então não penalizam a nota. Valores inválidos viram `low` (o navegador os ignora)."""
+    out: list[SecurityFinding] = []
+    coop = headers.get("Cross-Origin-Opener-Policy", "").split(";")[0].strip().lower()
+    coep = headers.get("Cross-Origin-Embedder-Policy", "").split(";")[0].strip().lower()
+    corp = headers.get("Cross-Origin-Resource-Policy", "").strip().lower()
+
+    def add(fid: str, header: str, sev: str, desc: str, fix: str, value: str) -> None:
+        out.append(SecurityFinding(
+            id=fid, header=header, category="header", severity=sev,  # type: ignore[arg-type]
+            weight=0, description=desc, remediation=fix, safe_default=value,
+            snippets=_build_header_snippets(header, value),
+        ))
+
+    if not coop or coop == "unsafe-none":
+        add("SEC-COOP", "Cross-Origin-Opener-Policy", "info",
+            "COOP ausente: janelas de outras origens que abrem seu site (ou que ele abre) mantêm referência umas às outras, "
+            "o que expõe a ataques de canal lateral (XS-Leaks, Spectre) e é pré-requisito do isolamento de origem cruzada.",
+            "Use same-origin. Use same-origin-allow-popups se o site depende de popups de login/pagamento de terceiros.",
+            "same-origin")
+    elif coop not in _COOP_OK:
+        add("SEC-COOP", "Cross-Origin-Opener-Policy", "low",
+            f"COOP com valor inválido ({coop!r}): o navegador o ignora.", "Use same-origin.", "same-origin")
+    if not coep or coep == "unsafe-none":
+        add("SEC-COEP", "Cross-Origin-Embedder-Policy", "info",
+            "COEP ausente: sem COOP+COEP o site não fica 'cross-origin isolated' (necessário para SharedArrayBuffer e "
+            "temporizadores de alta resolução). Ative apenas se todos os recursos de terceiros enviarem CORP/CORS, "
+            "senão eles deixam de carregar.",
+            "Teste primeiro com Cross-Origin-Embedder-Policy-Report-Only: require-corp.",
+            "require-corp")
+    elif coep not in _COEP_OK:
+        add("SEC-COEP", "Cross-Origin-Embedder-Policy", "low",
+            f"COEP com valor inválido ({coep!r}): o navegador o ignora.", "Use require-corp.", "require-corp")
+    if corp and corp not in _CORP_VALUES:
+        add("SEC-CORP", "Cross-Origin-Resource-Policy", "low",
+            f"CORP com valor inválido ({corp!r}): o navegador o ignora.", "Use same-origin, same-site ou cross-origin.", "same-origin")
+    return out
+
+
+def _csp_points(base: int, analysis: CSPAnalysis) -> int:
+    """Pontos da CSP aplicada, proporcionais à qualidade (CSP com 'unsafe-inline'/'*' vale metade)."""
+    return round(base * _CSP_QUALITY_FACTOR.get(analysis.strength, 1.0))
+
+
+def _csp_quality_finding(analysis: CSPAnalysis) -> SecurityFinding:
+    worst = "high" if any(i.severity == "high" for i in analysis.issues) else "medium"
+    details = "; ".join(f"[{i.severity}] {i.message}" for i in analysis.issues[:6])
+    stricter = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+    return SecurityFinding(
+        id="SEC-CSP-WEAK",
+        header="Content-Security-Policy (qualidade)",
+        category="header",
+        severity=worst,  # type: ignore[arg-type]
+        weight=max(2, 15 - _csp_points(15, analysis)),
+        safe_default=stricter,
+        description=(
+            f"A CSP existe, mas é {analysis.strength}: {details}. "
+            "Substitua 'unsafe-inline' por nonces/hashes (com 'strict-dynamic'), liste hosts explícitos "
+            "e defina object-src 'none' e base-uri."
+        ),
+        remediation="Endureça a política (exemplo-base abaixo) validando antes em Report-Only.",
+        snippets=_build_header_snippets("Content-Security-Policy", stricter),
+    )
 
 
 def audit_http_security(
@@ -1101,21 +1359,26 @@ def audit_http_security(
     # 2.2 Content-Security-Policy & Clickjacking (até 15 pontos)
     csp_info = SECURITY_HEADERS_DETAILS["Content-Security-Policy"]
     csp_default_snippets = _build_header_snippets("Content-Security-Policy-Report-Only", csp_info["value"])
-    csp_raw = headers.get("Content-Security-Policy") or headers.get("Content-Security-Policy-Report-Only", "")
-    has_csp = bool(csp_raw)
+    # Report-Only NÃO bloqueia nada: só a política aplicada conta como proteção (e sua qualidade pesa na nota).
+    csp_raw = headers.get("Content-Security-Policy", "")
+    csp_report_only = headers.get("Content-Security-Policy-Report-Only", "")
+    csp_analysis = analyze_csp(csp_raw, csp_report_only)
+    has_csp = csp_analysis.enforced
+    if csp_report_only:
+        present["Content-Security-Policy-Report-Only"] = csp_report_only
     csp_frame_ancestors = bool(re.search(r"\bframe-ancestors\b", csp_raw, re.IGNORECASE)) if has_csp else False
     has_xfo = "X-Frame-Options" in headers
 
     if has_csp:
         present["Content-Security-Policy"] = csp_raw
         if csp_frame_ancestors:
-            headers_score += 15
+            headers_score += _csp_points(15, csp_analysis)
             present["X-Frame-Options (via CSP frame-ancestors)"] = "Ativo via Content-Security-Policy frame-ancestors"
         elif has_xfo:
-            headers_score += 15
+            headers_score += _csp_points(15, csp_analysis)
             present["X-Frame-Options"] = headers["X-Frame-Options"]
         else:
-            headers_score += 10
+            headers_score += _csp_points(10, csp_analysis)
             xfo_info = SECURITY_HEADERS_DETAILS["X-Frame-Options"]
             missing_findings.append(
                 SecurityFinding(
@@ -1130,6 +1393,8 @@ def audit_http_security(
                     snippets=_build_header_snippets("X-Frame-Options", xfo_info["value"]),
                 )
             )
+        if csp_analysis.strength != "strong":
+            missing_findings.append(_csp_quality_finding(csp_analysis))
     else:
         if has_xfo:
             headers_score += 5
@@ -1142,7 +1407,7 @@ def audit_http_security(
                     severity="high",
                     weight=10,
                     safe_default=csp_info.get("safe_default"),
-                    description=csp_info["desc"],
+                    description=csp_info["desc"] + _CSP_REPORT_ONLY_NOTE * bool(csp_report_only),
                     remediation=csp_info["fix"],
                     snippets=csp_default_snippets,
                 )
@@ -1156,7 +1421,7 @@ def audit_http_security(
                     severity="high",
                     weight=15,
                     safe_default=csp_info.get("safe_default"),
-                    description=csp_info["desc"],
+                    description=csp_info["desc"] + _CSP_REPORT_ONLY_NOTE * bool(csp_report_only),
                     remediation=csp_info["fix"],
                     snippets=csp_default_snippets,
                 )
@@ -1224,6 +1489,13 @@ def audit_http_security(
     # Referrer-Policy informativo
     if "Referrer-Policy" in headers:
         present["Referrer-Policy"] = headers["Referrer-Policy"]
+
+    # Isolamento de origem cruzada (COOP/COEP/CORP): informativo, não altera a nota.
+    for iso_name in ("Cross-Origin-Opener-Policy", "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy"):
+        if iso_name in headers:
+            present[iso_name] = headers[iso_name]
+    if is_https:
+        missing_findings.extend(_isolation_findings(headers))
 
     # 3. Dimensão: Higiene de Aplicação (até 20 pontos)
     hygiene_score = 20
@@ -1297,6 +1569,9 @@ def audit_http_security(
         )
 
     # Garante limites e soma total
+    tls_findings, tls_cap, tls_penalty = _tls_enum_findings(tls)
+    missing_findings.extend(tls_findings)
+    transport_score -= tls_penalty
     transport_score = max(0, min(40, transport_score))
     headers_score = max(0, min(40, headers_score))
     hygiene_score = max(0, min(20, hygiene_score))
@@ -1307,6 +1582,8 @@ def audit_http_security(
         or tls.tls10_11_accepted
     ):
         transport_score = min(transport_score, 10)
+    if tls_cap is not None:
+        transport_score = min(transport_score, tls_cap)
 
     total_score = max(0, min(100, transport_score + headers_score + hygiene_score))
 
@@ -1343,4 +1620,5 @@ def audit_http_security(
         csp_frame_ancestors=csp_frame_ancestors,
         permissions_camera_restricted=permissions_camera_restricted,
         evaluated_url=evaluated_url,
+        csp_analysis=csp_analysis,
     )

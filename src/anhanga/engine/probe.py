@@ -964,8 +964,9 @@ async def _run_probe_session(
                 _apply_revocation(
                     tls_info,
                     await revocation.check_revocation(
-                        chain_der, allow_private=allow_private, timeout=min(timeout, 5.0),
-                        deadline=min(timeout, 4.0),
+                        # OCSP/CRL/AIA vêm do certificado do alvo: nunca herdam o allow_private dele.
+                        chain_der, allow_private=revocation.endpoints_allow_private(),
+                        timeout=min(timeout, 5.0), deadline=min(timeout, 4.0),
                     ),
                 )
 

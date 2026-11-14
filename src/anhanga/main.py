@@ -224,7 +224,9 @@ async def _store_call(fn, *args):
 async def _send_to_webhook(
     wh: WebhookSpec, kind: str, messages: list[str], result: ProbeResult, timeout: float
 ) -> None:
-    await asyncio.wait_for(
+    """Levanta se a entrega falhar. `send_webhook_alert` NÃO levanta em resposta HTTP não-2xx (devolve
+    `sent: False`): sem checar, um Slack respondendo 500/429/404 contava como entregue e o alerta se perdia."""
+    delivery = await asyncio.wait_for(
         send_webhook_alert(
             webhook_url=wh.url,
             result=result,
@@ -237,6 +239,8 @@ async def _send_to_webhook(
         ),
         timeout=timeout,
     )
+    if not delivery.get("sent"):
+        raise RuntimeError(f"webhook respondeu HTTP {delivery.get('status_code')} (esperado 2xx)")
 
 
 async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[WebhookSpec]) -> None:

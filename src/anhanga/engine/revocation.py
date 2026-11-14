@@ -43,9 +43,21 @@ def enabled() -> bool:
     return os.getenv("ANHANGA_REVOCATION_CHECK", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+BACKGROUND_DEADLINE = 25.0  # teto do trabalho que continua em segundo plano após o orçamento da sondagem
+_inflight: dict[str, "asyncio.Future[RevocationInspection]"] = {}
+
+
+def endpoints_allow_private() -> bool:
+    """Se OCSP/CRL/AIA em IP privado são permitidos. Decisão do OPERADOR (variável de ambiente): essas URLs
+    vêm do certificado do alvo (terceiro) e nunca herdam o `allow_private` do alvo, senão um certificado
+    hostil faria o monitor requisitar 169.254.169.254, redes internas, etc. Útil só para PKI interna."""
+    return os.getenv("ANHANGA_REVOCATION_ALLOW_PRIVATE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def clear_caches() -> None:
     _RESULT_CACHE.clear()
     _CRL_CACHE.clear()
+    _inflight.clear()
 
 
 def _parse_openssl_time(raw: str) -> datetime | None:
@@ -68,7 +80,7 @@ async def _openssl(args: list[str], timeout: float = 8.0) -> tuple[int, str]:
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except BaseException:  # TimeoutError e também CancelledError: não deixar `openssl` órfão
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         raise
@@ -228,12 +240,43 @@ async def check_revocation(
     cached = _RESULT_CACHE.get(key)
     if cached and cached[0] > now_ts:
         return cached[1]
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_compute_and_cache(key, chain_der, allow_private, timeout))
+        _inflight[key] = task
+
+        def _done(t: "asyncio.Future") -> None:
+            _inflight.pop(key, None)
+            if not t.cancelled():
+                t.exception()  # consome (evita "exception was never retrieved")
+
+        task.add_done_callback(_done)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
+    except asyncio.TimeoutError:
+        # O orçamento da sondagem acabou, mas o trabalho NÃO é cancelado: segue em segundo plano e o
+        # próximo ciclo acha o resultado em cache. (Cancelar descartava o CRL baixado pela metade e
+        # refazia o mesmo download a cada 5 min, então um CRL grande nunca produzia resultado.)
+        return RevocationInspection(
+            status="unavailable",
+            detail=f"verificação em andamento (>{deadline:.0f}s); conclui em segundo plano",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return RevocationInspection(status="error", detail=f"falha na checagem: {exc}"[:300])
+
+
+async def _compute_and_cache(
+    key: str, chain_der: list[bytes], allow_private: bool, timeout: float
+) -> RevocationInspection:
     try:
         result = await asyncio.wait_for(
-            _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=deadline
+            _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
         )
     except asyncio.TimeoutError:
-        result = RevocationInspection(status="error", detail=f"tempo esgotado ({deadline:.0f}s) ao consultar OCSP/CRL")
+        result = RevocationInspection(
+            status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
+        )
+    now_ts = time.time()
     ttl = CACHE_TTL.get(result.status, CACHE_TTL_DEFAULT)
     if result.next_update is not None:
         ttl = min(ttl, max(60.0, result.next_update.timestamp() - now_ts))

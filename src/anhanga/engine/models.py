@@ -200,12 +200,30 @@ class RevocationInspection(BaseModel):
     next_update: datetime | None = None
 
 
+class TLSProtocolResult(BaseModel):
+    protocol: str
+    status: Literal["accepted", "rejected", "unknown", "untestable"]
+    ciphers: list[str] = Field(default_factory=list)
+    ciphers_complete: bool = True  # False: lista truncada (teto de handshakes) ou interrompida
+    weak_ciphers: list[str] = Field(default_factory=list)
+    no_forward_secrecy: list[str] = Field(default_factory=list)
+
+
+class TLSEnumeration(BaseModel):
+    protocols: list[TLSProtocolResult] = Field(default_factory=list)
+    tested_at: float | None = None
+
+    def get(self, name: str) -> TLSProtocolResult | None:
+        return next((p for p in self.protocols if p.protocol == name), None)
+
+
 class TLSInspection(BaseModel):
     valid: bool = False
     validation_error: str | None = None  # motivo da falha de validação (expirado, hostname, raiz não confiável…)
     protocol: str | None = None
     deprecated_protocol: bool = False
     tls10_11_accepted: bool = False
+    enumeration: TLSEnumeration | None = None
     cipher: str | None = None
     cipher_bits: int | None = None
     issuer: str | None = None

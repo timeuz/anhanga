@@ -35,6 +35,7 @@ from anhanga.engine.models import (
     TLSInspection,
     build_timing_breakdown,
 )
+from anhanga.engine.tlsenum import enumerate_tls
 from anhanga.engine.security import (
     audit_cors_active,
     audit_http_security,
@@ -900,19 +901,9 @@ async def _run_probe_session(
             final_port = final_parsed.port or 443
             target_ip_for_tls = backend.pinned_ips.get(final_host.lower(), resolved_ip or final_host)
 
-            legacy_tls_accepted = False
-            if ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"):
-                legacy_tls_accepted = True
-            elif target_ip_for_tls and final_host:
-                legacy_tls_accepted = await check_tls10_11_accepted_async(
-                    ip=target_ip_for_tls,
-                    server_hostname=final_host,
-                    port=final_port,
-                    timeout=min(0.8, timeout * 0.25),
-                )
-
-            # Cadeia/OCSP via openssl (o módulo ssl não os expõe) e porta 80, em paralelo.
-            (chain_der, ocsp_stapled), http_port_80_status = await asyncio.gather(
+            # Cadeia/OCSP via openssl (o módulo ssl não os expõe), porta 80 e enumeração de
+            # protocolos/cifras (em cache por 6 h), em paralelo.
+            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
                 fetch_tls_extras(
                     target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout)
                 ),
@@ -922,7 +913,24 @@ async def _run_probe_session(
                     timeout=min(timeout, 2.0),
                     ip=target_ip_for_tls,
                 ),
+                enumerate_tls(
+                    target_ip_for_tls, final_port, final_host, timeout=min(3.0, timeout)
+                ),
             )
+
+            legacy_tls_accepted = bool(ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"))
+            if tls_enum is not None:
+                legacy_tls_accepted = legacy_tls_accepted or any(
+                    (tls_enum.get(v) is not None and tls_enum.get(v).status == "accepted")  # type: ignore[union-attr]
+                    for v in ("TLSv1", "TLSv1.1")
+                )
+            elif not legacy_tls_accepted and target_ip_for_tls and final_host:
+                legacy_tls_accepted = await check_tls10_11_accepted_async(
+                    ip=target_ip_for_tls,
+                    server_hostname=final_host,
+                    port=final_port,
+                    timeout=min(0.8, timeout * 0.25),
+                )
 
             if ssl_obj is not None:
                 tls_info = parse_tls_certificate(
@@ -933,11 +941,13 @@ async def _run_probe_session(
                     ocsp_stapled=ocsp_stapled,
                     validation_error=tls_validation_error,
                 )
+                tls_info.enumeration = tls_enum
             else:
                 tls_info = TLSInspection(
                     valid=False,
                     validation_error=tls_validation_error or "handshake TLS sem objeto SSL",
                     tls10_11_accepted=legacy_tls_accepted,
+                    enumeration=tls_enum,
                 )
 
             # Revogação (OCSP ativo, CRL de fallback): só faz sentido se o certificado ainda é válido.
@@ -1052,6 +1062,49 @@ def _validate_hostname_syntax(host: str) -> str | None:
     if not all(_HOST_LABEL_RE.match(label) for label in name.split(".")):
         return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
     return None
+
+
+async def _diagnose_tls_failure(
+    url: str, exc_str: str, allow_private: bool, timeout: float,
+    resolve_override: dict[str, str] | None,
+) -> ProbeResult | None:
+    """Handshake falhou: enumera protocolos/cifras para explicar *por quê* (ex.: só TLS 1.0, só cifras
+    fracas) em vez de reduzir tudo a "offline". None se não for possível diagnosticar."""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return None
+    port = parsed.port or 443
+    try:
+        ip = (await resolve_and_validate_host(
+            parsed.hostname, port, allow_private=allow_private, dns_timeout=min(3.0, timeout),
+            resolve_override=resolve_override,
+        ))[0]
+        enum = await asyncio.wait_for(
+            enumerate_tls(ip, port, parsed.hostname, timeout=min(3.0, timeout), use_cache=False),
+            timeout=15.0,
+        )
+    except Exception:
+        return None
+    if enum is None:
+        return None
+    accepted = [p for p in enum.protocols if p.status == "accepted"]
+    if accepted:
+        detail = "; ".join(
+            f"{p.protocol}" + (f" ({len(p.weak_ciphers)} cifra(s) fraca(s))" if p.weak_ciphers else "")
+            for p in accepted
+        )
+        hint = f"servidor aceita apenas: {detail}"
+    elif any(p.status == "unknown" for p in enum.protocols):
+        hint = "não foi possível determinar os protocolos aceitos"
+    else:
+        hint = "nenhum protocolo TLS 1.0–1.3 testável é aceito (cifras/curvas incompatíveis com este cliente?)"
+    return ProbeResult(
+        target_url=url,
+        resolved_ip=ip,
+        error=f"Erro HTTP/Conexão: falha no handshake TLS ({hint}). Detalhe: {exc_str}",
+        tls=TLSInspection(valid=False, validation_error="handshake TLS falhou", enumeration=enum,
+                          tls10_11_accepted=any(p.protocol in ("TLSv1", "TLSv1.1") for p in accepted)),
+    )
 
 
 def _apply_revocation(tls: TLSInspection, rev: "RevocationInspection") -> None:
@@ -1199,6 +1252,14 @@ async def execute_probe(
                     target_url=url,
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )
+
+        if isinstance(exc, ssl.SSLError) or "SSL" in exc_str.upper() or "TLS" in exc_str.upper():
+            diagnosed = await _diagnose_tls_failure(
+                url, exc_str, allow_private=allow_private, timeout=timeout,
+                resolve_override=resolve_override,
+            )
+            if diagnosed is not None:
+                return diagnosed
 
         return ProbeResult(
             target_url=url,

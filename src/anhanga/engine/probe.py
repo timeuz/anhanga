@@ -9,6 +9,7 @@ import socket
 import ssl
 import statistics
 import subprocess
+from pathlib import Path
 import sys
 import time
 import typing
@@ -278,17 +279,28 @@ MAX_REGEX_LENGTH: int = 512
 REGEX_TIMEOUT_SECONDS: float = 2.0
 
 
+_REGEX_WORKER = Path(__file__).with_name("_regex_worker.py")
+
+
+def _regex_worker_argv() -> list[str]:
+    """`python -I <arquivo>`: o worker só usa `re`/`json`, então roda por CAMINHO. `-I` ignora PYTHONPATH
+    e o cwd, então `-m anhanga...` só funcionava com o pacote instalado: em execução via `PYTHONPATH=src`
+    toda asserção de regex virava "Regexp inválida"."""
+    return [sys.executable, "-I", str(_REGEX_WORKER)]
+
+
 def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     """Executa re.search em subprocesso descartável com timeout rígido (anti-ReDoS).
 
-    Usa `python -I -m` (e não multiprocessing/spawn, que reimporta o `__main__` do processo-pai e
-    quebra conforme a forma de execução). Retorna ("ok", bool) | ("invalid", msg) | ("timeout", None).
+    Subprocesso (e não multiprocessing/spawn, que reimporta o `__main__` do processo-pai e quebra conforme
+    a forma de execução). Retorna ("ok", bool) | ("invalid", msg: padrão inválido) | ("timeout", None) |
+    ("unavailable", msg: o avaliador em si falhou; isso NÃO é culpa do padrão do usuário).
     """
     if len(pattern) > MAX_REGEX_LENGTH:
         return "invalid", f"padrão excede {MAX_REGEX_LENGTH} caracteres"
     try:
         proc = subprocess.run(
-            [sys.executable, "-I", "-m", "anhanga.engine._regex_worker"],
+            _regex_worker_argv(),
             input=json.dumps({"pattern": pattern, "text": text}).encode("utf-8"),
             capture_output=True,
             timeout=REGEX_TIMEOUT_SECONDS,
@@ -297,13 +309,14 @@ def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     except subprocess.TimeoutExpired:
         return "timeout", None
     except OSError as err:
-        return "invalid", f"não foi possível iniciar o avaliador de regex: {err}"
+        return "unavailable", f"não foi possível iniciar o avaliador de regex: {err}"
     if proc.returncode != 0:
-        return "invalid", "avaliador de regex encerrou com erro"
+        tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or ["sem detalhe"]
+        return "unavailable", f"o avaliador de regex encerrou com erro (código {proc.returncode}): {tail[0][:160]}"
     try:
         status, value = json.loads(proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        return "invalid", "resposta inválida do avaliador de regex"
+        return "unavailable", "resposta inválida do avaliador de regex"
     return status, value
 
 
@@ -332,7 +345,12 @@ async def _evaluate_content_assertions(
         if not pattern:
             continue
         status, value = await _regex_search(pattern, body_text)
-        if status == "invalid":
+        if status == "unavailable":
+            failures.append(
+                f"Avaliador de regex indisponível em {field} ({value}); o padrão não foi avaliado "
+                "(falha do Anhangá, não do padrão)"
+            )
+        elif status == "invalid":
             failures.append(f"Regexp inválida em {field}: {value}")
         elif status == "timeout":
             failures.append(
@@ -1102,8 +1120,10 @@ async def _diagnose_tls_failure(
             parsed.hostname, port, allow_private=allow_private, dns_timeout=min(3.0, timeout),
             resolve_override=resolve_override,
         ))[0]
+        # Roda fora do prazo global: o orçamento acompanha o `timeout` pedido (antes era 10 s fixos,
+        # então `?timeout=1` num host com handshake ruim levava 15-20 s).
         enum = await enumerate_tls_bounded(
-            ip, port, parsed.hostname, budget=10.0, timeout=min(3.0, timeout)
+            ip, port, parsed.hostname, budget=min(10.0, max(1.0, 2 * timeout)), timeout=min(3.0, timeout)
         )
     except Exception:
         return None

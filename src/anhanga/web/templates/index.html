@@ -39,6 +39,8 @@
             color-scheme: dark;
         }
         [x-cloak] { display: none !important; }
+        /* O anel (ring-2) dos filtros se desenha fora da borda; a seção .cv-auto tem contenção de pintura e o cortava. */
+        .filter-row { padding: 3px; }
         .cv-auto {
             content-visibility: auto;
             contain-intrinsic-size: 1px 420px;
@@ -941,7 +943,7 @@
             </div>
 
             <!-- Resumo + filtro + ordenação -->
-            <div x-show="targetsList.length > 0" x-cloak class="flex flex-wrap items-center gap-2">
+            <div x-show="targetsList.length > 0" x-cloak class="filter-row flex flex-wrap items-center gap-2">
                 <template x-for="f in [['all','filterAll','border-zinc-600 text-zinc-100'],['up','filterUp','border-emerald-500/60 text-emerald-200'],['degraded','filterDegraded','border-amber-500/60 text-amber-200'],['down','filterDown','border-red-500/60 text-red-200']]" :key="f[0]">
                     <button type="button" @click="statusFilter = f[0]" :aria-pressed="statusFilter === f[0]"
                             class="px-3 py-1.5 rounded-lg border bg-surface text-xs font-semibold transition cursor-pointer inline-flex items-center gap-2"

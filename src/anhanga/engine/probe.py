@@ -22,11 +22,13 @@ from collections import deque
 import os
 
 from anhanga import __version__
+from anhanga.engine import revocation
 from anhanga.engine.models import (
     ContentAssertionsResult,
     PhasePercentiles,
     ProbeResult,
     RedirectHop,
+    RevocationInspection,
     SampleMeasurement,
     SamplingStats,
     TimingBreakdown,
@@ -938,6 +940,15 @@ async def _run_probe_session(
                     tls10_11_accepted=legacy_tls_accepted,
                 )
 
+            # Revogação (OCSP ativo, CRL de fallback): só faz sentido se o certificado ainda é válido.
+            if tls_info.valid and revocation.enabled():
+                _apply_revocation(
+                    tls_info,
+                    await revocation.check_revocation(
+                        chain_der, allow_private=allow_private, timeout=min(timeout, 5.0)
+                    ),
+                )
+
         # Sonda ativa de CORS enviando Origin hostil
         cors_result = await audit_cors_active(
             client=client, target_url=current_url, timeout=min(timeout, 2.0)
@@ -1041,6 +1052,15 @@ def _validate_hostname_syntax(host: str) -> str | None:
     if not all(_HOST_LABEL_RE.match(label) for label in name.split(".")):
         return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
     return None
+
+
+def _apply_revocation(tls: TLSInspection, rev: "RevocationInspection") -> None:
+    """Anexa o resultado da revogação ao TLS; certificado REVOGADO deixa de ser válido (health -> degraded)."""
+    tls.revocation = rev
+    if rev.status == "revoked":
+        when = f" em {rev.revoked_at:%Y-%m-%d}" if rev.revoked_at else ""
+        tls.valid = False
+        tls.validation_error = f"certificate revoked ({(rev.method or '').upper()}{when})"
 
 
 def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:

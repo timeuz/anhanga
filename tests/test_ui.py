@@ -19,6 +19,8 @@ def test_every_translation_key_exists_in_both_languages():
     assert pt == en, f"só em PT: {sorted(pt - en)} | só em EN: {sorted(en - pt)}"
     used = set(re.findall(r"\bt\('(\w+)'\)", HTML)) | {f"problem_{k}" for k in (
         "down", "degraded", "tls_expiring", "slo_ttfb", "slo_total", "grade")}
+    used |= {f"cspStrength_{k}" for k in ("strong", "moderate", "weak", "report_only")}
+    used |= {"revGood", "revRevoked", "revUnknown", "revUnavailable", "revError"}
     used |= {f[1] for f in re.findall(r"\['(\w+)','(filter\w+)'", HTML)}
     missing = sorted(k for k in used if k not in pt)
     assert not missing, f"chaves usadas e não traduzidas: {missing}"

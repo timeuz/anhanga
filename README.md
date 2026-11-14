@@ -243,3 +243,20 @@ Estimativa de espaço: ~150 B por sondagem (10 alvos a cada 30 s ≈ 130 MB com 
 - **Uptime 24h por card**, com a cobertura real dos dados ("dados de 28 s" quando o banco é novo) em vez de fingir uma janela cheia.
 - **Incidentes recentes**: abertos e resolvidos, com início, duração e motivo.
 - Sem persistência (desativada ou sem alvos), o dashboard esconde uptime e incidentes e avisa por quê. Com `ANHANGA_API_KEY`, a chave é pedida uma única vez por carga de página.
+
+
+## 🔎 Revogação de certificado
+
+Além de validade, cadeia e hostname, o Anhangá verifica se o certificado **foi revogado**: **OCSP ativo** (resposta com assinatura verificada contra o emissor) e **CRL como fallback** (assinatura verificada, `nextUpdate` conferido). O Let's Encrypt encerrou o OCSP, então para ele só o CRL pega a revogação (testado contra `revoked.badssl.com`).
+
+- Resultado em `tls.revocation` (`status`: `good` | `revoked` | `unknown` | `unavailable` | `error`, `method`, `revoked_at`, `responder`). **Revogado ⇒ `tls.valid=false`**, `health=degraded`, `probe_success=0`, gate do CLI reprova e o alerta dispara. "Não verificável" nunca é reportado como "não revogado".
+- **Segurança:** as URLs de OCSP/CRL vêm do certificado (terceiros). Toda requisição passa pela política Anti-SSRF (IP validado e fixado, redirects revalidados), com limites de tamanho (OCSP 64 KB, CRL 3 MB) e timeout.
+- **Cache** (bom 30 min, revogado 1 h, falhas 5 min; CRL até `nextUpdate`/6 h) para não martelar os respondedores a cada ciclo. Desligue com `ANHANGA_REVOCATION_CHECK=0`.
+- Requer o binário `openssl` (sem ele: "não verificável"). Só roda se o certificado ainda é válido.
+
+## 🛡️ Qualidade da Content-Security-Policy
+
+Ter CSP não basta. `security.csp_analysis` classifica a política (`strong` / `moderate` / `weak` / `report-only`) e lista as causas: `'unsafe-inline'` sem nonce/hash, `'unsafe-eval'`, `*`, `http:`, `data:`, `https:` genérico, `script-src`/`default-src` ausentes, `object-src` diferente de `'none'`, `base-uri` ausente e hosts que permitem bypass (JSONP/CDNs). Nonce/hash e `'strict-dynamic'` são reconhecidos. Várias políticas são conjuntivas (uma fraqueza só vale se todas a tiverem).
+
+- **Report-Only não conta como proteção** (não bloqueia nada); antes uma CSP só em Report-Only ganhava a nota cheia.
+- A pontuação da CSP é proporcional à qualidade (forte 100%, moderada 80%, fraca 50%) e gera o finding `SEC-CSP-WEAK` com snippet de política mais rígida.

@@ -293,6 +293,16 @@ def build_json_report(
     }
 
 
+def _revocation_text(tls: Any) -> str:
+    rev = getattr(tls, "revocation", None)
+    if rev is None:
+        return "não verificada"
+    labels = {"good": "não revogado", "revoked": "[bold red]REVOGADO[/bold red]", "unknown": "desconhecido pelo respondedor",
+              "unavailable": "não verificável", "error": "falha na checagem"}
+    method = f" ({rev.method.upper()})" if rev.method and rev.status != "unavailable" else ""
+    return labels.get(rev.status, rev.status) + method
+
+
 def render_rich_report(
     result: ProbeResult,
     violations: list[str],
@@ -429,7 +439,8 @@ def render_rich_report(
                 f"Emissor: {result.tls.issuer or 'N/A'}  |  "
                 f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold] "
                 f"({'N/A' if result.tls.relative_validity_percent_remaining is None else format(result.tls.relative_validity_percent_remaining, '.1f')}% restante)  |  "
-                f"OCSP: {result.tls.ocsp_status}"
+                f"OCSP: {result.tls.ocsp_status}  |  "
+                f"Revogação: {_revocation_text(result.tls)}"
                 + (f"\nMotivo da invalidez: {result.tls.validation_error}" if not result.tls.valid and result.tls.validation_error else ""),
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",

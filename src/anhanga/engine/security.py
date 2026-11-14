@@ -16,7 +16,9 @@ from typing import Any
 
 import httpx
 
+from anhanga.engine.csp import analyze_csp
 from anhanga.engine.models import (
+    CSPAnalysis,
     CORSInspection,
     CookieAuditItem,
     SecurityAudit,
@@ -960,6 +962,39 @@ async def audit_cors_active(
         )
 
 
+_CSP_QUALITY_FACTOR = {"strong": 1.0, "moderate": 0.8, "weak": 0.5}
+_CSP_REPORT_ONLY_NOTE = (
+    " Atenção: há uma política em Report-Only, mas ela apenas reporta violações; promova-a para "
+    "Content-Security-Policy para que passe a bloquear."
+)
+
+
+def _csp_points(base: int, analysis: CSPAnalysis) -> int:
+    """Pontos da CSP aplicada, proporcionais à qualidade (CSP com 'unsafe-inline'/'*' vale metade)."""
+    return round(base * _CSP_QUALITY_FACTOR.get(analysis.strength, 1.0))
+
+
+def _csp_quality_finding(analysis: CSPAnalysis) -> SecurityFinding:
+    worst = "high" if any(i.severity == "high" for i in analysis.issues) else "medium"
+    details = "; ".join(f"[{i.severity}] {i.message}" for i in analysis.issues[:6])
+    stricter = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+    return SecurityFinding(
+        id="SEC-CSP-WEAK",
+        header="Content-Security-Policy (qualidade)",
+        category="header",
+        severity=worst,  # type: ignore[arg-type]
+        weight=max(2, 15 - _csp_points(15, analysis)),
+        safe_default=stricter,
+        description=(
+            f"A CSP existe, mas é {analysis.strength}: {details}. "
+            "Substitua 'unsafe-inline' por nonces/hashes (com 'strict-dynamic'), liste hosts explícitos "
+            "e defina object-src 'none' e base-uri."
+        ),
+        remediation="Endureça a política (exemplo-base abaixo) validando antes em Report-Only.",
+        snippets=_build_header_snippets("Content-Security-Policy", stricter),
+    )
+
+
 def audit_http_security(
     headers: httpx.Headers,
     is_https: bool,
@@ -1101,21 +1136,26 @@ def audit_http_security(
     # 2.2 Content-Security-Policy & Clickjacking (até 15 pontos)
     csp_info = SECURITY_HEADERS_DETAILS["Content-Security-Policy"]
     csp_default_snippets = _build_header_snippets("Content-Security-Policy-Report-Only", csp_info["value"])
-    csp_raw = headers.get("Content-Security-Policy") or headers.get("Content-Security-Policy-Report-Only", "")
-    has_csp = bool(csp_raw)
+    # Report-Only NÃO bloqueia nada: só a política aplicada conta como proteção (e sua qualidade pesa na nota).
+    csp_raw = headers.get("Content-Security-Policy", "")
+    csp_report_only = headers.get("Content-Security-Policy-Report-Only", "")
+    csp_analysis = analyze_csp(csp_raw, csp_report_only)
+    has_csp = csp_analysis.enforced
+    if csp_report_only:
+        present["Content-Security-Policy-Report-Only"] = csp_report_only
     csp_frame_ancestors = bool(re.search(r"\bframe-ancestors\b", csp_raw, re.IGNORECASE)) if has_csp else False
     has_xfo = "X-Frame-Options" in headers
 
     if has_csp:
         present["Content-Security-Policy"] = csp_raw
         if csp_frame_ancestors:
-            headers_score += 15
+            headers_score += _csp_points(15, csp_analysis)
             present["X-Frame-Options (via CSP frame-ancestors)"] = "Ativo via Content-Security-Policy frame-ancestors"
         elif has_xfo:
-            headers_score += 15
+            headers_score += _csp_points(15, csp_analysis)
             present["X-Frame-Options"] = headers["X-Frame-Options"]
         else:
-            headers_score += 10
+            headers_score += _csp_points(10, csp_analysis)
             xfo_info = SECURITY_HEADERS_DETAILS["X-Frame-Options"]
             missing_findings.append(
                 SecurityFinding(
@@ -1130,6 +1170,8 @@ def audit_http_security(
                     snippets=_build_header_snippets("X-Frame-Options", xfo_info["value"]),
                 )
             )
+        if csp_analysis.strength != "strong":
+            missing_findings.append(_csp_quality_finding(csp_analysis))
     else:
         if has_xfo:
             headers_score += 5
@@ -1142,7 +1184,7 @@ def audit_http_security(
                     severity="high",
                     weight=10,
                     safe_default=csp_info.get("safe_default"),
-                    description=csp_info["desc"],
+                    description=csp_info["desc"] + _CSP_REPORT_ONLY_NOTE * bool(csp_report_only),
                     remediation=csp_info["fix"],
                     snippets=csp_default_snippets,
                 )
@@ -1156,7 +1198,7 @@ def audit_http_security(
                     severity="high",
                     weight=15,
                     safe_default=csp_info.get("safe_default"),
-                    description=csp_info["desc"],
+                    description=csp_info["desc"] + _CSP_REPORT_ONLY_NOTE * bool(csp_report_only),
                     remediation=csp_info["fix"],
                     snippets=csp_default_snippets,
                 )
@@ -1343,4 +1385,5 @@ def audit_http_security(
         csp_frame_ancestors=csp_frame_ancestors,
         permissions_camera_restricted=permissions_camera_restricted,
         evaluated_url=evaluated_url,
+        csp_analysis=csp_analysis,
     )

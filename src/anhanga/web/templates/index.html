@@ -562,6 +562,13 @@
                                                 :class="result.tls.ocsp_stapling === true ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-zinc-800 text-zinc-200 border-zinc-600'"
                                                 x-text="result.tls.ocsp_status || t('notAvailableShort')"></strong>
                                     </div>
+                                    <div class="flex items-center justify-between gap-2">
+                                        <span class="text-zinc-300" x-text="t('tlsRevocation')">Revogação:</span>
+                                        <strong class="font-mono text-[11px] px-2 py-0.5 rounded border text-right"
+                                                :class="revocationClass(result.tls)"
+                                                :title="revocationTitle(result.tls)"
+                                                x-text="revocationLabel(result.tls)"></strong>
+                                    </div>
                                     <div class="flex items-center justify-between">
                                         <span class="text-zinc-300" x-text="t('tlsLegacyCheck')">TLS 1.0 / 1.1 Legado:</span>
                                         <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
@@ -837,6 +844,26 @@
                     </div>
                 </div>
 
+                <!-- Análise de qualidade da CSP -->
+                <div x-show="result?.security?.csp_analysis?.present" x-cloak class="pt-3 border-t border-bordercolor space-y-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h5 class="text-xs font-bold uppercase tracking-wider text-zinc-200" x-text="t('cspAnalysisTitle')">Qualidade da Content-Security-Policy</h5>
+                        <span class="px-2 py-0.5 rounded border text-[10px] font-bold uppercase"
+                              :class="cspStrengthClass(result?.security?.csp_analysis)"
+                              x-text="t('cspStrength_' + (result?.security?.csp_analysis?.strength || 'weak').replace('-', '_'))"></span>
+                        <span x-show="result?.security?.csp_analysis && !result.security.csp_analysis.enforced" class="text-[11px] text-amber-300" x-text="t('cspNotEnforced')"></span>
+                    </div>
+                    <ul class="space-y-1 text-xs">
+                        <template x-for="issue in (result?.security?.csp_analysis?.issues || [])" :key="issue.id">
+                            <li class="bg-obsidian border border-bordercolor rounded-lg px-3 py-2 flex gap-2">
+                                <span class="font-mono font-bold uppercase shrink-0" :class="cspSeverityClass(issue.severity)" x-text="issue.severity"></span>
+                                <span class="text-zinc-200"><span class="font-mono text-zinc-400" x-text="issue.directive + ': '"></span><span x-text="issue.message"></span></span>
+                            </li>
+                        </template>
+                        <li x-show="!(result?.security?.csp_analysis?.issues || []).length" class="text-emerald-300" x-text="t('cspNoIssues')"></li>
+                    </ul>
+                </div>
+
                 <!-- Cabeçalhos de Segurança Já Presentes -->
                 <div x-show="Object.keys(result?.security?.present_headers || {}).length > 0" class="pt-3 border-t border-bordercolor space-y-2.5">
                     <h5 class="text-xs font-bold uppercase tracking-wider text-zinc-200" x-text="t('presentHeadersSection')">Cabeçalhos de Segurança Detectados na Resposta</h5>
@@ -845,7 +872,9 @@
                             <div class="bg-obsidian border border-bordercolor rounded-xl p-3 text-xs space-y-1">
                                 <div class="flex items-center justify-between">
                                     <span class="font-mono font-bold text-emerald-300" x-text="hName"></span>
-                                    <span class="px-2 py-0.5 rounded bg-emerald-950/90 text-emerald-200 border border-emerald-500/60 text-[10px] font-bold uppercase" x-text="t('activeBadge')">Ativo</span>
+                                    <span class="px-2 py-0.5 rounded border text-[10px] font-bold uppercase"
+                                          :class="/Report-Only/i.test(hName) ? 'bg-amber-950/90 text-amber-200 border-amber-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
+                                          x-text="/Report-Only/i.test(hName) ? t('reportOnlyBadge') : t('activeBadge')">Ativo</span>
                                 </div>
                                 <p class="font-mono text-[11px] text-zinc-300 break-all" x-text="hVal"></p>
                             </div>
@@ -1048,6 +1077,20 @@
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADADO (TLS inválido)',
+                tlsRevocation: 'Revogação:',
+                reportOnlyBadge: 'Só reporta',
+                revGood: 'Não revogado',
+                revRevoked: 'REVOGADO',
+                revUnknown: 'Desconhecido pelo respondedor',
+                revUnavailable: 'Não verificável',
+                revError: 'Falha na checagem',
+                cspAnalysisTitle: 'Qualidade da Content-Security-Policy',
+                cspNotEnforced: 'não aplicada (Report-Only)',
+                cspStrength_strong: 'FORTE',
+                cspStrength_moderate: 'MODERADA',
+                cspStrength_weak: 'FRACA',
+                cspStrength_report_only: 'SÓ REPORT-ONLY',
+                cspNoIssues: 'Nenhuma fraqueza conhecida detectada.',
                 autoRefresh: 'Auto-atualizar',
                 updatedAgo: 'Atualizado há',
                 secondsShort: 's',
@@ -1176,6 +1219,20 @@
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADED (invalid TLS)',
+                tlsRevocation: 'Revocation:',
+                reportOnlyBadge: 'Report-only',
+                revGood: 'Not revoked',
+                revRevoked: 'REVOKED',
+                revUnknown: 'Unknown to responder',
+                revUnavailable: 'Not checkable',
+                revError: 'Check failed',
+                cspAnalysisTitle: 'Content-Security-Policy quality',
+                cspNotEnforced: 'not enforced (Report-Only)',
+                cspStrength_strong: 'STRONG',
+                cspStrength_moderate: 'MODERATE',
+                cspStrength_weak: 'WEAK',
+                cspStrength_report_only: 'REPORT-ONLY',
+                cspNoIssues: 'No known weaknesses detected.',
                 autoRefresh: 'Auto-refresh',
                 updatedAgo: 'Updated',
                 secondsShort: 's ago',
@@ -1619,6 +1676,34 @@
                     return 'ok';
                 },
 
+                revocationLabel(tls) {
+                    const r = tls?.revocation;
+                    if (!r) return this.t('revUnavailable');
+                    const base = { good: 'revGood', revoked: 'revRevoked', unknown: 'revUnknown', unavailable: 'revUnavailable', error: 'revError' }[r.status] || 'revUnavailable';
+                    return this.t(base) + (r.method && r.status !== 'unavailable' ? ' (' + r.method.toUpperCase() + ')' : '');
+                },
+                revocationClass(tls) {
+                    const st = tls?.revocation?.status;
+                    if (st === 'good') return 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60';
+                    if (st === 'revoked') return 'bg-red-950/90 text-red-200 border-red-500/60';
+                    if (st === 'error' || st === 'unknown') return 'bg-amber-950/90 text-amber-200 border-amber-500/60';
+                    return 'bg-zinc-800 text-zinc-200 border-zinc-600';
+                },
+                revocationTitle(tls) {
+                    const r = tls?.revocation;
+                    if (!r) return '';
+                    const parts = [];
+                    if (r.responder) parts.push(r.responder);
+                    if (r.revoked_at) parts.push(r.revoked_at);
+                    if (r.detail) parts.push(r.detail);
+                    return parts.join(' | ');
+                },
+                cspStrengthClass(a) {
+                    return { strong: 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60', moderate: 'bg-amber-950/90 text-amber-200 border-amber-500/60' }[a?.strength] || 'bg-red-950/90 text-red-200 border-red-500/60';
+                },
+                cspSeverityClass(sev) {
+                    return sev === 'high' ? 'text-red-300' : (sev === 'medium' ? 'text-amber-300' : 'text-zinc-300');
+                },
                 healthOf(r) {
                     return r?.health || (r?.is_up ? 'up' : 'down');
                 },
@@ -1813,7 +1898,7 @@
                         ``,
                         `## Inspeção TLS`,
                         r.tls
-                            ? `- **Validade**: ${r.tls.days_remaining === null || r.tls.days_remaining === undefined ? 'N/D' : (r.tls.days_remaining < 0 ? 'expirado há ' + Math.abs(r.tls.days_remaining) + ' dias' : r.tls.days_remaining + ' dias restantes')}\n- **Protocolo / Cifra**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **Emissor**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **Cadeia X.509**: ${(r.tls.cert_chain || []).join(' -> ')}`
+                            ? `- **Validade**: ${r.tls.days_remaining === null || r.tls.days_remaining === undefined ? 'N/D' : (r.tls.days_remaining < 0 ? 'expirado há ' + Math.abs(r.tls.days_remaining) + ' dias' : r.tls.days_remaining + ' dias restantes')}\n- **Protocolo / Cifra**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **Emissor**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **Revogação**: ${r.tls.revocation ? r.tls.revocation.status + (r.tls.revocation.method ? ' (' + r.tls.revocation.method.toUpperCase() + ')' : '') : 'N/D'}\n- **Cadeia X.509**: ${(r.tls.cert_chain || []).join(' -> ')}`
                             : `- TLS não aplicável.`,
                         ``,
                         `## Runbook de Remediação (${this.getActiveServerLabel()})`,

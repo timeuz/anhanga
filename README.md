@@ -203,8 +203,8 @@ O `targets.yaml` é **validado na carga** (erros e ajustes vão para o log; entr
 - **Deduplicação:** notifica **uma vez**; repete como *lembrete* só após `cooldown_seconds` (padrão 1 h; `0` = sem lembretes).
 - **Recuperação:** uma notificação quando o problema some (`recovery_threshold`, `notify_recovery`).
 - **Gatilhos:** alvo offline, TLS inválido, certificado expirando, SLO de TTFB/latência total (`slo:`; usa a mediana quando `samples ≥ 2`) e nota abaixo de `min_grade`. SLO e nota podem ser definidos por alvo.
-- **Entrega:** em paralelo e em background (webhook lento não atrasa as sondagens), com timeout e uma nova tentativa. Métrica: `anhanga_alert_notifications_total{kind,result}`.
-- **Limites conhecidos:** o estado de alertas vive em memória (reiniciar o servidor zera a contagem de ciclos e pode repetir um alerta ainda ativo).
+- **Entrega:** em paralelo e em background (webhook lento não atrasa as sondagens), com timeout e uma nova tentativa. Se ainda falhar, a notificação vai para a **outbox persistente** e é reenviada com backoff (30 s, 2 min, 10 min, 30 min, 1 h; desiste após ~1 h ou 24 h de idade). Métricas: `anhanga_alert_notifications_total{kind,result=sent|queued|dropped|failed}` e `anhanga_alert_outbox_pending`.
+- **Persistência:** o estado dos alertas sobrevive a reinícios (veja abaixo), então um problema ainda ativo não é notificado de novo.
 
 ## 🧪 Desenvolvimento
 
@@ -212,3 +212,25 @@ O `targets.yaml` é **validado na carga** (erros e ajustes vão para o log; entr
 uv pip install -e ".[dev]"
 pytest          # sem rede; ~3 s
 ```
+
+
+## 💾 Persistência (SQLite)
+
+Ativa automaticamente quando há alvos no `targets.yaml` (stdlib `sqlite3`, sem dependência extra). Arquivo padrão `anhanga.db` no diretório de execução; ajuste com `ANHANGA_DB_PATH` ou:
+
+```yaml
+storage:
+  enabled: true        # false desliga (o monitor segue funcionando, só sem histórico)
+  path: /var/lib/anhanga/anhanga.db
+  retention_days: 14   # histórico e incidentes encerrados mais antigos são podados a cada hora
+```
+
+O que fica salvo: **histórico de sondagens** (sparkline e uptime sobrevivem a reinício), **estado dos alertas** (sem alerta duplicado após reiniciar; cooldown respeitado), **incidentes** (início no 1º ciclo com falha, fim na recuperação) e a **outbox** de notificações. O arquivo é criado com permissão `0600` e a outbox guarda só um hash da URL do webhook (o segredo fica apenas na configuração). Falha de disco nunca derruba o monitor: é logada e contada em `anhanga_storage_errors_total`.
+
+| Endpoint (exigem a API key, como os demais `/api/*`) | Retorna |
+|---|---|
+| `GET /api/v1/history?target=&hours=24&max_points=300` | série agregada: checks, up/degraded/down e latência média/mín/máx por bucket |
+| `GET /api/v1/uptime[?target=]` | `uptime_pct` (health=up) e `availability_pct` (HTTP respondeu) em 24h/7d/30d, com `covered_seconds` (cobertura real dos dados) |
+| `GET /api/v1/incidents[?target=&open_only=true&limit=]` | incidentes abertos e encerrados, com duração |
+
+Estimativa de espaço: ~150 B por sondagem (10 alvos a cada 30 s ≈ 130 MB com 30 dias de retenção). Backup: copie o `.db` com o servidor parado, ou use `sqlite3 anhanga.db ".backup out.db"`.

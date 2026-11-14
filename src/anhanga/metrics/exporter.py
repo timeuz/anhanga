@@ -135,8 +135,21 @@ PROBE_TLS_EXPIRY_DAYS = Gauge(
 
 ALERT_NOTIFICATIONS_TOTAL = Counter(
     "anhanga_alert_notifications_total",
-    "Notificações de alerta enviadas aos webhooks (kind: alert|reminder|recovery; result: sent|failed)",
+    "Notificações de alerta aos webhooks (kind: alert|reminder|recovery; "
+    "result: sent|queued (falhou, na outbox p/ reenvio)|dropped (desistiu)|failed (falhou, sem persistência))",
     ["kind", "result"],
+    registry=REGISTRY,
+)
+
+ALERT_OUTBOX_PENDING = Gauge(
+    "anhanga_alert_outbox_pending",
+    "Notificações aguardando reenvio na outbox persistente",
+    registry=REGISTRY,
+)
+
+STORAGE_ERRORS_TOTAL = Counter(
+    "anhanga_storage_errors_total",
+    "Erros de leitura/escrita na persistência SQLite (o monitoramento continua sem persistir)",
     registry=REGISTRY,
 )
 

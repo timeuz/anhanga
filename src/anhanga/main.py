@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import hmac
+import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -8,10 +10,12 @@ import re
 from typing import Any, Literal
 import yaml
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from anhanga import __version__
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ABSOLUTE_MAX_BODY_BYTES,
@@ -21,7 +25,11 @@ from anhanga.engine.probe import (
 )
 from anhanga.engine.security import RATE_LIMITER
 from anhanga.engine.webhooks import send_webhook_alert
-from anhanga.metrics.exporter import record_probe_metrics, render_prometheus_metrics
+from anhanga.metrics.exporter import (
+    record_probe_metrics,
+    render_adhoc_probe_metrics,
+    render_prometheus_metrics,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,13 +44,13 @@ MAX_HISTORY_POINTS = 30
 
 
 class WebhookNotifyRequest(BaseModel):
-    webhook_url: str = Field(..., description="URL do Webhook (Slack, Teams ou Telegram)")
-    url: str | None = Field(default=None, description="URL alvo para sondar caso 'result' não seja enviado")
-    result: ProbeResult | None = Field(default=None, description="Resultado de sondagem pré-computado")
+    webhook_url: str = Field(
+        ..., description="URL de destino. Deve estar declarada em 'webhooks' no targets.yaml (allowlist)."
+    )
+    url: str = Field(..., description="URL alvo a ser sondada pelo servidor para compor o alerta")
     provider: Literal["auto", "slack", "teams", "telegram"] = Field(default="auto")
     chat_id: str | None = Field(default=None, description="Chat ID para Telegram")
     violations: list[str] = Field(default_factory=list)
-    allow_private: bool = Field(default=False, description="Permite IPs privados no probe/webhook (Lab/CI)")
     timeout: float = Field(default=5.0, ge=1.0, le=30.0)
 
 
@@ -58,9 +66,64 @@ def _extract_client_ip(request: Request | None) -> str:
     return RATE_LIMITER.extract_client_ip(remote_addr=remote_addr, x_forwarded_for=xff)
 
 
-def _enforce_rate_limit(request: Request | None) -> None:
+def _allow_private_api() -> bool:
+    """Política SSRF das rotas HTTP: decidida pelo OPERADOR (env), jamais pelo cliente."""
+    return os.getenv("ANHANGA_ALLOW_PRIVATE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_loopback_direct(request: Request) -> bool:
+    """Cliente loopback sem indício de proxy reverso (que mascararia o cliente real)."""
+    if request.client is None:
+        return False
+    try:
+        if not ipaddress.ip_address(request.client.host).is_loopback:
+            return False
+    except ValueError:
+        return False
+    return not any(h in request.headers for h in ("x-forwarded-for", "forwarded", "x-real-ip"))
+
+
+def _is_authorized(request: Request) -> bool:
+    api_key = os.getenv("ANHANGA_API_KEY", "")
+    if not api_key:
+        # Fail-closed: sem chave configurada, apenas acesso loopback direto.
+        return _is_loopback_direct(request)
+    auth = request.headers.get("authorization", "")
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "")
+    return hmac.compare_digest(supplied.encode(), api_key.encode())
+
+
+# error_code -> status HTTP. O que é achado da sondagem (5xx do alvo, asserção, TLS inválido) segue como 200.
+_ERROR_STATUS: dict[str, int] = {
+    "invalid_url": 400,
+    "ssrf_blocked": 403,
+    "dns_error": 502,
+    "connect_error": 502,
+    "tls_error": 502,
+    "timeout": 504,
+}
+
+
+def _raise_for_unreachable(result: ProbeResult) -> None:
+    """Falhas em que não houve resposta HTTP do alvo viram 4xx/5xx com erro estruturado."""
+    status = _ERROR_STATUS.get(result.error_code or "")
+    if status is not None:
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "error_code": result.error_code,
+                "message": result.error,
+                "target_url": result.target_url,
+            },
+        )
+
+
+PROTECTED_PREFIXES: tuple[str, ...] = ("/api/", "/probe", "/metrics")
+
+
+def _enforce_rate_limit(request: Request | None, cost: int = 1) -> None:
     client_ip = _extract_client_ip(request)
-    allowed, retry_after = RATE_LIMITER.check(client_ip)
+    allowed, retry_after = RATE_LIMITER.check(client_ip, cost=cost)
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -75,6 +138,10 @@ def _enforce_rate_limit(request: Request | None) -> None:
 def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) -> ProbeResult:
     """Atualiza o cache de estado e a série histórica de latências (sparkline) do alvo."""
     key = result.target_url
+    if not is_continuous:
+        # Scans avulsos (alvos arbitrários) não persistem estado: memória e cardinalidade limitadas aos alvos configurados.
+        result.history_ms = [result.timings.total_ms] if result.timings.total_ms > 0 else []
+        return result
     history = HISTORY_CACHE.setdefault(key, [])
 
     # Apenas observações da vigilância contínua ou o primeiro ponto mediano de um novo scan entram na série histórica,
@@ -95,7 +162,8 @@ def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) 
         del history[:-MAX_HISTORY_POINTS]
 
     result.history_ms = list(history)
-    STATE_CACHE[key] = result
+    if is_continuous:
+        STATE_CACHE[key] = result
     return result
 
 
@@ -145,7 +213,7 @@ async def _dispatch_configured_webhooks(
 ) -> None:
     if not webhooks_cfg:
         return
-    should_alert = (not res.is_up) or bool(res.tls and res.tls.alert_expiring)
+    should_alert = res.health != "up" or bool(res.tls and res.tls.alert_expiring)
     if not should_alert:
         return
 
@@ -219,9 +287,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Anhangá",
     description="Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps",
-    version="0.3.0",
+    version=__version__,
     lifespan=lifespan,
 )
+
+
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), name="static")
+
+
+@app.middleware("http")
+async def api_key_guard(request: Request, call_next):
+    if request.url.path.startswith(PROTECTED_PREFIXES) and not _is_authorized(request):
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": "Não autorizado. Envie 'Authorization: Bearer <ANHANGA_API_KEY>' "
+                "(sem chave configurada, apenas acesso loopback direto é aceito)."
+            },
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 
 @app.get("/healthz", tags=["System"])
@@ -242,23 +327,21 @@ async def api_scan_url(
         le=ABSOLUTE_MAX_BODY_BYTES,
         description="Limite máximo de bytes lidos do corpo da resposta (máx 5 MiB)",
     ),
-    allow_private: bool = Query(False, description="Permite IPs de rede interna (Lab/Infra)"),
     fail_if_body_not_matches_regexp: str | None = Query(None, description="Regexp que DEVE estar presente no corpo"),
     fail_if_body_matches_regexp: str | None = Query(None, description="Regexp que NÃO PODE estar presente no corpo"),
     min_payload_bytes: int | None = Query(None, description="Tamanho mínimo de payload em bytes"),
     max_payload_bytes: int | None = Query(None, description="Tamanho máximo de payload em bytes"),
     assert_final_url: str | None = Query(None, description="URL final esperada após redirects"),
-    record_metrics: bool = Query(False, description="Se True, grava no /metrics do Prometheus"),
 ):
     """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects, Asserções e Security Headers."""
-    _enforce_rate_limit(request)
+    _enforce_rate_limit(request, cost=samples)
     if not url.strip():
         raise HTTPException(status_code=400, detail="O parâmetro 'url' é obrigatório.")
 
     result = await execute_probe(
         url,
         timeout=timeout,
-        allow_private=allow_private,
+        allow_private=_allow_private_api(),
         samples=samples,
         max_body_bytes=max_body_bytes,
         fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
@@ -267,31 +350,28 @@ async def api_scan_url(
         max_payload_bytes=max_payload_bytes,
         assert_final_url=assert_final_url,
     )
-    _update_state_and_history(result, is_continuous=False)
-
-    # Evita alta cardinalidade por padrão em scans avulsos
-    if record_metrics:
-        record_probe_metrics(result)
-
-    return result
+    _raise_for_unreachable(result)
+    return _update_state_and_history(result, is_continuous=False)
 
 
 @app.post("/api/v1/webhooks/notify", tags=["Alerting"])
 async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
     """Dispara alerta formatado para Slack, Microsoft Teams ou Telegram com proteção Anti-SSRF."""
     _enforce_rate_limit(request)
-    probe_res = body.result
-    if probe_res is None:
-        if not body.url or not body.url.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Informe 'result' ou 'url' para disparar a notificação de webhook.",
-            )
-        probe_res = STATE_CACHE.get(body.url) or await execute_probe(
-            body.url,
-            timeout=body.timeout,
-            allow_private=body.allow_private,
+    cfg = load_targets_config()
+    entries = {
+        str(w if isinstance(w, str) else w.get("url", "")): (w if isinstance(w, dict) else {})
+        for w in cfg.get("webhooks", [])
+        if isinstance(w, (str, dict))
+    }
+    if body.webhook_url not in entries:
+        raise HTTPException(
+            status_code=403,
+            detail="webhook_url não consta na allowlist ('webhooks' do targets.yaml).",
         )
+    probe_res = STATE_CACHE.get(body.url) or await execute_probe(
+        body.url, timeout=body.timeout, allow_private=_allow_private_api()
+    )
 
     try:
         delivery = await send_webhook_alert(
@@ -300,7 +380,9 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
             provider=body.provider,
             violations=body.violations,
             chat_id=body.chat_id,
-            allow_private=body.allow_private,
+            allow_private=bool(
+                entries[body.webhook_url].get("allow_private", cfg.get("allow_private", False))
+            ),
             timeout=body.timeout,
         )
         return delivery
@@ -332,15 +414,12 @@ async def blackbox_compatible_probe(
     request: Request,
     target: str = Query(..., description="URL alvo no estilo Blackbox Exporter"),
     module: str = Query("http_2xx", description="Módulo compatível com Blackbox Exporter"),
-    allow_private: bool = Query(False),
     samples: int = Query(1, ge=1, le=20),
 ):
     """Compatível com relabel_configs do Prometheus Blackbox Exporter."""
-    _enforce_rate_limit(request)
-    result = await execute_probe(target, allow_private=allow_private, samples=samples)
-    _update_state_and_history(result, is_continuous=False)
-    record_probe_metrics(result)
-    payload, content_type = render_prometheus_metrics()
+    _enforce_rate_limit(request, cost=samples)
+    result = await execute_probe(target, allow_private=_allow_private_api(), samples=samples)
+    payload, content_type = render_adhoc_probe_metrics(result)
     return Response(content=payload, media_type=content_type)
 
 
@@ -355,5 +434,5 @@ async def web_dashboard(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"cached_results": list(STATE_CACHE.values())},
+        context={"cached_results": list(STATE_CACHE.values()), "app_version": __version__},
     )

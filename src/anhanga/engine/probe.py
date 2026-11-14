@@ -932,7 +932,8 @@ async def _run_probe_session(
             # protocolos/cifras (em cache por 6 h), em paralelo.
             (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
                 fetch_tls_extras(
-                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout)
+                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
+                    expected_leaf=_peer_leaf_der(ssl_obj),
                 ),
                 _check_port_80(
                     final_host,
@@ -1093,6 +1094,25 @@ def _validate_hostname_syntax(host: str) -> str | None:
     return None
 
 
+def _peer_leaf_der(ssl_obj: typing.Any) -> bytes | None:
+    try:
+        return ssl_obj.getpeercert(binary_form=True) if ssl_obj is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _failure_result(url: str, exc: BaseException, timeout: float) -> ProbeResult | None:
+    """Resultado de falha para SSRF/timeout (mesmo tratamento no 1º passe e no retry sem verificação)."""
+    if isinstance(exc, SSRFBlockedError):
+        return ProbeResult(target_url=url, resolved_ip=exc.ip, error=str(exc))
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
+        return ProbeResult(
+            target_url=url,
+            error=f"Timeout rígido excedido ({timeout}s): {exc or 'limite de tempo esgotado'}",
+        )
+    return None
+
+
 def _is_tls_handshake_error(exc: BaseException) -> bool:
     """Por tipo (não por texto: um hostname 'ssl.exemplo.com' não é erro de TLS): há um ssl.SSLError na cadeia?"""
     seen: set[int] = set()
@@ -1232,6 +1252,7 @@ async def execute_probe(
     # depois revogação ≤ 4 s): cada etapa tem prazo próprio e degrada sozinha, então o prazo global não a corta.
     overall_timeout = min(60.0, max(timeout * min(samples, 5) + 9.0, timeout + 8.0))
 
+    started = time.monotonic()
     try:
         return await asyncio.wait_for(
             _run_probe_session(
@@ -1289,10 +1310,11 @@ async def execute_probe(
                         max_payload_bytes=max_payload_bytes,
                         assert_final_url=assert_final_url,
                     ),
-                    timeout=overall_timeout,
+                    # prazo RESTANTE: o retry não pode dobrar o tempo máximo da requisição
+                    timeout=max(1.0, overall_timeout - (time.monotonic() - started)),
                 )
             except Exception as inner_exc:
-                return ProbeResult(
+                return _failure_result(url, inner_exc, timeout) or ProbeResult(
                     target_url=url,
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )

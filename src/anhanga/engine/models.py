@@ -378,6 +378,14 @@ class ProbeResult(BaseModel):
         return self
 
 
+_TLS_ERROR_MARKERS = (
+    "[ssl", "sslerror", "sslcertverificationerror", "certificate verify failed", "certificate_verify_failed",
+    "handshake", "tls alert", "ssl/tls alert", "tlsv1 alert", "sslv3 alert", "wrong version number",
+    "bad dh value", "unsupported protocol", "certificate has expired", "self-signed certificate",
+    "hostname mismatch", "unable to get local issuer",
+)
+
+
 def classify_error_message(message: str) -> str:
     """Código estável e legível por máquina para a mensagem de erro de uma sondagem."""
     m = message.lower()
@@ -393,7 +401,9 @@ def classify_error_message(message: str) -> str:
         return "assertion_failed"
     if m.startswith("limite máximo de redirecionamentos"):
         return "redirect_loop"
-    if any(k in m for k in ("ssl", "certificate", "tls", "handshake")):
+    # Marcadores específicos de erro de TLS, não substring solta: um hostname "classless.example" ou
+    # "tls-proxy.example" numa falha de conexão não pode virar `tls_error`.
+    if any(k in m for k in _TLS_ERROR_MARKERS):
         return "tls_error"
     if m.startswith("erro http/conexão"):
         return "connect_error"

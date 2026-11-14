@@ -315,7 +315,10 @@ def _protocols_text(tls: Any) -> str | None:
             parts.append(f"[bold red]{tag}[/bold red]" if bad else f"[green]{tag}[/green]")
         elif p.status == "unknown":
             parts.append(f"[yellow]{p.protocol}?[/yellow]")
-    return ", ".join(parts) if parts else "nenhum protocolo testável aceito"
+    text = ", ".join(parts) if parts else "nenhum protocolo testável aceito"
+    if enum.legacy_ciphers_untested:
+        text += " [dim](RC4/3DES não testáveis neste OpenSSL)[/dim]"
+    return text
 
 
 def render_rich_report(

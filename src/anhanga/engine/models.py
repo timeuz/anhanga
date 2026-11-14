@@ -187,6 +187,19 @@ class X509ChainLink(BaseModel):
     fingerprint_sha256: str | None = None
 
 
+class RevocationInspection(BaseModel):
+    """Resultado da checagem de revogação do certificado folha (OCSP ativo, com CRL de fallback)."""
+
+    # good = não revogado; revoked = revogado; unknown = o respondedor não conhece o serial;
+    # unavailable = não foi possível checar (sem endpoint/emissor/openssl); error = endpoints falharam.
+    status: Literal["good", "revoked", "unknown", "unavailable", "error"] = "unavailable"
+    method: Literal["ocsp", "crl"] | None = None
+    detail: str | None = None
+    revoked_at: datetime | None = None
+    responder: str | None = None
+    next_update: datetime | None = None
+
+
 class TLSInspection(BaseModel):
     valid: bool = False
     validation_error: str | None = None  # motivo da falha de validação (expirado, hostname, raiz não confiável…)
@@ -210,6 +223,7 @@ class TLSInspection(BaseModel):
     cert_chain: list[str] = Field(default_factory=list)
     cert_chain_details: list[X509ChainLink] = Field(default_factory=list)
     chain_source: str | None = None  # "verificada" | "enviada pelo servidor" | None (indisponível)
+    revocation: RevocationInspection | None = None
     ocsp_stapling: bool | None = None  # None = não verificado
     ocsp_status: str = "Não verificado"
 
@@ -246,6 +260,25 @@ class SecurityFinding(BaseModel):
     safe_default: str | None = None
 
 
+class CSPIssue(BaseModel):
+    id: str
+    severity: Literal["high", "medium", "low"]
+    directive: str
+    message: str
+
+
+class CSPAnalysis(BaseModel):
+    """Qualidade da Content-Security-Policy (não basta existir: 'unsafe-inline' e '*' anulam a proteção)."""
+
+    present: bool = False
+    enforced: bool = False  # False = só Report-Only (não bloqueia nada) ou ausente
+    strength: Literal["none", "report-only", "weak", "moderate", "strong"] = "none"
+    issues: list[CSPIssue] = Field(default_factory=list)
+    uses_nonce_or_hash: bool = False
+    strict_dynamic: bool = False
+    policies: int = 0
+
+
 class SecurityAudit(BaseModel):
     grade: Literal["A+", "A", "B", "C", "D", "F"] = "F"
     score: int = Field(default=0, ge=0, le=100)
@@ -267,6 +300,7 @@ class SecurityAudit(BaseModel):
     csp_frame_ancestors: bool = False
     permissions_camera_restricted: bool = False
     evaluated_url: str | None = None  # resposta sobre a qual os cabeçalhos foram avaliados
+    csp_analysis: CSPAnalysis | None = None
 
 
 class ContentAssertionsResult(BaseModel):

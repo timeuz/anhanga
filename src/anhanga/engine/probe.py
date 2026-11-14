@@ -1115,7 +1115,7 @@ def _failure_result(url: str, exc: BaseException, timeout: float) -> ProbeResult
     if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({timeout:.1f}s): {exc or 'limite de tempo esgotado'}",
+            error=f"Timeout rígido excedido ({timeout:.1f}s): {str(exc) or 'limite de tempo esgotado'}",
         )
     return None
 
@@ -1287,7 +1287,7 @@ async def execute_probe(
     except (asyncio.TimeoutError, httpx.TimeoutException) as timeout_err:
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({overall_timeout:.1f}s): {timeout_err or 'limite de tempo esgotado'}",
+            error=f"Timeout rígido excedido ({overall_timeout:.1f}s): {str(timeout_err) or 'limite de tempo esgotado'}",
         )
     except Exception as exc:
         exc_str = str(exc)

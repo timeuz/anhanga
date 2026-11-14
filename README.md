@@ -234,3 +234,12 @@ O que fica salvo: **histórico de sondagens** (sparkline e uptime sobrevivem a r
 | `GET /api/v1/incidents[?target=&open_only=true&limit=]` | incidentes abertos e encerrados, com duração |
 
 Estimativa de espaço: ~150 B por sondagem (10 alvos a cada 30 s ≈ 130 MB com 30 dias de retenção). Backup: copie o `.db` com o servidor parado, ou use `sqlite3 anhanga.db ".backup out.db"`.
+
+
+## 🖥️ Dashboard operacional
+
+- **Auto-atualização** a cada 15 s (pausa com a aba oculta; liga/desliga e a preferência fica no navegador) com indicador "Atualizado há Ns".
+- **Resumo no topo** (Todos / Online / Degradado / Offline) que também filtra os cards, e **ordenação** por pior status, nome, maior latência ou pior nota.
+- **Uptime 24h por card**, com a cobertura real dos dados ("dados de 28 s" quando o banco é novo) em vez de fingir uma janela cheia.
+- **Incidentes recentes**: abertos e resolvidos, com início, duração e motivo.
+- Sem persistência (desativada ou sem alvos), o dashboard esconde uptime e incidentes e avisa por quê. Com `ANHANGA_API_KEY`, a chave é pedida uma única vez por carga de página.

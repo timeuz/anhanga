@@ -14,11 +14,13 @@
     <script defer src="/static/alpine.min.js"></script>
     <script>
         // Chave da API (ANHANGA_API_KEY): guardada apenas na sessão da aba; pedida ao receber 401.
+        let keyPromptShown = false;
         async function apiFetch(url, retried = false) {
             let key = '';
             try { key = sessionStorage.getItem('anhanga_key') || ''; } catch (_) {}
             const resp = await fetch(url, key ? { headers: { Authorization: 'Bearer ' + key } } : {});
-            if (resp.status === 401 && !retried) {
+            if (resp.status === 401 && !retried && !keyPromptShown) {
+                keyPromptShown = true;
                 const entered = window.prompt('API key do Anhangá (ANHANGA_API_KEY):');
                 if (entered) {
                     try { sessionStorage.setItem('anhanga_key', entered.trim()); } catch (_) {}
@@ -861,19 +863,50 @@
                     <p class="text-xs text-zinc-300 mt-0.5" x-text="t('continuousMonitoringSubtitle')">Série histórica de latência e postura de segurança dos endpoints monitorados pelo Anhangá.</p>
                 </div>
 
+                <div class="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+                <span class="text-[11px] text-zinc-300 font-mono" aria-live="off" x-text="updatedAgoLabel()"></span>
+                <button type="button" role="switch" :aria-checked="autoRefresh" @click="toggleAutoRefresh()"
+                        class="px-3 py-1.5 rounded-lg border text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer"
+                        :class="autoRefresh ? 'bg-emerald-950/80 text-emerald-200 border-emerald-500/60' : 'bg-surface text-zinc-300 border-bordercolor'">
+                    <span class="w-2 h-2 rounded-full" :class="autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'"></span>
+                    <span x-text="t('autoRefresh')">Auto-atualizar</span>
+                </button>
                 <button type="button"
-                        @click="refreshTargets()"
-                        class="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-surface hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
+                        @click="refreshAll()"
+                        class="px-3 py-1.5 rounded-lg bg-surface hover:bg-zinc-800 text-zinc-200 border border-bordercolor text-xs font-medium transition inline-flex items-center gap-1.5 cursor-pointer">
                     <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                     </svg>
                     <span x-text="t('refreshTargetsBtn')">Atualizar Série</span>
                 </button>
+                </div>
             </div>
+
+            <!-- Resumo + filtro + ordenação -->
+            <div x-show="targetsList.length > 0" x-cloak class="flex flex-wrap items-center gap-2">
+                <template x-for="f in [['all','filterAll','border-zinc-600 text-zinc-100'],['up','filterUp','border-emerald-500/60 text-emerald-200'],['degraded','filterDegraded','border-amber-500/60 text-amber-200'],['down','filterDown','border-red-500/60 text-red-200']]" :key="f[0]">
+                    <button type="button" @click="statusFilter = f[0]" :aria-pressed="statusFilter === f[0]"
+                            class="px-3 py-1.5 rounded-lg border bg-surface text-xs font-semibold transition cursor-pointer inline-flex items-center gap-2"
+                            :class="[f[2], statusFilter === f[0] ? 'ring-2 ring-fire-400' : 'opacity-80 hover:opacity-100']">
+                        <span x-text="t(f[1])"></span>
+                        <strong class="font-mono" x-text="summary()[f[0]]"></strong>
+                    </button>
+                </template>
+                <label class="ml-auto inline-flex items-center gap-2 text-xs text-zinc-300">
+                    <span x-text="t('sortLabel')">Ordenar</span>
+                    <select x-model="sortKey" class="bg-surface border border-bordercolor rounded-lg px-2 py-1.5 text-xs text-zinc-100">
+                        <option value="status" x-text="t('sortStatus')"></option>
+                        <option value="name" x-text="t('sortName')"></option>
+                        <option value="latency" x-text="t('sortLatency')"></option>
+                        <option value="grade" x-text="t('sortGrade')"></option>
+                    </select>
+                </label>
+            </div>
+            <p x-show="targetsList.length > 0 && visibleTargets().length === 0" x-cloak class="text-xs text-zinc-300" x-text="t('noTargetsInFilter')"></p>
 
             <!-- Grid Dinâmico (Alpine.js) de Cards de Monitoramento com Sparkline SVG -->
             <div x-show="targetsList.length > 0" x-cloak class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <template x-for="item in targetsList" :key="item.target_url">
+                <template x-for="item in visibleTargets()" :key="item.target_url">
                     <div class="bg-surface border border-bordercolor rounded-2xl p-5 space-y-4 hover:border-fire-400/70 transition flex flex-col justify-between shadow-lg">
                         <div class="space-y-3">
                             <div class="flex justify-between items-center gap-2">
@@ -893,6 +926,11 @@
                                 <p class="text-xs text-zinc-300 mt-1">
                                     <span x-text="t('latencyWord')">Latência</span>: <strong class="font-mono text-white" x-text="hasMeasurements(item) ? item.timings.total_ms + ' ms' : '—'"></strong>
                                     | IP: <span class="font-mono text-zinc-200" x-text="item.resolved_ip || 'N/D'"></span>
+                                </p>
+                                <p x-show="persistenceAvailable" class="text-xs text-zinc-300 mt-1">
+                                    <span x-text="t('uptime24h')">Uptime 24h</span>:
+                                    <strong class="font-mono" :class="uptimeClass(item)" x-text="uptimeLabel(item)"></strong>
+                                    <span x-show="coverageLabel(item)" class="text-[11px] text-zinc-400" x-text="'(' + coverageLabel(item) + ')'"></span>
                                 </p>
                             </div>
 
@@ -954,6 +992,35 @@
                     </div>
                 {% endif %}
             </div>
+
+            <!-- Incidentes recentes (persistência) -->
+            <div class="space-y-2 pt-2" aria-labelledby="incidents-heading">
+                <div>
+                    <h3 id="incidents-heading" class="text-sm font-bold text-zinc-100 uppercase tracking-wider" x-text="t('incidentsTitle')">Incidentes Recentes</h3>
+                    <p class="text-xs text-zinc-300 mt-0.5" x-text="t('incidentsSubtitle')"></p>
+                </div>
+                <p x-show="!persistenceAvailable" x-cloak class="text-xs text-zinc-300 bg-surface border border-bordercolor rounded-xl p-3" x-text="t('persistenceOff')"></p>
+                <p x-show="persistenceAvailable && incidentsList.length === 0" x-cloak class="text-xs text-zinc-300 bg-surface border border-bordercolor rounded-xl p-3" x-text="t('noIncidents')"></p>
+                <ul x-show="persistenceAvailable && incidentsList.length > 0" x-cloak class="space-y-2">
+                    <template x-for="inc in incidentsList" :key="inc.id">
+                        <li class="bg-surface border rounded-xl p-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-xs"
+                            :class="inc.open ? 'border-red-500/60' : 'border-bordercolor'">
+                            <span class="px-2 py-0.5 rounded-md font-bold uppercase border shrink-0 self-start"
+                                  :class="inc.open ? 'bg-red-950/90 text-red-200 border-red-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
+                                  x-text="inc.open ? t('incidentOpen') : t('incidentClosed')"></span>
+                            <div class="min-w-0 flex-1">
+                                <div class="font-semibold text-zinc-100" x-text="t('problem_' + inc.problem)"></div>
+                                <div class="font-mono text-zinc-300 truncate" :title="inc.target" x-text="inc.target"></div>
+                                <div class="text-zinc-400 break-words" x-text="inc.message"></div>
+                            </div>
+                            <div class="font-mono text-zinc-300 sm:text-right shrink-0">
+                                <div x-text="incidentTime(inc.started_ts)"></div>
+                                <div class="text-zinc-100" x-text="formatDuration(inc.duration_seconds)"></div>
+                            </div>
+                        </li>
+                    </template>
+                </ul>
+            </div>
         </section>
 
     </main>
@@ -981,6 +1048,33 @@
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADADO (TLS inválido)',
+                autoRefresh: 'Auto-atualizar',
+                updatedAgo: 'Atualizado há',
+                secondsShort: 's',
+                filterAll: 'Todos',
+                filterUp: 'Online',
+                filterDegraded: 'Degradado',
+                filterDown: 'Offline',
+                sortLabel: 'Ordenar',
+                sortStatus: 'Pior status primeiro',
+                sortName: 'Nome',
+                sortLatency: 'Maior latência',
+                sortGrade: 'Pior nota',
+                noTargetsInFilter: 'Nenhum alvo neste filtro.',
+                uptime24h: 'Uptime 24h',
+                dataOnlyFor: 'dados de',
+                incidentsTitle: 'Incidentes Recentes',
+                incidentsSubtitle: 'Problemas que passaram do limiar de alerta (início no 1º ciclo com falha).',
+                noIncidents: 'Nenhum incidente registrado.',
+                incidentOpen: 'EM ABERTO',
+                incidentClosed: 'RESOLVIDO',
+                persistenceOff: 'Histórico indisponível: persistência desativada ou sem alvos configurados.',
+                problem_down: 'Alvo offline',
+                problem_degraded: 'TLS inválido',
+                problem_tls_expiring: 'Certificado expirando',
+                problem_slo_ttfb: 'SLO de TTFB',
+                problem_slo_total: 'SLO de latência total',
+                problem_grade: 'Nota abaixo do mínimo',
                 noData: 'sem dados',
                 expiredFor: 'expirado há',
                 tlsInvalidReason: 'Motivo da invalidez',
@@ -1082,6 +1176,33 @@
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
                 statusDegraded: 'DEGRADED (invalid TLS)',
+                autoRefresh: 'Auto-refresh',
+                updatedAgo: 'Updated',
+                secondsShort: 's ago',
+                filterAll: 'All',
+                filterUp: 'Online',
+                filterDegraded: 'Degraded',
+                filterDown: 'Offline',
+                sortLabel: 'Sort',
+                sortStatus: 'Worst status first',
+                sortName: 'Name',
+                sortLatency: 'Highest latency',
+                sortGrade: 'Worst grade',
+                noTargetsInFilter: 'No targets match this filter.',
+                uptime24h: 'Uptime 24h',
+                dataOnlyFor: 'data from',
+                incidentsTitle: 'Recent Incidents',
+                incidentsSubtitle: 'Problems that crossed the alert threshold (start = first failing cycle).',
+                noIncidents: 'No incidents recorded.',
+                incidentOpen: 'OPEN',
+                incidentClosed: 'RESOLVED',
+                persistenceOff: 'History unavailable: persistence disabled or no targets configured.',
+                problem_down: 'Target offline',
+                problem_degraded: 'Invalid TLS',
+                problem_tls_expiring: 'Certificate expiring',
+                problem_slo_ttfb: 'TTFB SLO',
+                problem_slo_total: 'Total latency SLO',
+                problem_grade: 'Grade below minimum',
                 noData: 'no data',
                 expiredFor: 'expired',
                 tlsInvalidReason: 'Invalid because',
@@ -1185,6 +1306,14 @@
                 copiedSnippetIndex: null,
                 permalinkCopied: false,
                 targetsList: [],
+                uptimeMap: {},
+                incidentsList: [],
+                persistenceAvailable: true,
+                lastRefresh: null,
+                nowTick: Date.now(),
+                autoRefresh: true,
+                statusFilter: 'all',
+                sortKey: 'status',
                 serverTabs: [
                     { id: 'nginx', label: 'Nginx' },
                     { id: 'apache', label: 'Apache' },
@@ -1194,7 +1323,15 @@
                 ],
 
                 async init() {
-                    await this.refreshTargets();
+                    try { this.autoRefresh = localStorage.getItem('anhanga_autorefresh') !== '0'; } catch (_) {}
+                    await this.refreshAll();
+                    setInterval(() => { this.nowTick = Date.now(); }, 1000);
+                    setInterval(() => {
+                        if (this.autoRefresh && !document.hidden && !this.loading) this.refreshAll();
+                    }, 15000);
+                    document.addEventListener('visibilitychange', () => {
+                        if (!document.hidden && this.autoRefresh) this.refreshAll();
+                    });
                     const params = new URLSearchParams(window.location.search);
                     const scanParam = params.get('scan');
                     const samplesParam = parseInt(params.get('samples') || '1', 10);
@@ -1219,6 +1356,85 @@
                     }
                 },
 
+                toggleAutoRefresh() {
+                    this.autoRefresh = !this.autoRefresh;
+                    try { localStorage.setItem('anhanga_autorefresh', this.autoRefresh ? '1' : '0'); } catch (_) {}
+                    if (this.autoRefresh) this.refreshAll();
+                },
+                async refreshAll() {
+                    await Promise.all([this.refreshTargets(), this.loadPersistence()]);
+                    this.lastRefresh = Date.now();
+                },
+                async loadPersistence() {
+                    try {
+                        const [up, inc] = await Promise.all([
+                            apiFetch('/api/v1/uptime'),
+                            apiFetch('/api/v1/incidents?limit=30'),
+                        ]);
+                        if (!up.ok || !inc.ok) {
+                            this.persistenceAvailable = false;
+                            this.uptimeMap = {};
+                            this.incidentsList = [];
+                            return;
+                        }
+                        this.uptimeMap = (await up.json()).targets || {};
+                        this.incidentsList = (await inc.json()).incidents || [];
+                        this.persistenceAvailable = true;
+                    } catch (_) {
+                        // mantém o último estado conhecido quando offline
+                    }
+                },
+                updatedAgoLabel() {
+                    if (!this.lastRefresh) return '—';
+                    const s = Math.max(0, Math.round((this.nowTick - this.lastRefresh) / 1000));
+                    return this.t('updatedAgo') + ' ' + s + this.t('secondsShort');
+                },
+                summary() {
+                    const c = { all: this.targetsList.length, up: 0, degraded: 0, down: 0 };
+                    for (const it of this.targetsList) c[this.healthOf(it)] += 1;
+                    return c;
+                },
+                visibleTargets() {
+                    const order = { down: 0, degraded: 1, up: 2 };
+                    const gradeRank = { 'A+': 6, 'A': 5, 'B': 4, 'C': 3, 'D': 2, 'F': 1 };
+                    const list = this.targetsList.filter(it => this.statusFilter === 'all' || this.healthOf(it) === this.statusFilter);
+                    const byName = (a, b) => a.target_url.localeCompare(b.target_url);
+                    const sorters = {
+                        status: (a, b) => (order[this.healthOf(a)] - order[this.healthOf(b)]) || byName(a, b),
+                        name: byName,
+                        latency: (a, b) => ((this.hasMeasurements(b) ? b.timings.total_ms : -1) - (this.hasMeasurements(a) ? a.timings.total_ms : -1)) || byName(a, b),
+                        grade: (a, b) => ((this.hasMeasurements(a) ? gradeRank[a.security?.grade] || 1 : 99) - (this.hasMeasurements(b) ? gradeRank[b.security?.grade] || 1 : 99)) || byName(a, b),
+                    };
+                    return [...list].sort(sorters[this.sortKey] || sorters.status);
+                },
+                uptimeWindow(item) {
+                    return this.uptimeMap?.[item.target_url]?.['24h'] || null;
+                },
+                uptimeLabel(item) {
+                    const w = this.uptimeWindow(item);
+                    if (!w || w.uptime_pct === null || w.uptime_pct === undefined) return '—';
+                    return w.uptime_pct.toFixed(w.uptime_pct >= 99.995 ? 1 : 2) + '%';
+                },
+                uptimeClass(item) {
+                    const w = this.uptimeWindow(item);
+                    if (!w || w.uptime_pct === null || w.uptime_pct === undefined) return 'text-zinc-300';
+                    return w.uptime_pct >= 99.9 ? 'text-emerald-300' : (w.uptime_pct >= 99 ? 'text-amber-300' : 'text-red-300');
+                },
+                coverageLabel(item) {
+                    const w = this.uptimeWindow(item);
+                    if (!w || !w.checks || w.covered_seconds >= 86400 - 120) return '';
+                    return this.t('dataOnlyFor') + ' ' + this.formatDuration(w.covered_seconds);
+                },
+                formatDuration(sec) {
+                    sec = Math.max(0, Math.round(sec));
+                    if (sec < 60) return sec + 's';
+                    if (sec < 3600) return Math.floor(sec / 60) + 'min ' + (sec % 60) + 's';
+                    if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'min';
+                    return Math.floor(sec / 86400) + 'd ' + Math.floor((sec % 86400) / 3600) + 'h';
+                },
+                incidentTime(ts) {
+                    try { return new Date(ts * 1000).toLocaleString(); } catch (_) { return String(ts); }
+                },
                 async refreshTargets() {
                     try {
                         const resp = await apiFetch('/api/v1/targets');

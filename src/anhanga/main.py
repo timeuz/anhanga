@@ -81,9 +81,23 @@ def _allow_private_api() -> bool:
     return os.getenv("ANHANGA_ALLOW_PRIVATE", "").strip().lower() in {"1", "true", "yes"}
 
 
+_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def _host_header_is_loopback(request: Request) -> bool:
+    """O cabeçalho Host também precisa ser loopback: um proxy reverso na mesma máquina (que aparece como
+    127.0.0.1) encaminha o Host público, e isso o distingue de um acesso local de verdade."""
+    host = request.headers.get("host", "").strip().lower()
+    if host.startswith("["):  # [::1]:8000
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:  # nome:porta (IPv6 sem colchetes não tem porta)
+        host = host.split(":", 1)[0]
+    return host in _LOOPBACK_HOSTNAMES
+
+
 def _is_loopback_direct(request: Request) -> bool:
     """Cliente loopback sem indício de proxy reverso (que mascararia o cliente real)."""
-    if request.client is None:
+    if request.client is None or not _host_header_is_loopback(request):
         return False
     try:
         if not ipaddress.ip_address(request.client.host).is_loopback:
@@ -503,11 +517,23 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(store.close)
 
 
+def _docs_enabled() -> bool:
+    """/docs, /redoc e /openapi.json só existem com ANHANGA_DOCS=1 (o esquema descreve a superfície da API)."""
+    return os.getenv("ANHANGA_DOCS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+from anhanga.envfile import load_dotenv  # noqa: E402
+
+load_dotenv()  # .env local (variáveis já definidas no ambiente têm precedência); antes de ler ANHANGA_DOCS/CHAVE
+_DOCS = _docs_enabled()
 app = FastAPI(
     title="Anhangá",
     description="Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps",
     version=__version__,
     lifespan=lifespan,
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
 )
 
 
@@ -530,8 +556,8 @@ async def api_key_guard(request: Request, call_next):
 
 @app.get("/healthz", tags=["System"])
 async def healthcheck():
-    """Liveness/Readiness probe para Kubernetes."""
-    return {"status": "alive", "monitored_targets": len(STATE_CACHE)}
+    """Liveness/Readiness probe (público: não expõe nada além de "vivo")."""
+    return {"status": "alive"}
 
 
 @app.get("/api/v1/scan", response_model=ProbeResult, tags=["Diagnostics"])
@@ -683,7 +709,7 @@ async def web_dashboard(request: Request):
     index_file = BASE_DIR / "web" / "templates" / "index.html"
     if not index_file.exists():
         return HTMLResponse(
-            "<h1>Anhangá Engine Online</h1><p>Acesse <a href='/docs'>/docs</a> ou <a href='/metrics'>/metrics</a>.</p>"
+            "<h1>Anhangá Engine Online</h1><p>Interface indisponível; use <code>/api/v1/</code> e <code>/metrics</code> com a chave da API.</p>"
         )
     return templates.TemplateResponse(
         request=request,
@@ -693,5 +719,6 @@ async def web_dashboard(request: Request):
         context={
             "cached_results": list(STATE_CACHE.values()) if _is_authorized(request) else [],
             "app_version": __version__,
+            "docs_enabled": _DOCS,
         },
     )

@@ -218,13 +218,13 @@ def api(store, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     app_main._STORE = store
     app_main.STATE_CACHE.clear()
-    yield TestClient(app_main.app, client=("127.0.0.1", 50000))
+    yield TestClient(app_main.app, base_url="http://localhost", client=("127.0.0.1", 50000))
     app_main._STORE = None
 
 
 def test_api_503_without_store(monkeypatch):
     app_main._STORE = None
-    c = TestClient(app_main.app, client=("127.0.0.1", 50000))
+    c = TestClient(app_main.app, base_url="http://localhost", client=("127.0.0.1", 50000))
     for path in ("/api/v1/history?target=x", "/api/v1/uptime", "/api/v1/incidents"):
         assert c.get(path).status_code == 503
 

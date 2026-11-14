@@ -579,6 +579,21 @@ def _build_parser() -> _NonExitingArgumentParser:
         help="Chat ID opcional para alertas via Telegram Bot API",
     )
 
+    keygen_parser = subparsers.add_parser(
+        "keygen",
+        help="Gera a chave da API (ANHANGA_API_KEY) e a grava em .env com permissão 0600",
+    )
+    keygen_parser.add_argument("--env-file", default=None, help="Arquivo de destino (default: ./.env)")
+    keygen_parser.add_argument("--force", action="store_true", help="Substitui uma chave já existente")
+
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Copia o banco SQLite de forma consistente (pode rodar com o servidor ativo)",
+    )
+    backup_parser.add_argument("destination", help="Arquivo de destino da cópia")
+    backup_parser.add_argument("--db", default=None, help="Banco de origem (default: ANHANGA_DB_PATH ou storage.path)")
+    backup_parser.add_argument("--force", action="store_true", help="Sobrescreve o destino se existir")
+
     serve_parser = subparsers.add_parser(
         "serve",
         help="Inicia o servidor Web e a API FastAPI do Anhangá",
@@ -734,9 +749,65 @@ async def _run_check_async(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _is_loopback_host(host: str) -> bool:
+    import ipaddress
+
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _run_keygen(args: argparse.Namespace) -> int:
+    from anhanga.envfile import generate_api_key
+
+    try:
+        path, key = generate_api_key(Path(args.env_file) if args.env_file else None, force=args.force)
+    except FileExistsError as exc:
+        print(f"Erro: {exc}", file=sys.stderr)
+        return 2
+    print(f"Chave gerada e salva em {path} (permissão 0600). O servidor a lê sozinho ao iniciar.")
+    print(f"ANHANGA_API_KEY={key}")
+    print("Na interface, informe esta chave quando ela pedir; nas chamadas: 'Authorization: Bearer <chave>'.")
+    return 0
+
+
+def _run_backup(args: argparse.Namespace) -> int:
+    import os
+
+    from anhanga.engine.config import find_config_path, load_config
+    from anhanga.storage import backup_database
+
+    src = args.db or os.getenv("ANHANGA_DB_PATH")
+    if not src:
+        src = load_config(find_config_path()).storage.path
+    try:
+        dest = backup_database(src, args.destination, force=args.force)
+    except (OSError, ValueError) as exc:
+        print(f"Erro no backup: {exc}", file=sys.stderr)
+        return 2
+    print(f"Backup de {src} gravado em {dest} (0600).")
+    return 0
+
+
 def _run_serve(args: argparse.Namespace) -> int:
     """Executa o servidor web e API do Anhangá via uvicorn."""
+    import os
+
     import uvicorn
+
+    from anhanga.envfile import load_dotenv
+
+    load_dotenv()
+    if not _is_loopback_host(args.host) and not os.getenv("ANHANGA_API_KEY"):
+        print(
+            f"Recusado: escutar em {args.host} (fora do loopback) exige chave da API. "
+            "Rode 'anhanga keygen' (grava em .env) ou defina ANHANGA_API_KEY.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         uvicorn.run(
@@ -765,7 +836,11 @@ async def async_main(argv: list[str] | None = None) -> int:
             return 3
 
         parsed_args = parser.parse_args(raw_args)
-        if parsed_args.command == "serve":
+        if parsed_args.command == "keygen":
+            return _run_keygen(parsed_args)
+        elif parsed_args.command == "backup":
+            return _run_backup(parsed_args)
+        elif parsed_args.command == "serve":
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _run_serve, parsed_args)
         elif parsed_args.command == "check":
@@ -799,7 +874,11 @@ def main(argv: list[str] | None = None) -> int:
         code = sys_exit.code
         return int(code) if isinstance(code, int) else 0
 
-    if parsed_args.command == "serve":
+    if parsed_args.command == "keygen":
+        return _run_keygen(parsed_args)
+    elif parsed_args.command == "backup":
+        return _run_backup(parsed_args)
+    elif parsed_args.command == "serve":
         return _run_serve(parsed_args)
     elif parsed_args.command == "check":
         try:

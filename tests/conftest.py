@@ -1,3 +1,8 @@
+import os
+
+# Nenhum teste pode depender (nem vazar) o .env do desenvolvedor.
+os.environ["ANHANGA_ENV_FILE"] = os.devnull
+
 import pytest
 
 from anhanga.engine.models import (

@@ -398,3 +398,20 @@ padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `tim
 - **Docker:** `docker build -t anhanga .` e
   `docker run -d -p 7890:7890 --env-file .env -v "$PWD/data:/data" anhanga` (coloque `targets.yaml` em `data/`; o diretório
   precisa ser gravável pelo uid 10001). Roda sem privilégios, tem `HEALTHCHECK` e **não inicia sem `ANHANGA_API_KEY`**.
+
+## ✅ Validação cruzada com o testssl.sh
+
+Protocolos (SSLv2 a TLS 1.3) comparados com o `testssl.sh` 3.2.5 em 14 hosts públicos (`example.com`, `github.com`,
+`wikipedia.org`, `cloudflare.com`, `python.org`, `mozilla.org` e os `badssl.com` de TLS 1.0/1.1/1.2, RC4, 3DES, NULL,
+RC4-MD5 e DH1024), em 2026-11-14:
+
+- **Concordam** em TLS 1.0–1.3 em 9 dos 14 hosts.
+- **`null.badssl.com`:** o Anhangá aceita TLS 1.0/1.1 (confirmado com `openssl s_client`, cifra `ECDHE-RSA-NULL-SHA`); o
+  `testssl.sh` diz "not offered" porque seu teste por sockets não oferece cifras NULL por padrão.
+- **`rc4.badssl.com`, `3des.badssl.com`, `rc4-md5.badssl.com`:** o `testssl.sh` as aceita; o Anhangá reporta
+  `unknown` ("não foi possível determinar"), não "rejeitado": o OpenSSL local não oferece RC4 nem 3DES, e um
+  `handshake_failure` sozinho não prova que o servidor recusou a versão (só `protocol_version` prova).
+  Um OpenSSL com RC4/3DES (`local_ciphers_complete()`) volta a tratar `handshake_failure` como recusa.
+- **SSLv2/SSLv3:** o Anhangá os reporta como `untestable` (o OpenSSL moderno os removeu); o `testssl.sh` os testa por
+  sockets próprios. Hoje o `testssl.sh` é a referência para esses dois.
+- **Fora desta comparação:** nota de segurança e lista de cifras (só protocolos foram comparados).

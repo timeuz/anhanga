@@ -8,8 +8,8 @@ Uma CSP só protege se não for trivialmente contornável. Avalia as regras que 
          política apenas em Report-Only
   low    base-uri ausente
 
-Várias políticas (cabeçalhos repetidos ou separados por vírgula) são conjuntivas: uma fraqueza só vale
-se TODAS as políticas a tiverem, porque qualquer outra bloquearia.
+Várias políticas (cabeçalhos repetidos ou separados por vírgula) são conjuntivas: uma fraqueza só some se
+OUTRA política restringe a mesma coisa. Política sem `script-src`/`default-src` não restringe scripts.
 """
 
 from __future__ import annotations
@@ -98,6 +98,29 @@ def _split_policies(value: str | None) -> list[str]:
     return [p.strip() for p in (value or "").split(",") if p.strip()]
 
 
+_SCRIPT_IDS = frozenset({
+    "csp-no-script-src", "csp-unsafe-inline", "csp-unsafe-eval", "csp-wildcard", "csp-http-scheme",
+    "csp-data-scheme", "csp-https-scheme", "csp-bypass-host",
+})
+
+
+def _combine_policies(per_policy: list[list[CSPIssue]]) -> list[CSPIssue]:
+    """Políticas conjuntivas: um recurso só é permitido se TODAS permitirem.
+
+    - object-src / base-uri: a fraqueza some se QUALQUER política os restringe (interseção por id).
+    - scripts: uma política SEM script-src/default-src não restringe nada (não neutraliza a fraqueza de outra),
+      então só as que definem scripts contam; a fraqueza vale se todas essas a tiverem. Se nenhuma define
+      scripts, vale o `csp-no-script-src`."""
+    defining = [iss for iss in per_policy if not any(i.id == "csp-no-script-src" for i in iss)]
+    if defining:
+        script_ids = set.intersection(*[{i.id for i in iss} & _SCRIPT_IDS for iss in defining])
+        script_issues = [i for i in defining[0] if i.id in script_ids]
+    else:
+        script_issues = [i for i in per_policy[0] if i.id == "csp-no-script-src"]
+    other_ids = set.intersection(*[{i.id for i in iss} - _SCRIPT_IDS for iss in per_policy])
+    return script_issues + [i for i in per_policy[0] if i.id in other_ids]
+
+
 def analyze_csp(enforced: str | None, report_only: str | None) -> CSPAnalysis:
     enforced_policies = _split_policies(enforced)
     ro_policies = _split_policies(report_only)
@@ -106,8 +129,7 @@ def analyze_csp(enforced: str | None, report_only: str | None) -> CSPAnalysis:
 
     policies = enforced_policies or ro_policies
     per_policy = [_analyze_policy(p) for p in policies]
-    ids_in_all = set.intersection(*[{i.id for i in iss} for iss, _, _ in per_policy])
-    issues = [i for i in per_policy[0][0] if i.id in ids_in_all]
+    issues = _combine_policies([iss for iss, _, _ in per_policy])
     nonce_hash = any(n for _, n, _ in per_policy)
     strict_dynamic = any(sd for _, _, sd in per_policy)
 

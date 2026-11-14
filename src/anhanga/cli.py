@@ -620,13 +620,6 @@ def _build_parser() -> _NonExitingArgumentParser:
         default=False,
         help="Ativa hot-reload automático para desenvolvimento",
     )
-    serve_parser.add_argument(
-        "--workers",
-        "-w",
-        type=int,
-        default=1,
-        help="Quantidade de processos workers (default: 1)",
-    )
     return parser
 
 
@@ -803,7 +796,7 @@ def _run_serve(args: argparse.Namespace) -> int:
 
     from anhanga.envfile import load_dotenv
 
-    load_dotenv()
+    load_dotenv()  # idempotente (o pacote já o carrega na importação); cobre um .env criado depois, ex.: `keygen` na mesma sessão
     if not _is_loopback_host(args.host) and not os.getenv("ANHANGA_API_KEY"):
         print(
             f"Recusado: escutar em {args.host} (fora do loopback) exige chave da API. "
@@ -818,7 +811,7 @@ def _run_serve(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             reload=args.reload,
-            workers=args.workers if not args.reload else None,
+            workers=1,  # instância única: cada worker rodaria o loop de monitoramento e alertaria em duplicidade
         )
         return 0
     except KeyboardInterrupt:

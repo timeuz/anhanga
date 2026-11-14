@@ -6,9 +6,8 @@ import logging
 import os
 from pathlib import Path
 
-import re
+import time
 from typing import Any, Literal
-import yaml
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,16 +15,21 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from anhanga import __version__
+from anhanga.engine.alerting import AlertEvent, AlertManager
+from anhanga.engine.config import MonitorConfig, WebhookSpec, find_config_path, load_config
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ABSOLUTE_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES,
     SSRFBlockedError,
+    _normalize_and_validate_scheme,
     execute_probe,
 )
 from anhanga.engine.security import RATE_LIMITER
 from anhanga.engine.webhooks import send_webhook_alert
 from anhanga.metrics.exporter import (
+    ALERT_NOTIFICATIONS_TOTAL,
+    forget_target,
     record_probe_metrics,
     render_adhoc_probe_metrics,
     render_prometheus_metrics,
@@ -167,112 +171,134 @@ def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) 
     return result
 
 
-def _interpolate_env_vars(obj: Any) -> Any:
-    """Interpola recursivamente variáveis de ambiente ${VAR_NAME} em strings e dicionários."""
-    if isinstance(obj, str):
-        return re.sub(
-            r"\$\{([A-Za-z0-9_]+)\}",
-            lambda m: os.getenv(m.group(1), ""),
-            obj,
-        )
-    if isinstance(obj, list):
-        return [_interpolate_env_vars(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: _interpolate_env_vars(v) for k, v in obj.items()}
-    return obj
+_CONFIG: MonitorConfig | None = None
+_BACKGROUND_TASKS: set[asyncio.Task] = set()  # referência forte: evita coleta de tasks de notificação
+WEBHOOK_DELIVERY_TIMEOUT = 10.0
 
 
-def load_targets_config() -> dict:
-    """Carrega alvos declarativos do targets.yaml interpolando variáveis de ambiente ${ENV_VAR}."""
-    possible_paths = [
-        Path(os.getenv("ANHANGA_CONFIG", "targets.yaml")),
-        Path("targets.yaml"),
-        BASE_DIR.parent.parent / "targets.yaml",
-        Path.cwd() / "targets.yaml",
-    ]
-
-    config_path = None
-    for p in possible_paths:
-        if p.exists():
-            config_path = p
-            break
-
-    if not config_path:
-        return {"interval_seconds": 60, "allow_private": False, "targets": []}
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            raw_cfg = yaml.safe_load(f) or {}
-            return _interpolate_env_vars(raw_cfg)
-    except Exception as exc:
-        logger.error(f"Falha ao ler {config_path}: {exc}")
-        return {"interval_seconds": 60, "allow_private": False, "targets": []}
+def _config_path() -> Path | None:
+    return find_config_path([BASE_DIR.parent.parent / "targets.yaml"])
 
 
-async def _dispatch_configured_webhooks(
-    res: ProbeResult, webhooks_cfg: list[Any], allow_private: bool = False
-) -> None:
-    if not webhooks_cfg:
-        return
-    should_alert = res.health != "up" or bool(res.tls and res.tls.alert_expiring)
-    if not should_alert:
-        return
+def _current_config() -> MonitorConfig:
+    """Config vigente (a do loop de vigilância; carrega sob demanda se o loop ainda não rodou)."""
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = load_config(_config_path())
+    return _CONFIG
 
-    for wh in webhooks_cfg:
-        try:
-            if isinstance(wh, str):
-                await send_webhook_alert(
-                    webhook_url=wh, result=res, allow_private=allow_private
+
+def _log_config_issues(cfg: MonitorConfig, path: Path | None) -> None:
+    origin = f" ({path})" if path else ""
+    for msg in cfg.errors:
+        logger.error(f"Configuração{origin}: {msg}")
+    for msg in cfg.warnings:
+        logger.warning(f"Configuração{origin}: {msg}")
+
+
+async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
+    """Entrega um evento a todos os webhooks em paralelo, com timeout e uma nova tentativa."""
+
+    async def _one(wh: WebhookSpec) -> bool:
+        for attempt in (1, 2):
+            try:
+                await asyncio.wait_for(
+                    send_webhook_alert(
+                        webhook_url=wh.url,
+                        result=result,
+                        provider=wh.provider,
+                        violations=event.messages,
+                        chat_id=wh.chat_id,
+                        allow_private=wh.allow_private,
+                        timeout=WEBHOOK_DELIVERY_TIMEOUT / 2,
+                        event=event.kind,
+                    ),
+                    timeout=WEBHOOK_DELIVERY_TIMEOUT,
                 )
-            elif isinstance(wh, dict) and wh.get("url"):
-                await send_webhook_alert(
-                    webhook_url=str(wh["url"]),
-                    result=res,
-                    provider=str(wh.get("provider", "auto")),
-                    chat_id=wh.get("chat_id"),
-                    allow_private=bool(wh.get("allow_private", allow_private)),
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Webhook {event.kind} para {event.target} falhou (tentativa {attempt}/2): {exc}"
                 )
-        except Exception as exc:
-            logger.warning(f"Falha ao enviar alerta de webhook para {res.target_url}: {exc}")
+                if attempt == 1:
+                    await asyncio.sleep(2.0)
+        return False
+
+    outcomes = await asyncio.gather(*(_one(wh) for wh in webhooks))
+    for ok in outcomes:
+        ALERT_NOTIFICATIONS_TOTAL.labels(kind=event.kind, result="sent" if ok else "failed").inc()
+
+
+def _dispatch_events(events: list[AlertEvent], result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
+    """Agenda a entrega em background: webhook lento nunca atrasa o ciclo de sondagem."""
+    if not webhooks:
+        return
+    for event in events:
+        logger.info(f"Alerta [{event.kind}] {event.target}: {'; '.join(event.messages)}")
+        task = asyncio.create_task(_deliver_event(event, result, webhooks))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def background_guardian_loop():
-    """Loop assíncrono que sonda os alvos do targets.yaml concorrentemente."""
-    config = load_targets_config()
-    targets: list[str] = config.get("targets", [])
-    interval: int = config.get("interval_seconds", 60)
-    allow_private: bool = config.get("allow_private", False)
-    samples: int = config.get("samples", 1)
-    webhooks_cfg: list[Any] = config.get("webhooks", [])
+    """Loop assíncrono que sonda os alvos do targets.yaml, avalia alertas com estado e recarrega a config."""
+    global _CONFIG
+    path = _config_path()
+    cfg = load_config(path)
+    _CONFIG = cfg
+    _log_config_issues(cfg, path)
+    mtime = path.stat().st_mtime if path else None
+    manager = AlertManager(cfg.policy)
 
-    if not targets:
+    if not cfg.targets and path is None:
         logger.info("Nenhum targets.yaml detectado. Operando apenas em modo On-Demand/API.")
-        return
 
-    logger.info(f"Anhangá vigiando {len(targets)} alvos a cada {interval}s...")
     while True:
+        cycle_start = time.monotonic()
         try:
-            # Dispara todas as sondas em paralelo no event loop
-            tasks = [
-                execute_probe(url, allow_private=allow_private, samples=samples)
-                for url in targets
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Recarga a quente: só quando o arquivo mudou (stat é barato).
+            new_path = _config_path()
+            new_mtime = new_path.stat().st_mtime if new_path else None
+            if new_path is not None and (new_path, new_mtime) != (path, mtime):
+                path, mtime = new_path, new_mtime
+                cfg = load_config(path)
+                _CONFIG = cfg
+                _log_config_issues(cfg, path)
+                logger.info(f"Configuração recarregada: {len(cfg.targets)} alvo(s), {len(cfg.webhooks)} webhook(s).")
+                manager.policy = cfg.policy
 
-            for res in results:
-                if isinstance(res, ProbeResult):
+            if cfg.targets:
+                results = await asyncio.gather(
+                    *(
+                        execute_probe(t.url, allow_private=t.allow_private, samples=t.samples)
+                        for t in cfg.targets
+                    ),
+                    return_exceptions=True,
+                )
+                for spec, res in zip(cfg.targets, results):
+                    if not isinstance(res, ProbeResult):
+                        logger.error(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}")
+                        continue
                     _update_state_and_history(res, is_continuous=True)
                     record_probe_metrics(res)
-                    if webhooks_cfg:
-                        await _dispatch_configured_webhooks(
-                            res, webhooks_cfg, allow_private=allow_private
-                        )
+                    _dispatch_events(manager.evaluate(res, spec.rules), res, cfg.webhooks)
+
+            # Alvos removidos da config somem do dashboard, das métricas e do estado de alertas.
+            expected = {_normalize_and_validate_scheme(t.url)[0] for t in cfg.targets}
+            for stale in [k for k in STATE_CACHE if k not in expected]:
+                STATE_CACHE.pop(stale, None)
+                HISTORY_CACHE.pop(stale, None)
+                forget_target(stale)
+            manager.forget(expected)
         except asyncio.CancelledError:
             logger.info("Desligando loop de vigilância do Anhangá.")
             break
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.error(f"Erro no loop de background: {exc}")
 
-        await asyncio.sleep(interval)
+        # Taxa fixa: o intervalo conta do início do ciclo (não acumula a duração das sondas).
+        elapsed = time.monotonic() - cycle_start
+        await asyncio.sleep(max(1.0, cfg.interval_seconds - elapsed))
 
 
 @contextlib.asynccontextmanager
@@ -358,12 +384,7 @@ async def api_scan_url(
 async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
     """Dispara alerta formatado para Slack, Microsoft Teams ou Telegram com proteção Anti-SSRF."""
     _enforce_rate_limit(request)
-    cfg = load_targets_config()
-    entries = {
-        str(w if isinstance(w, str) else w.get("url", "")): (w if isinstance(w, dict) else {})
-        for w in cfg.get("webhooks", [])
-        if isinstance(w, (str, dict))
-    }
+    entries = {w.url: w for w in _current_config().webhooks}
     if body.webhook_url not in entries:
         raise HTTPException(
             status_code=403,
@@ -380,9 +401,7 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
             provider=body.provider,
             violations=body.violations,
             chat_id=body.chat_id,
-            allow_private=bool(
-                entries[body.webhook_url].get("allow_private", cfg.get("allow_private", False))
-            ),
+            allow_private=entries[body.webhook_url].allow_private,
             timeout=body.timeout,
         )
         return delivery

@@ -1,14 +1,23 @@
-"""Worker mínimo (importa apenas `re`) executado em subprocesso para isolar regex não confiável."""
+"""Worker mínimo (só `re`/`json`) executado em subprocesso isolado para avaliar regex não confiável.
 
+Protocolo: stdin = JSON {"pattern", "text"}; stdout = JSON ["ok", bool] | ["invalid", msg].
+"""
+
+import json
 import re
+import sys
 
 
-def run(conn, pattern: str, text: str) -> None:
+def main() -> None:
+    data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     try:
-        conn.send(("ok", bool(re.search(pattern, text))))
+        out = ["ok", bool(re.search(data["pattern"], data["text"]))]
     except re.error as err:
-        conn.send(("invalid", str(err)))
+        out = ["invalid", str(err)]
     except Exception as err:  # noqa: BLE001
-        conn.send(("invalid", f"{type(err).__name__}: {err}"))
-    finally:
-        conn.close()
+        out = ["invalid", f"{type(err).__name__}: {err}"]
+    sys.stdout.write(json.dumps(out))
+
+
+if __name__ == "__main__":
+    main()

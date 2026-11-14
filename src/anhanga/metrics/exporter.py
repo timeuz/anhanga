@@ -133,6 +133,13 @@ PROBE_TLS_EXPIRY_DAYS = Gauge(
     registry=REGISTRY,
 )
 
+ALERT_NOTIFICATIONS_TOTAL = Counter(
+    "anhanga_alert_notifications_total",
+    "Notificações de alerta enviadas aos webhooks (kind: alert|reminder|recovery; result: sent|failed)",
+    ["kind", "result"],
+    registry=REGISTRY,
+)
+
 PROBE_TLS_VALID = Gauge(
     "anhanga_probe_tls_valid",
     "1 se a cadeia/hostname/validade do certificado TLS foram validados com sucesso",
@@ -214,6 +221,17 @@ def _remove_series(gauge: Gauge, target: str) -> None:
             gauge.remove(*key)
     except (ValueError, KeyError, AttributeError):
         pass
+
+
+def forget_target(target: str) -> None:
+    """Remove TODAS as séries (gauges, counters e histogramas) de um alvo retirado da configuração."""
+    for collector in set(REGISTRY._names_to_collectors.values()):  # noqa: SLF001
+        labelnames = getattr(collector, "_labelnames", ())
+        if "target" not in labelnames:
+            continue
+        idx = list(labelnames).index("target")
+        for key in [k for k in list(collector._metrics) if k[idx] == target]:  # noqa: SLF001
+            collector.remove(*key)
 
 
 def _clear_measurements(target: str) -> None:

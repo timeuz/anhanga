@@ -22,6 +22,7 @@ from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ABSOLUTE_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES,
+    MONITORED_PROBE,
     SSRFBlockedError,
     _normalize_and_validate_scheme,
     execute_probe,
@@ -159,12 +160,8 @@ def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) 
         if result.sampling and result.sampling.headline_total_ms > 0
         else result.timings.total_ms
     )
-    if is_continuous:
-        if headline_ms > 0:
-            history.append(headline_ms)
-    else:
-        if not history and headline_ms > 0:
-            history.append(headline_ms)
+    if headline_ms > 0:  # só a vigilância contínua chega aqui (scans avulsos retornam acima)
+        history.append(headline_ms)
 
     if len(history) > MAX_HISTORY_POINTS:
         del history[:-MAX_HISTORY_POINTS]
@@ -178,6 +175,7 @@ def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) 
 _CONFIG: MonitorConfig | None = None
 _BACKGROUND_TASKS: set[asyncio.Task] = set()  # referência forte: evita coleta de tasks de notificação
 WEBHOOK_DELIVERY_TIMEOUT = 10.0
+SHUTDOWN_DRAIN_SECONDS = 5.0
 
 
 def _config_path() -> Path | None:
@@ -246,7 +244,25 @@ async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[
 
     Quem falhar vai para a outbox persistente e é reenviado com backoff: o alerta não se perde."""
 
+    def _enqueue_now(wh: WebhookSpec) -> bool:
+        """Síncrono de propósito: precisa funcionar mesmo durante o cancelamento do desligamento."""
+        if _STORE is None:
+            return False
+        try:
+            _STORE.enqueue(webhook_key(wh.url), event.target, event.kind, event.messages, result.model_dump_json())
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Falha ao salvar notificação na outbox: {exc}")
+            return False
+
     async def _one(wh: WebhookSpec) -> str:
+        try:
+            return await _one_inner(wh)
+        except asyncio.CancelledError:
+            _enqueue_now(wh)  # desligando com a entrega em voo: não perder o alerta
+            raise
+
+    async def _one_inner(wh: WebhookSpec) -> str:
         for attempt in (1, 2):
             try:
                 await _send_to_webhook(wh, event.kind, event.messages, result, WEBHOOK_DELIVERY_TIMEOUT)
@@ -306,6 +322,15 @@ async def _process_outbox(cfg: MonitorConfig) -> None:
         ALERT_OUTBOX_PENDING.set(size or 0)
     finally:
         _OUTBOX_RUNNING = False
+
+
+async def _monitored_probe(url: str, **kwargs) -> ProbeResult:
+    """Sondagem da vigilância contínua (habilita a heurística de falha de modo comum)."""
+    token = MONITORED_PROBE.set(True)
+    try:
+        return await execute_probe(url, **kwargs)
+    finally:
+        MONITORED_PROBE.reset(token)
 
 
 def _spawn(coro) -> None:
@@ -383,21 +408,26 @@ async def background_guardian_loop():
                 path, mtime = new_path, new_mtime
                 new_cfg = load_config(path)
                 _log_config_issues(new_cfg, path)
-                logger.info(
-                    f"Configuração recarregada: {len(new_cfg.targets)} alvo(s), {len(new_cfg.webhooks)} webhook(s)."
-                )
-                if new_cfg.storage != cfg.storage and _STORE is not None:
-                    logger.warning("Configuração 'storage' alterada: requer reiniciar o servidor para valer.")
-                cfg = new_cfg
-                _CONFIG = cfg
-                manager.policy = cfg.policy
+                if new_cfg.load_failed:
+                    # YAML quebrado/meio salvo não é "zero alvos": manter a config anterior, senão o ciclo
+                    # seguinte apagaria alvos, estado de alertas e fecharia incidentes como recuperados.
+                    logger.error("Recarga rejeitada: configuração inválida; mantendo a configuração anterior.")
+                else:
+                    logger.info(
+                        f"Configuração recarregada: {len(new_cfg.targets)} alvo(s), {len(new_cfg.webhooks)} webhook(s)."
+                    )
+                    if new_cfg.storage != cfg.storage and _STORE is not None:
+                        logger.warning("Configuração 'storage' alterada: requer reiniciar o servidor para valer.")
+                    cfg = new_cfg
+                    _CONFIG = cfg
+                    manager.policy = cfg.policy
 
             await _open_store(cfg, manager)
 
             if cfg.targets:
                 results = await asyncio.gather(
                     *(
-                        execute_probe(t.url, allow_private=t.allow_private, samples=t.samples)
+                        _monitored_probe(t.url, allow_private=t.allow_private, samples=t.samples)
                         for t in cfg.targets
                     ),
                     return_exceptions=True,
@@ -451,6 +481,15 @@ async def lifespan(app: FastAPI):
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+    # Entregas em voo: dá uma janela para concluir; as que não acabarem são canceladas e se salvam na
+    # outbox (ver `_deliver_event`) ANTES de o banco fechar.
+    pending = [t for t in _BACKGROUND_TASKS if not t.done()]
+    if pending:
+        _, still = await asyncio.wait(pending, timeout=SHUTDOWN_DRAIN_SECONDS)
+        for t in still:
+            t.cancel()
+        if still:
+            await asyncio.wait(still, timeout=5.0)
     if _STORE is not None:
         store, _STORE = _STORE, None
         await asyncio.to_thread(store.close)
@@ -641,5 +680,10 @@ async def web_dashboard(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"cached_results": list(STATE_CACHE.values()), "app_version": __version__},
+        # O HTML é público (a UI pede a chave e busca os dados via /api/), mas o estado em cache não pode
+        # vazar sem autorização: alvos, IPs, notas e latências só vão no render para quem está autorizado.
+        context={
+            "cached_results": list(STATE_CACHE.values()) if _is_authorized(request) else [],
+            "app_version": __version__,
+        },
     )

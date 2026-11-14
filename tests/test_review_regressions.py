@@ -109,21 +109,31 @@ def test_hot_reload_keeps_previous_config_on_broken_yaml(tmp_path, monkeypatch, 
 
 
 # ---- 4. orçamento de tempo ------------------------------------------------------------------------------------
-def test_revocation_deadline_degrades_and_is_cached(monkeypatch):
+def test_revocation_budget_does_not_cancel_the_work(monkeypatch):
+    """Estourar o orçamento da sondagem não cancela a checagem: ela termina em segundo plano e o ciclo
+    seguinte lê o cache (antes, o CRL baixado pela metade era descartado e refeito a cada 5 min)."""
     R.clear_caches()
     calls = []
 
-    async def slow(*a, **k):
+    async def slow_but_finite(*a, **k):
         calls.append(1)
-        await asyncio.sleep(30)
+        await asyncio.sleep(0.5)
+        return RevocationInspection(status="good", method="crl")
 
-    monkeypatch.setattr(R, "_check_uncached", slow)
+    monkeypatch.setattr(R, "_check_uncached", slow_but_finite)
     der = [b"\x30\x03\x02\x01\x01"]
-    t0 = time.monotonic()
-    res = asyncio.run(R.check_revocation(der, deadline=0.2))
-    assert time.monotonic() - t0 < 2 and res.status == "error" and "tempo esgotado" in res.detail
-    asyncio.run(R.check_revocation(der, deadline=0.2))
-    assert len(calls) == 1, "o trabalho que estourou o prazo foi refeito no ciclo seguinte"
+
+    async def scenario():
+        t0 = time.monotonic()
+        first = await R.check_revocation(der, deadline=0.1)
+        waited = time.monotonic() - t0
+        await asyncio.sleep(0.7)
+        second = await R.check_revocation(der, deadline=0.1)
+        return first, waited, second
+
+    first, waited, second = asyncio.run(scenario())
+    assert waited < 0.4 and first.status == "unavailable" and "em andamento" in first.detail
+    assert second.status == "good" and len(calls) == 1
     R.clear_caches()
 
 

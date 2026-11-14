@@ -303,3 +303,14 @@ embeds de terceiros sem CORP/CORS), então não alteram a nota. Valor inválido 
 - **Alvos duplicados** são detectados pela URL normalizada (`example.com` = `https://example.com` = `HTTPS://EXAMPLE.COM`).
 - **Dashboard:** o HTML é público, mas os dados em cache só vão embutidos para quem está autorizado.
 - **Desligamento:** entregas de alerta em voo ganham 5 s para concluir; as que não concluírem vão para a outbox.
+
+## 🔔 Entrega de alertas e revogação: detalhes de segurança
+
+- **Webhook só conta como entregue com resposta 2xx.** 4xx/5xx/429 são falha: 2 tentativas imediatas, depois a
+  outbox reenvia com backoff (e só remove o item quando o destino responde 2xx).
+- **URLs de OCSP/CRL/AIA vêm do certificado do alvo (terceiro) e NÃO herdam o `allow_private` dele.** Sem isso, um
+  certificado hostil faria o monitor requisitar `169.254.169.254` ou a rede interna. Para PKI interna com
+  respondedor em IP privado, o operador libera explicitamente com `ANHANGA_REVOCATION_ALLOW_PRIVATE=1`.
+- **A revogação nunca segura a sondagem por mais de 4 s e não é cancelada.** Se o CRL for grande e demorar mais, o
+  campo sai como `unavailable` ("verificação em andamento") e o trabalho termina em segundo plano (teto de 25 s); o
+  ciclo seguinte lê o resultado do cache. Processos `openssl` são sempre encerrados, inclusive em cancelamento.

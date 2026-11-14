@@ -607,10 +607,12 @@ async def fetch_tls_extras(
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(b""), timeout=timeout)
-    except Exception:
+    except BaseException as exc:  # inclui CancelledError: o `openssl s_client` não pode ficar órfão
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
         return [], None
     text = out.decode("utf-8", errors="replace")
     chain: list[bytes] = []

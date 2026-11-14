@@ -314,3 +314,10 @@ embeds de terceiros sem CORP/CORS), então não alteram a nota. Valor inválido 
 - **A revogação nunca segura a sondagem por mais de 4 s e não é cancelada.** Se o CRL for grande e demorar mais, o
   campo sai como `unavailable` ("verificação em andamento") e o trabalho termina em segundo plano (teto de 25 s); o
   ciclo seguinte lê o resultado do cache. Processos `openssl` são sempre encerrados, inclusive em cancelamento.
+
+## 🧩 Asserções de conteúdo (regex) e execução sem instalar o pacote
+
+O avaliador de regex (anti-ReDoS, subprocesso com timeout de 2 s) roda por **caminho de arquivo** e só usa a
+biblioteca padrão, então funciona também com `PYTHONPATH=src` (sem `pip install`). Se o próprio avaliador falhar,
+a asserção reporta "Avaliador de regex indisponível" (falha do Anhangá), nunca "Regexp inválida" (reservado a
+padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `timeout` pedido (no máximo 2× e 10 s).

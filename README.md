@@ -166,3 +166,28 @@ scrape_configs:
       - target_label: __address__
         replacement: 127.0.0.1:7890
 ```
+
+---
+
+## 🔐 Segurança da API (hardening)
+
+- **Autenticação:** defina `ANHANGA_API_KEY`; as rotas `/api/*`, `/probe` e `/metrics` exigem `Authorization: Bearer <chave>` (ou `X-API-Key`). **Sem a chave, apenas acesso loopback direto é aceito** (requisições com `X-Forwarded-For`/`Forwarded`/`X-Real-IP` são recusadas). Atrás de proxy reverso, a chave é obrigatória.
+- **SSRF:** a política de IPs privados é do operador: `ANHANGA_ALLOW_PRIVATE=1` (rotas HTTP) ou `allow_private` no `targets.yaml`. Não existe mais parâmetro de query para isso.
+- **Webhooks:** `POST /api/v1/webhooks/notify` só envia para URLs declaradas em `webhooks:` do `targets.yaml`; o corpo do alerta é sempre gerado pelo servidor.
+- **Regex de asserção:** executada em subprocesso com timeout de 2 s e padrão limitado a 512 caracteres.
+- **Estado e métricas:** apenas alvos do `targets.yaml` entram no dashboard e no `/metrics`. Scans avulsos e `/probe` não criam séries.
+- **Rate limit:** `samples=N` consome N requisições. `ANHANGA_TRUSTED_PROXIES` vem vazio por padrão (XFF ignorado); liste os IPs dos seus proxies para honrá-lo.
+
+
+---
+
+## ✅ Semântica de saúde e diagnóstico (v0.2.x)
+
+- **`health`** em todo resultado: `up` (HTTP ok e TLS válido), `degraded` (HTTP ok, **TLS inválido**: expirado, hostname divergente, raiz não confiável…) ou `down`. O motivo exato vem em `tls.validation_error`. `probe_success` (Prometheus) só vale 1 para `up`.
+- **CLI:** `anhanga check` reprova (exit 1) certificado inválido; use `--allow-invalid-cert` para tolerar. Erros de argumento/configuração saem com **exit 3** (nota abaixo do mínimo = 2).
+- **API:** falhas sem resposta do alvo retornam `400` (URL inválida), `403` (Anti-SSRF), `502` (DNS/conexão/TLS) ou `504` (timeout), com `{"detail": {"error_code", "message", "target_url"}}`. Achados da sondagem (5xx do alvo, asserção, TLS inválido) continuam `200`.
+- **OCSP e cadeia X.509:** obtidos via `openssl s_client` (o módulo `ssl` do Python não os expõe). Sem o binário `openssl`, o campo vira "Não verificado" (`ocsp_stapling: null`), nunca "ausente".
+- **Dias de validade** podem ser negativos (expirado há N dias).
+- **Latência:** `server_processing_ms` só é calculado a partir de TTFB confiável (amostras quentes). TTFB frio em HTTP/2 pode incluir ~1 RTT extra; com `samples=1` o campo é `null`. `end_to_end_ms` inclui todos os redirects. Percentis de DNS/TCP/TLS usam só amostras com conexão nova.
+- **Alvos sem resposta** não geram séries de latência/nota/TLS em `/metrics` (nada de zeros falsos); o dashboard mostra "—".
+- **Heurísticas:** `Server:` só é vazamento se expõe versão; `HttpOnly` só é exigido de cookies de sessão/autenticação (`ANHANGA_SENSITIVE_COOKIE_REGEX` ajusta).

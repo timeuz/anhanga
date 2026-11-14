@@ -604,6 +604,8 @@
                                             </div>
                                             <div class="text-[11px] text-zinc-400" x-show="weakCipherCount(result.tls) > 0"
                                                  x-text="t('tlsWeakCiphers') + ' ' + weakCipherCount(result.tls)"></div>
+                                            <div class="text-[11px] text-zinc-500" x-show="result.tls.enumeration.legacy_ciphers_untested"
+                                                 x-text="t('tlsLegacyUntested')"></div>
                                         </div>
                                     </template>
                                 </div>
@@ -1112,6 +1114,7 @@
                 tlsProtocols: 'Protocolos aceitos:',
                 assertionNotEvaluated: 'Não avaliado:',
                 tlsWeakCiphers: 'Cifras fracas aceitas:',
+                tlsLegacyUntested: 'RC4/3DES não são testáveis neste OpenSSL: a ausência deles aqui não prova que o alvo não os aceite.',
                 reportOnlyBadge: 'Só reporta',
                 revGood: 'Não revogado',
                 revRevoked: 'REVOGADO',
@@ -1257,6 +1260,7 @@
                 tlsProtocols: 'Accepted protocols:',
                 assertionNotEvaluated: 'Not evaluated:',
                 tlsWeakCiphers: 'Weak ciphers accepted:',
+                tlsLegacyUntested: 'RC4/3DES cannot be tested with this OpenSSL: their absence here does not prove the target rejects them.',
                 reportOnlyBadge: 'Report-only',
                 revGood: 'Not revoked',
                 revRevoked: 'REVOKED',

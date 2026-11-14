@@ -213,6 +213,9 @@ class TLSProtocolResult(BaseModel):
 class TLSEnumeration(BaseModel):
     protocols: list[TLSProtocolResult] = Field(default_factory=list)
     tested_at: float | None = None
+    # True: o OpenSSL local não oferece RC4/3DES (e afins). Um servidor que os aceite NÃO aparece na lista:
+    # a ausência de cifras fracas, aqui, não prova que o alvo não as aceite.
+    legacy_ciphers_untested: bool = False
 
     def get(self, name: str) -> TLSProtocolResult | None:
         return next((p for p in self.protocols if p.protocol == name), None)

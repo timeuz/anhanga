@@ -48,3 +48,8 @@ def test_filter_chips_have_room_for_their_focus_ring_inside_the_paint_contained_
     assert 'class="filter-row ' in HTML
     m = re.search(r"\.filter-row\s*\{\s*padding:\s*(\d+)px", HTML)
     assert m and int(m.group(1)) >= 2, "sem folga >= 2px para o ring-2 dos filtros"
+
+
+def test_ui_shows_the_untested_legacy_ciphers_note_in_both_languages():
+    assert "result.tls.enumeration.legacy_ciphers_untested" in HTML
+    assert HTML.count("tlsLegacyUntested:") == 2

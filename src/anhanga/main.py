@@ -464,11 +464,15 @@ async def background_guardian_loop():
                     if not isinstance(res, ProbeResult):
                         logger.error(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}")
                         continue
-                    _update_state_and_history(res, is_continuous=True)
-                    record_probe_metrics(res)
-                    ev = manager.evaluate_full(res, spec.rules)
-                    _dispatch_events(ev.events, res, cfg.webhooks)
-                    batch.append((res, ev, manager.snapshot(res.target_url)))
+                    try:
+                        _update_state_and_history(res, is_continuous=True)
+                        record_probe_metrics(res)
+                        ev = manager.evaluate_full(res, spec.rules)
+                        _dispatch_events(ev.events, res, cfg.webhooks)
+                        batch.append((res, ev, manager.snapshot(res.target_url)))
+                    except Exception:  # noqa: BLE001
+                        # Um alvo com resultado inesperado não pode cegar os demais nem pular a persistência do lote.
+                        logger.exception(f"Falha ao processar o resultado de {spec.url}; alvo ignorado neste ciclo.")
                 if batch and _STORE is not None:
                     await _store_call(_persist_batch, _STORE, batch, time.time())
 
@@ -614,6 +618,14 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
             status_code=403,
             detail="webhook_url não consta na allowlist ('webhooks' do targets.yaml).",
         )
+    spec = entries[body.webhook_url]
+    # Destino, provedor e chat_id são do OPERADOR (targets.yaml): a requisição não os escolhe. Quem tem a chave da
+    # API não pode redirecionar o bot do Telegram para outro chat, e um webhook `provider: teams` não cai em Slack.
+    if body.chat_id not in (None, "") and body.chat_id != spec.chat_id:
+        raise HTTPException(status_code=400, detail="chat_id é definido no targets.yaml e não pode ser alterado pela requisição.")
+    if spec.provider != "auto" and body.provider not in ("auto", spec.provider):
+        raise HTTPException(status_code=400, detail=f"provider deste webhook é '{spec.provider}' (targets.yaml).")
+    provider = spec.provider if spec.provider != "auto" else body.provider
     probe_res = STATE_CACHE.get(body.url) or await execute_probe(
         body.url, timeout=body.timeout, allow_private=_allow_private_api()
     )
@@ -622,9 +634,9 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
         delivery = await send_webhook_alert(
             webhook_url=body.webhook_url,
             result=probe_res,
-            provider=body.provider,
+            provider=provider,
             violations=body.violations,
-            chat_id=body.chat_id,
+            chat_id=spec.chat_id,
             allow_private=entries[body.webhook_url].allow_private,
             timeout=body.timeout,
         )

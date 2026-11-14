@@ -451,3 +451,15 @@ use o `testssl.sh` ao lado.
   tratados como Slack-compatíveis; o `telegram_chat_id` só é exigido para o Telegram de verdade.
 - **Métrica `probe_ssl_earliest_cert_expiry`:** é removida quando o ciclo não observa certificado (último salto http,
   TLS não inspecionado), em vez de exportar o valor do ciclo anterior.
+
+## 🔁 Correções da 2ª revisão da `main` (lote C)
+
+- **URL malformada** (`https://[bad`, colchete IPv6 sem fechar): vira erro de configuração/resultado `invalid_url` (HTTP 400 na API),
+  nunca exceção. Antes, um typo no `targets.yaml` matava o laço de monitoramento no startup e o app seguia no ar sem monitorar
+  nada. `load_config` também passou a converter qualquer exceção inesperada do validador em `load_failed`.
+- **Ciclo de monitoramento:** o pós-processamento de cada alvo (estado, métricas, alertas) é isolado. Uma exceção num alvo
+  é logada e só ele é ignorado naquele ciclo; os demais e a persistência do lote seguem.
+- **Alerta de expiração do certificado:** limiar = o menor entre **15 dias** e **20% da vida do certificado**. Certificados de
+  6 ou 47 dias não ficam mais "expirando" o tempo todo; de 90 dias ou mais, o limiar continua 15 dias.
+- **`POST /api/v1/webhooks/notify`:** `provider` e `chat_id` vêm do `targets.yaml`. Um `chat_id` ou `provider` diferente
+  no corpo é recusado (400): quem tem a chave da API não escolhe o chat de destino do bot.

@@ -214,3 +214,43 @@ def test_forget_target_removes_every_series_including_counters_and_histograms(mk
     E.forget_target(t)
     assert _series(t) == []
     assert _series(other)  # não afeta os demais
+
+
+def test_isolation_headers_are_informational_and_do_not_change_score():
+    import httpx
+    from anhanga.engine.security import audit_http_security
+
+    bare = audit_http_security(httpx.Headers({}), True, None)
+    iso = {"Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp",
+           "Cross-Origin-Resource-Policy": "same-site"}
+    good = audit_http_security(httpx.Headers(iso), True, None)
+    ids = lambda a: {f.id for f in a.missing_findings}  # noqa: E731
+    assert {"SEC-COOP", "SEC-COEP"} <= ids(bare)
+    assert not ids(good) & {"SEC-COOP", "SEC-COEP", "SEC-CORP"}
+    assert bare.score == good.score
+    assert all(f.weight == 0 and f.severity == "info" for f in bare.missing_findings if f.id in ("SEC-COOP", "SEC-COEP"))
+    assert good.present_headers["Cross-Origin-Opener-Policy"] == "same-origin"
+
+
+def test_isolation_headers_invalid_and_unsafe_none():
+    import httpx
+    from anhanga.engine.security import audit_http_security
+
+    a = audit_http_security(httpx.Headers({"Cross-Origin-Opener-Policy": "banana",
+                                           "Cross-Origin-Embedder-Policy": "unsafe-none",
+                                           "Cross-Origin-Resource-Policy": "nope"}), True, None)
+    by = {f.id: f for f in a.missing_findings}
+    assert by["SEC-COOP"].severity == "low" and "inválido" in by["SEC-COOP"].description
+    assert by["SEC-COEP"].severity == "info"  # unsafe-none == ausente
+    assert by["SEC-CORP"].severity == "low"
+    ok = audit_http_security(httpx.Headers({"Cross-Origin-Opener-Policy": "same-origin-allow-popups; report-to=x",
+                                            "Cross-Origin-Embedder-Policy": "credentialless"}), True, None)
+    assert not {f.id for f in ok.missing_findings} & {"SEC-COOP", "SEC-COEP"}
+
+
+def test_isolation_not_reported_over_plain_http():
+    import httpx
+    from anhanga.engine.security import audit_http_security
+
+    a = audit_http_security(httpx.Headers({}), False, None)
+    assert not {f.id for f in a.missing_findings} & {"SEC-COOP", "SEC-COEP"}

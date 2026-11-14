@@ -320,6 +320,9 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     is_ssl = 1 if (result.tls is not None and result.tls.valid) else 0
     BLACKBOX_PROBE_HTTP_SSL.labels(target=target, instance=inst).set(is_ssl)
 
+    # Sem certificado observado neste ciclo (último salto http, TLS não inspecionado), a série antiga não pode ficar:
+    # alertas sobre `probe_ssl_earliest_cert_expiry - time()` usariam um certificado que não é mais visto.
+    _remove_series(BLACKBOX_PROBE_SSL_EARLIEST_CERT_EXPIRY, target)
     if result.tls and result.tls.expires_at is not None:
         expiry_ts = result.tls.expires_at.timestamp()
         BLACKBOX_PROBE_SSL_EARLIEST_CERT_EXPIRY.labels(

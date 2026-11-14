@@ -164,7 +164,7 @@ def test_keygen_cli_writes_file_and_second_run_fails(tmp_path, capsys):
 
 # ---- serve fora do loopback exige chave -----------------------------------------------------------------------------------------------
 def _serve_args(host):
-    return argparse.Namespace(host=host, port=7890, reload=False, workers=1)
+    return argparse.Namespace(host=host, port=7890, reload=False)
 
 
 def _fake_uvicorn(monkeypatch):

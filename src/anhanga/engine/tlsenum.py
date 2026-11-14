@@ -33,19 +33,15 @@ _cache: dict[tuple[str, int], tuple[float, TLSEnumeration]] = {}
 _inflight: dict[tuple[str, int], "asyncio.Future[TLSEnumeration | None]"] = {}
 _last_scan: dict[tuple[str, int], float] = {}
 
-# Razões do OpenSSL que indicam que *o servidor* respondeu recusando (e não falha do cliente).
-_SERVER_REJECT_MARKERS = (
-    "ALERT_PROTOCOL_VERSION", "ALERT_HANDSHAKE_FAILURE", "ALERT_INTERNAL_ERROR",
-    "WRONG_VERSION_NUMBER", "UNSUPPORTED_PROTOCOL", "NO_PROTOCOLS_AVAILABLE_SERVER",
-    "ALERT_INSUFFICIENT_SECURITY", "ALERT_ILLEGAL_PARAMETER", "NO_SHARED_CIPHER",
-    "UNKNOWN_PROTOCOL", "ALERT_UNEXPECTED_MESSAGE", "ALERT_DECODE_ERROR",
-)
 # Alertas que dizem "não falo esta VERSÃO". Os demais (handshake_failure, sem cifra em comum...) são ambíguos:
 # o servidor pode falar a versão e só não ter cifra em comum com o que ESTE OpenSSL oferece (ex.: servidor só-RC4).
 _VERSION_REJECT_MARKERS = (
     "ALERT_PROTOCOL_VERSION", "WRONG_VERSION_NUMBER", "UNSUPPORTED_PROTOCOL", "NO_PROTOCOLS_AVAILABLE_SERVER",
     "UNKNOWN_PROTOCOL",
 )
+# Só estes alertas significam "sem cifra em comum" (a versão pode estar ativa). Qualquer outro alerta
+# (certificado de cliente exigido, SNI não reconhecido, erro interno, acesso negado...) NÃO prova recusa da versão.
+_CIPHER_ALERT_MARKERS = ("ALERT_HANDSHAKE_FAILURE", "NO_SHARED_CIPHER", "ALERT_INSUFFICIENT_SECURITY")
 _CLIENT_SIDE_MARKERS = ("NO_PROTOCOLS_AVAILABLE", "NO_CIPHERS_AVAILABLE", "INVALID_SESSION_ID")
 
 _WEAK_TOKENS = ("RC4", "NULL", "EXPORT", "EXP-", "MD5", "anon", "ADH", "AECDH", "DES-CBC", "DES-CBC3", "3DES", "SEED", "IDEA", "RC2")
@@ -115,11 +111,11 @@ async def _handshake(
             return "unknown", None, None
         if any(m in text for m in _VERSION_REJECT_MARKERS):
             return "rejected", None, None
-        if any(m in text for m in _SERVER_REJECT_MARKERS) or "ALERT" in text:
-            # Alerta ambíguo (sem cifra em comum etc.): só é "recusa" se não houver cifra que este cliente não ofereça.
+        if any(m in text for m in _CIPHER_ALERT_MARKERS):
+            # "Sem cifra em comum": só é recusa se não houver cifra que este cliente deixe de oferecer.
             if version == ssl.TLSVersion.TLSv1_3 or exclude or local_ciphers_complete():
                 return "rejected", None, None
-        return "unknown", None, None
+        return "unknown", None, None  # outros alertas (SNI, mTLS, erro interno...): a versão pode estar ativa
     except (ConnectionResetError, EOFError, BrokenPipeError):
         return "rejected", None, None  # RST/EOF no ClientHello: comportamento comum de recusa
     except (asyncio.TimeoutError, OSError):

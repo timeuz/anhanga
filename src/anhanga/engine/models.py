@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 PHASE_SLO_THRESHOLDS: dict[str, tuple[float, float]] = {
@@ -41,8 +41,10 @@ class TimingBreakdown(BaseModel):
     phases: list[PhaseOffset] = Field(default_factory=list)
     # Bônus físico da rede (Seção 1.2 do MELHORIAS.txt)
     estimated_rtt_ms: float = 0.0
-    server_processing_ms: float = 0.0
+    # None = indisponível (ex.: TTFB frio em HTTP/2, que embute ~1 RTT de handshake e não mede o servidor)
+    server_processing_ms: float | None = 0.0
     reference_sample: str = "Amostra 1 (Conexão Fria)"
+    timing_notes: list[str] = Field(default_factory=list)
 
 
 def _classify_phase_slo(phase: str, duration_ms: float) -> Literal["ok", "warning", "critical"]:
@@ -157,6 +159,7 @@ class SamplingStats(BaseModel):
     p99_valid: bool = False
     sample_size_notice: str | None = None
     phase_stats: dict[str, PhasePercentiles] = Field(default_factory=dict)
+    phase_stats_note: str | None = None
     raw_samples: list[SampleMeasurement] = Field(default_factory=list)
 
 
@@ -168,6 +171,7 @@ class RedirectHop(BaseModel):
     status_code: int
     location: str | None = None
     protocol: str | None = None
+    insecure: bool = False  # hop servido em texto claro (http://)
     timings: TimingBreakdown = Field(default_factory=TimingBreakdown)
 
 
@@ -185,6 +189,7 @@ class X509ChainLink(BaseModel):
 
 class TLSInspection(BaseModel):
     valid: bool = False
+    validation_error: str | None = None  # motivo da falha de validação (expirado, hostname, raiz não confiável…)
     protocol: str | None = None
     deprecated_protocol: bool = False
     tls10_11_accepted: bool = False
@@ -204,12 +209,14 @@ class TLSInspection(BaseModel):
     sans: list[str] = Field(default_factory=list)
     cert_chain: list[str] = Field(default_factory=list)
     cert_chain_details: list[X509ChainLink] = Field(default_factory=list)
-    ocsp_stapling: bool = False
-    ocsp_status: str = "Não detectado"
+    chain_source: str | None = None  # "verificada" | "enviada pelo servidor" | None (indisponível)
+    ocsp_stapling: bool | None = None  # None = não verificado
+    ocsp_status: str = "Não verificado"
 
 
 class CookieAuditItem(BaseModel):
     name: str
+    sensitive: bool = False  # cookie de sessão/autenticação (HttpOnly passa a ser exigido)
     secure: bool = False
     httponly: bool = False
     samesite: str | None = None
@@ -259,6 +266,7 @@ class SecurityAudit(BaseModel):
     hsts_affected_sans: list[str] = Field(default_factory=list)
     csp_frame_ancestors: bool = False
     permissions_camera_restricted: bool = False
+    evaluated_url: str | None = None  # resposta sobre a qual os cabeçalhos foram avaliados
 
 
 class ContentAssertionsResult(BaseModel):
@@ -293,3 +301,48 @@ class ProbeResult(BaseModel):
     compression: str | None = None
     history_ms: list[float] = Field(default_factory=list)
     error: str | None = None
+    error_code: str | None = None
+    # up = HTTP ok e TLS válido; degraded = HTTP ok mas TLS inválido; down = falha
+    health: Literal["up", "degraded", "down"] = "down"
+    # Tempo total decorrido incluindo todos os hops de redirect (o waterfall mostra só a resposta final)
+    end_to_end_ms: float | None = None
+
+    @model_validator(mode="after")
+    def _derive_health_and_error_code(self) -> "ProbeResult":
+        https_final = bool(self.final_url and self.final_url.lower().startswith("https://")) or (
+            self.final_url is None and self.target_url.lower().startswith("https://")
+        )
+        if not self.is_up:
+            self.health = "down"
+        elif https_final and self.tls is not None and not self.tls.valid:
+            self.health = "degraded"
+        else:
+            self.health = "up"
+        if self.error_code is None:
+            if self.error:
+                self.error_code = classify_error_message(self.error)
+            elif not self.is_up and self.status_code is not None:
+                self.error_code = "http_status"
+        return self
+
+
+def classify_error_message(message: str) -> str:
+    """Código estável e legível por máquina para a mensagem de erro de uma sondagem."""
+    m = message.lower()
+    if m.startswith("bloqueado pelo guardião"):
+        return "ssrf_blocked"
+    if m.startswith("url inválida"):
+        return "invalid_url"
+    if m.startswith("erro de dns"):
+        return "dns_error"
+    if m.startswith("timeout"):
+        return "timeout"
+    if m.startswith("falha em content assertion"):
+        return "assertion_failed"
+    if m.startswith("limite máximo de redirecionamentos"):
+        return "redirect_loop"
+    if any(k in m for k in ("ssl", "certificate", "tls", "handshake")):
+        return "tls_error"
+    if m.startswith("erro http/conexão"):
+        return "connect_error"
+    return "unknown_error"

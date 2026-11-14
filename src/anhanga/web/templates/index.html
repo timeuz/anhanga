@@ -8,35 +8,26 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- TailwindCSS v3 CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TailwindCSS v3 compilado localmente (web/static/tailwind.css) -->
+    <link rel="stylesheet" href="/static/tailwind.css">
+    <!-- Alpine.js -->
+    <script defer src="/static/alpine.min.js"></script>
     <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
-                        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
-                    },
-                    colors: {
-                        obsidian: '#09090b',
-                        surface: '#121216',
-                        elevated: '#18181f',
-                        bordercolor: '#2e2e38',
-                        fire: {
-                            400: '#fb923c',
-                            500: '#ef4444',
-                            600: '#dc2626',
-                            glow: '#f97316'
-                        }
-                    }
+        // Chave da API (ANHANGA_API_KEY): guardada apenas na sessão da aba; pedida ao receber 401.
+        async function apiFetch(url, retried = false) {
+            let key = '';
+            try { key = sessionStorage.getItem('anhanga_key') || ''; } catch (_) {}
+            const resp = await fetch(url, key ? { headers: { Authorization: 'Bearer ' + key } } : {});
+            if (resp.status === 401 && !retried) {
+                const entered = window.prompt('API key do Anhangá (ANHANGA_API_KEY):');
+                if (entered) {
+                    try { sessionStorage.setItem('anhanga_key', entered.trim()); } catch (_) {}
+                    return apiFetch(url, true);
                 }
             }
+            return resp;
         }
     </script>
-    <!-- Alpine.js -->
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
         :root {
             color-scheme: dark;
@@ -70,7 +61,7 @@
                 <div>
                     <h1 class="font-bold text-lg tracking-wide text-white flex items-center gap-2">
                         <span>ANHANGÁ</span>
-                        <span class="font-mono text-xs px-2 py-0.5 rounded-md bg-fire-500/20 text-amber-200 border border-fire-400/50">v0.3</span>
+                        <span class="font-mono text-xs px-2 py-0.5 rounded-md bg-fire-500/20 text-amber-200 border border-fire-400/50">v{{ app_version }}</span>
                     </h1>
                     <p class="text-xs text-zinc-300" x-text="t('subtitle')">Auditor Tático de Borda, TLS, Latência e DevSecOps</p>
                 </div>
@@ -182,9 +173,9 @@
                     <div class="flex flex-wrap items-center gap-2.5">
                         <!-- Badge ONLINE / OFFLINE com alto contraste WCAG AA -->
                         <span class="px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider inline-flex items-center gap-1.5"
-                              :class="result?.is_up ? 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' : 'bg-red-950/90 text-red-200 border border-red-500/60'">
-                            <span class="w-2 h-2 rounded-full" :class="result?.is_up ? 'bg-emerald-400' : 'bg-red-400'"></span>
-                            <span x-text="result?.is_up ? t('statusOnline') + ' (' + (result?.status_code || 200) + ')' : t('statusOffline')">ONLINE</span>
+                              :class="healthBadgeClass(result)">
+                            <span class="w-2 h-2 rounded-full" :class="healthDotClass(result)"></span>
+                            <span x-text="healthLabel(result)">ONLINE</span>
                         </span>
 
                         <h3 class="text-lg sm:text-xl font-bold font-mono text-white break-all" x-text="result?.final_url || result?.target_url"></h3>
@@ -198,6 +189,8 @@
                         <span>•</span>
                         <span><span x-text="t('payloadRead')">Payload Lido</span>: <strong class="font-mono text-zinc-100" x-text="(result?.payload_bytes || 0) + ' B'"></strong></span>
                         <span x-show="result?.redirect_hops > 0">• <span x-text="t('redirectsCount')">Redirecionamentos</span>: <strong class="font-mono text-amber-200" x-text="result?.redirect_hops"></strong></span>
+                        <span x-show="result?.redirect_hops > 0 && result?.end_to_end_ms">• <span x-text="t('endToEnd')">Tempo total com redirects</span>: <strong class="font-mono text-amber-200" x-text="result?.end_to_end_ms + ' ms'"></strong></span>
+                        <span x-show="healthOf(result) === 'degraded' && result?.tls?.validation_error" class="basis-full text-amber-200">⚠ <span x-text="t('tlsInvalidReason')">Motivo da invalidez</span>: <strong class="font-mono" x-text="result?.tls?.validation_error"></strong></span>
                     </div>
                 </div>
 
@@ -385,7 +378,10 @@
                     <!-- Decomposição Física: RTT de Rede vs Processamento Servidor -->
                     <div class="p-2.5 rounded-xl bg-obsidian border border-bordercolor flex flex-wrap items-center justify-between text-xs gap-2">
                         <span class="text-zinc-300">🌐 RTT Rede: <strong class="font-mono text-cyan-300 whitespace-nowrap" x-text="(result?.timings?.estimated_rtt_ms ?? 0) + ' ms'"></strong></span>
-                        <span class="text-zinc-300">⚙️ Processamento Servidor (TTFB − RTT): <strong class="font-mono text-amber-300 whitespace-nowrap" x-text="(result?.timings?.server_processing_ms ?? 0) + ' ms'"></strong></span>
+                        <span class="text-zinc-300">⚙️ Processamento Servidor (TTFB − RTT): <strong class="font-mono text-amber-300 whitespace-nowrap" x-text="result?.timings?.server_processing_ms == null ? t('notAvailableShort') : result.timings.server_processing_ms + ' ms'"></strong></span>
+                        <template x-for="note in (result?.timings?.timing_notes || [])" :key="note">
+                            <span class="basis-full text-[11px] text-zinc-400" x-text="'ℹ ' + note"></span>
+                        </template>
                     </div>
 
                     <!-- Mini-cards de Percentis P50 / P95 / P99 / Jitter -->
@@ -535,10 +531,13 @@
                                     <div class="flex items-center gap-2 mt-1">
                                         <strong class="font-mono text-base"
                                                 :class="result.tls.alert_expiring ? 'text-red-300' : 'text-emerald-300'"
-                                                x-text="result.tls.days_remaining !== null && result.tls.days_remaining !== undefined ? result.tls.days_remaining + ' ' + t('daysWord') : 'N/D'"></strong>
+                                                x-text="daysLabel(result.tls)"></strong>
                                         <span x-show="result.tls.alert_expiring"
                                               class="px-2 py-0.5 rounded bg-red-950 text-red-200 border border-red-500/60 text-[10px] font-bold uppercase"
-                                              x-text="t('expiringAlert')">Expiração Próxima (&lt;15d)</span>
+                                              x-text="(result.tls.days_remaining ?? 0) < 0 ? t('statusDegraded') : t('expiringAlert')">Expiração Próxima (&lt;15d)</span>
+                                        <span x-show="!result.tls.valid && result.tls.validation_error"
+                                              class="px-2 py-0.5 rounded bg-amber-950 text-amber-200 border border-amber-500/60 text-[10px] font-mono"
+                                              x-text="result.tls.validation_error"></span>
                                     </div>
                                 </div>
 
@@ -558,8 +557,8 @@
                                     <div class="flex items-center justify-between">
                                         <span class="text-zinc-300">OCSP Stapling:</span>
                                         <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
-                                                :class="result.tls.ocsp_stapling ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-zinc-800 text-zinc-200 border-zinc-600'"
-                                                x-text="result.tls.ocsp_status || 'Não detectado'"></strong>
+                                                :class="result.tls.ocsp_stapling === true ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-zinc-800 text-zinc-200 border-zinc-600'"
+                                                x-text="result.tls.ocsp_status || t('notAvailableShort')"></strong>
                                     </div>
                                     <div class="flex items-center justify-between">
                                         <span class="text-zinc-300" x-text="t('tlsLegacyCheck')">TLS 1.0 / 1.1 Legado:</span>
@@ -582,6 +581,7 @@
                                     </template>
                                     <span x-show="!(result.tls.cert_chain || []).length" class="text-zinc-300" x-text="t('notAvailable')">Não disponível</span>
                                 </div>
+                                <span x-show="result.tls.chain_source" class="text-[11px] text-zinc-400" x-text="'(' + result.tls.chain_source + ')'"></span>
                             </div>
 
                             <!-- Lista de SANs (Subject Alternative Names) & Fingerprint SHA-256 -->
@@ -878,10 +878,11 @@
                         <div class="space-y-3">
                             <div class="flex justify-between items-center gap-2">
                                 <span class="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase border"
-                                      :class="item.is_up ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60'"
-                                      x-text="item.is_up ? t('statusOnline') + ' (' + (item.status_code || 200) + ')' : t('statusOffline')">
+                                      :class="healthBadgeClass(item)"
+                                      x-text="healthLabel(item)">
                                 </span>
                                 <span class="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md border"
+                                      x-show="hasMeasurements(item)"
                                       :class="['A+', 'A'].includes(item.security?.grade) ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60' : (['B', 'C'].includes(item.security?.grade) ? 'bg-amber-950/90 text-amber-200 border-amber-500/60' : 'bg-red-950/90 text-red-200 border-red-500/60')"
                                       x-text="t('gradeWord') + ' ' + (item.security?.grade || 'F')">
                                 </span>
@@ -890,13 +891,14 @@
                             <div>
                                 <h4 class="font-mono font-bold text-sm text-white truncate" :title="item.target_url" x-text="item.target_url"></h4>
                                 <p class="text-xs text-zinc-300 mt-1">
-                                    <span x-text="t('latencyWord')">Latência</span>: <strong class="font-mono text-white" x-text="(item.timings?.total_ms || 0) + ' ms'"></strong>
+                                    <span x-text="t('latencyWord')">Latência</span>: <strong class="font-mono text-white" x-text="hasMeasurements(item) ? item.timings.total_ms + ' ms' : '—'"></strong>
                                     | IP: <span class="font-mono text-zinc-200" x-text="item.resolved_ip || 'N/D'"></span>
                                 </p>
                             </div>
 
                             <!-- Gráfico Sparkline SVG de Tendência de Latência -->
-                            <div class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-1.5">
+                            <p x-show="!hasMeasurements(item)" class="text-xs text-red-200 break-words" x-text="item.error || t('noData')"></p>
+                            <div x-show="hasMeasurements(item)" class="bg-obsidian border border-bordercolor rounded-xl p-3 space-y-1.5">
                                 <div class="flex items-center justify-between text-[11px] text-zinc-300">
                                     <span x-text="t('sparklineTrendLabel')">Tendência de Latência</span>
                                     <span class="font-mono text-zinc-200" x-text="getSparklineRangeLabel(item.history_ms, item.timings?.total_ms)"></span>
@@ -927,8 +929,8 @@
                     {% for item in cached_results %}
                     <div class="bg-surface border border-bordercolor rounded-2xl p-5 space-y-3 hover:border-fire-400/70 transition">
                         <div class="flex justify-between items-center">
-                            <span class="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase {{ 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' if item.is_up else 'bg-red-950/90 text-red-200 border border-red-500/60' }}">
-                                {{ 'ONLINE (' ~ item.status_code ~ ')' if item.is_up else 'OFFLINE' }}
+                            <span class="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase {{ 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60' if item.health == 'up' else ('bg-amber-950/90 text-amber-200 border border-amber-500/60' if item.health == 'degraded' else 'bg-red-950/90 text-red-200 border border-red-500/60') }}">
+                                {{ 'ONLINE (' ~ item.status_code ~ ')' if item.health == 'up' else ('DEGRADADO (TLS inválido)' if item.health == 'degraded' else 'OFFLINE') }}
                             </span>
                             <span class="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md bg-obsidian border border-bordercolor {{ 'text-emerald-200' if item.security.grade in ['A+', 'A'] else 'text-amber-200' }}">
                                 Nota {{ item.security.grade }}
@@ -936,7 +938,7 @@
                         </div>
                         <div>
                             <h4 class="font-mono font-bold text-sm text-white truncate" title="{{ item.target_url }}">{{ item.target_url }}</h4>
-                            <p class="text-xs text-zinc-300 mt-1">Latência: <strong class="font-mono text-white">{{ item.timings.total_ms }} ms</strong> | IP: <span class="font-mono">{{ item.resolved_ip }}</span></p>
+                            <p class="text-xs text-zinc-300 mt-1">Latência: <strong class="font-mono text-white">{{ (item.timings.total_ms ~ ' ms') if item.status_code is not none else '—' }}</strong> | IP: <span class="font-mono">{{ item.resolved_ip }}</span></p>
                         </div>
                         <div class="bg-obsidian border border-bordercolor rounded-xl p-2.5" data-history="{{ item.history_ms | join(',') }}">
                             <span class="text-[11px] text-zinc-300 block mb-1">Tendência de Latência (Sparkline)</span>
@@ -978,6 +980,12 @@
                 errorPrefix: 'Falha na sondagem:',
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
+                statusDegraded: 'DEGRADADO (TLS inválido)',
+                noData: 'sem dados',
+                expiredFor: 'expirado há',
+                tlsInvalidReason: 'Motivo da invalidez',
+                endToEnd: 'Tempo total com redirects',
+                notAvailableShort: 'N/D',
                 resolvedIp: 'IP Resolvido',
                 httpProtocol: 'Protocolo HTTP',
                 payloadRead: 'Payload Lido',
@@ -1073,6 +1081,12 @@
                 errorPrefix: 'Probe failed:',
                 statusOnline: 'ONLINE',
                 statusOffline: 'OFFLINE',
+                statusDegraded: 'DEGRADED (invalid TLS)',
+                noData: 'no data',
+                expiredFor: 'expired',
+                tlsInvalidReason: 'Invalid because',
+                endToEnd: 'Total time incl. redirects',
+                notAvailableShort: 'N/A',
                 resolvedIp: 'Resolved IP',
                 httpProtocol: 'HTTP Protocol',
                 payloadRead: 'Payload Read',
@@ -1207,7 +1221,7 @@
 
                 async refreshTargets() {
                     try {
-                        const resp = await fetch('/api/v1/targets');
+                        const resp = await apiFetch('/api/v1/targets');
                         if (resp.ok) {
                             const data = await resp.json();
                             if (Array.isArray(data)) {
@@ -1228,11 +1242,11 @@
 
                     try {
                         const query = `/api/v1/scan?url=${encodeURIComponent(this.targetUrl.trim())}&samples=${encodeURIComponent(this.samples)}`;
-                        const response = await fetch(query);
+                        const response = await apiFetch(query);
                         const data = await response.json();
 
                         if (!response.ok) {
-                            throw new Error(data.detail || 'Falha ao executar o diagnóstico.');
+                            throw new Error((data.detail && data.detail.message) || (typeof data.detail === 'string' ? data.detail : '') || 'Falha ao executar o diagnóstico.');
                         }
 
                         if (prior && prior.target_url === data.target_url) {
@@ -1389,6 +1403,35 @@
                     return 'ok';
                 },
 
+                healthOf(r) {
+                    return r?.health || (r?.is_up ? 'up' : 'down');
+                },
+                healthBadgeClass(r) {
+                    const h = this.healthOf(r);
+                    if (h === 'up') return 'bg-emerald-950/90 text-emerald-200 border border-emerald-500/60';
+                    if (h === 'degraded') return 'bg-amber-950/90 text-amber-200 border border-amber-500/60';
+                    return 'bg-red-950/90 text-red-200 border border-red-500/60';
+                },
+                healthDotClass(r) {
+                    const h = this.healthOf(r);
+                    return h === 'up' ? 'bg-emerald-400' : (h === 'degraded' ? 'bg-amber-400' : 'bg-red-400');
+                },
+                healthLabel(r) {
+                    const h = this.healthOf(r);
+                    const code = r?.status_code || '';
+                    if (h === 'up') return this.t('statusOnline') + ' (' + code + ')';
+                    if (h === 'degraded') return this.t('statusDegraded') + ' (' + code + ')';
+                    return this.t('statusOffline');
+                },
+                hasMeasurements(r) {
+                    return r?.status_code !== null && r?.status_code !== undefined;
+                },
+                daysLabel(tls) {
+                    const d = tls?.days_remaining;
+                    if (d === null || d === undefined) return this.t('notAvailableShort');
+                    if (d < 0) return this.t('expiredFor') + ' ' + Math.abs(d) + ' ' + this.t('daysWord');
+                    return d + ' ' + this.t('daysWord');
+                },
                 getOverallSloBadgeClass() {
                     return this.getPhaseSloBadgeClass(this.getOverallSloStatus());
                 },
@@ -1541,7 +1584,7 @@
                     const lines = [
                         `# Relatório de Diagnóstico Anhangá — ${r.final_url || r.target_url}`,
                         ``,
-                        `- **Status**: ${r.is_up ? 'ONLINE (' + r.status_code + ')' : 'OFFLINE'}`,
+                        `- **Status**: ${r.health === 'degraded' ? 'DEGRADADO (TLS inválido: ' + (r.tls?.validation_error || 'N/D') + ')' : (r.is_up ? 'ONLINE (' + r.status_code + ')' : 'OFFLINE')}`,
                         `- **IP Resolvido**: \`${r.resolved_ip || 'N/D'}\``,
                         `- **Protocolo HTTP**: \`${r.http_version || 'N/D'}\``,
                         `- **Nota de Segurança**: **${r.security?.grade || 'F'}** (\`${r.security?.score || 0}/100\`)`,
@@ -1554,7 +1597,7 @@
                         ``,
                         `## Inspeção TLS`,
                         r.tls
-                            ? `- **Validade**: ${r.tls.days_remaining ?? 'N/D'} dias restantes\n- **Protocolo / Cifra**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **Emissor**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **Cadeia X.509**: ${(r.tls.cert_chain || []).join(' -> ')}`
+                            ? `- **Validade**: ${r.tls.days_remaining === null || r.tls.days_remaining === undefined ? 'N/D' : (r.tls.days_remaining < 0 ? 'expirado há ' + Math.abs(r.tls.days_remaining) + ' dias' : r.tls.days_remaining + ' dias restantes')}\n- **Protocolo / Cifra**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **Emissor**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **Cadeia X.509**: ${(r.tls.cert_chain || []).join(' -> ')}`
                             : `- TLS não aplicável.`,
                         ``,
                         `## Runbook de Remediação (${this.getActiveServerLabel()})`,

@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import shutil
 from collections import deque
 import hashlib
 import ipaddress
@@ -292,6 +294,7 @@ SECURITY_HEADERS_DETAILS: dict[str, dict[str, Any]] = {
 }
 
 LEAK_HEADERS = ["Server", "X-Powered-By", "X-AspNet-Version", "X-Generator"]
+_VERSION_IN_HEADER_RE = re.compile(r"\d+\.\d+|/\s*\d")
 
 
 class SlidingWindowRateLimiter:
@@ -317,8 +320,9 @@ class SlidingWindowRateLimiter:
     def max_requests(self, value: int | None) -> None:
         self._explicit_max = value
 
-    def check(self, client_ip: str) -> tuple[bool, int]:
-        """Retorna (allowed, retry_after_seconds)."""
+    def check(self, client_ip: str, cost: int = 1) -> tuple[bool, int]:
+        """Retorna (allowed, retry_after_seconds). `cost` = nº de requisições equivalentes consumidas."""
+        cost = max(1, int(cost))
         now = time.monotonic()
         cutoff = now - self.window_seconds
         key = (client_ip or "unknown").strip()
@@ -335,14 +339,14 @@ class SlidingWindowRateLimiter:
             self._hits[key] = q
 
         limit = self.max_requests
-        if len(q) >= limit:
+        if len(q) + cost > limit:
             if not q:
                 self._hits.pop(key, None)
                 return False, 1
             retry_after = max(1, int(self.window_seconds - (now - q[0])) + 1)
             return False, retry_after
 
-        q.append(now)
+        q.extend([now] * cost)
         return True, 0
 
     def is_allowed(self, client_ip: str) -> bool:
@@ -350,7 +354,7 @@ class SlidingWindowRateLimiter:
         return allowed
 
     def get_trusted_proxies(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-        raw = os.getenv("ANHANGA_TRUSTED_PROXIES", "127.0.0.1,::1")
+        raw = os.getenv("ANHANGA_TRUSTED_PROXIES", "")
         networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
         for item in raw.split(","):
             cleaned = item.strip()
@@ -570,10 +574,64 @@ async def check_tls10_11_accepted_async(
                 pass
 
 
+_HOSTNAME_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+_PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
+
+
+async def fetch_tls_extras(
+    ip: str, port: int, server_hostname: str, timeout: float = 4.0
+) -> tuple[list[bytes], bool | None]:
+    """Obtém (cadeia DER enviada pelo servidor, OCSP grampeado?) via `openssl s_client`.
+
+    O módulo `ssl` do Python não expõe a resposta OCSP grampeada (nem a cadeia antes do 3.13).
+    Retorna ([], None) se o binário estiver ausente ou a consulta falhar: "não verificado" nunca
+    é reportado como "ausente". `ip` já foi validado pela política Anti-SSRF pelo chamador.
+    """
+    openssl = shutil.which("openssl")
+    if not openssl or not _HOSTNAME_SAFE_RE.match(server_hostname or ""):
+        return [], None
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return [], None
+    connect = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            openssl, "s_client", "-connect", connect, "-servername", server_hostname,
+            "-status", "-showcerts",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(b""), timeout=timeout)
+    except Exception:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        return [], None
+    text = out.decode("utf-8", errors="replace")
+    chain: list[bytes] = []
+    for pem in _PEM_RE.findall(text):
+        with contextlib.suppress(Exception):
+            chain.append(ssl.PEM_cert_to_DER_cert(pem))
+    stapled: bool | None = None
+    if "OCSP Response Status: successful" in text:
+        stapled = True
+    elif "OCSP response: no response sent" in text:
+        stapled = False
+    if not chain and stapled is None:
+        return [], None
+    return chain, stapled
+
+
 def parse_tls_certificate(
     ssl_obj: Any,
     verified: bool = True,
     tls10_11_accepted: bool = False,
+    chain_der: list[bytes] | None = None,
+    ocsp_stapled: bool | None = None,
+    validation_error: str | None = None,
 ) -> TLSInspection:
     if not ssl_obj:
         return TLSInspection(valid=False)
@@ -634,9 +692,8 @@ def parse_tls_certificate(
         delta = expires_at - now
         if delta.total_seconds() < 0:
             is_time_valid = False
-            days_remaining = 0
-        else:
-            days_remaining = max(0, delta.days)
+        # Negativo = expirado há N dias (floor mantém a ordem: -0.5d => -1)
+        days_remaining = delta.days
     if not_before is not None and not_before > datetime.now(timezone.utc):
         is_time_valid = False
 
@@ -644,7 +701,7 @@ def parse_tls_certificate(
         total_validity_days = max(1, (expires_at - not_before).days)
         if days_remaining is not None:
             relative_validity_percent_remaining = round(
-                (days_remaining / total_validity_days) * 100.0, 1
+                max(0.0, (days_remaining / total_validity_days) * 100.0), 1
             )
             # Alerta se restar menos de 15% do ciclo total de vida do certificado
             alert_relative_expiring = bool(relative_validity_percent_remaining < 15.0)
@@ -660,15 +717,24 @@ def parse_tls_certificate(
     cert_chain_details: list[X509ChainLink] = []
     inner_ssl = getattr(ssl_obj, "_sslobj", ssl_obj)
     raw_chain: list[bytes] = []
-    for chain_getter in ("get_verified_chain", "get_unverified_chain"):
+    chain_source: str | None = None
+    for chain_getter, source in (
+        ("get_verified_chain", "verificada"),
+        ("get_unverified_chain", "enviada pelo servidor"),
+    ):
         getter = getattr(inner_ssl, chain_getter, None)
         if callable(getter):
             try:
-                raw_chain = getter() or []
+                raw_chain = [c for c in (getter() or []) if isinstance(c, bytes)]
                 if raw_chain:
+                    chain_source = source
                     break
             except Exception:
                 pass
+    if not raw_chain and chain_der:
+        # Python < 3.13 não expõe a cadeia: usa a obtida via `openssl s_client -showcerts`
+        raw_chain = list(chain_der)
+        chain_source = "enviada pelo servidor"
 
     last_issuer: str | None = None
     for der_item in raw_chain:
@@ -684,7 +750,7 @@ def parse_tls_certificate(
             link_days: int | None = None
             if link_na is not None:
                 d_delta = link_na - datetime.now(timezone.utc)
-                link_days = max(0, d_delta.days) if d_delta.total_seconds() >= 0 else 0
+                link_days = d_delta.days
             link_sn = decoded.get("serialNumber")
             link_fp = hashlib.sha256(der_item).hexdigest().upper()
             cert_chain_details.append(
@@ -708,31 +774,38 @@ def parse_tls_certificate(
     if last_issuer and (not cert_chain or cert_chain[-1] != last_issuer):
         cert_chain.append(last_issuer)
 
-    if not cert_chain:
-        for node in (subject, issuer):
-            if node and (not cert_chain or cert_chain[-1] != node):
-                cert_chain.append(node)
-
-    # Detecção de OCSP Stapling e checagem da extensão AIA no certificado
-    ocsp_resp = getattr(ssl_obj, "ocsp_response", None) or getattr(
-        inner_ssl, "ocsp_response", None
-    )
+    # OCSP: o módulo `ssl` NÃO expõe a resposta grampeada; `ocsp_stapled` vem de `openssl s_client -status`
+    # (None = não verificado). Jamais afirmar "sem stapling" sem ter verificado.
     cert_ocsp = cert.get("OCSP")
-    if ocsp_resp:
-        ocsp_stapling = True
+    if ocsp_stapled is True:
+        ocsp_stapling: bool | None = True
         ocsp_status = "Ativo (Stapled)"
-    elif cert_ocsp:
+    elif ocsp_stapled is False:
         ocsp_stapling = False
-        ocsp_status = "Suportado pelo CA (Sem Stapling)"
+        ocsp_status = (
+            "Suportado pelo CA (Sem Stapling)"
+            if cert_ocsp
+            else "N/A (certificado sem OCSP; CAs modernas migraram para CRL)"
+        )
     else:
-        # Let's Encrypt encerrou OCSP e removeu as URLs OCSP dos certificados em 2025/2026
-        ocsp_stapling = False
-        ocsp_status = "N/A (sem OCSP no certificado)"
+        ocsp_stapling = None
+        ocsp_status = "Não verificado (binário openssl indisponível)"
 
     valid = bool(verified and is_time_valid and (cert or der_cert))
 
+    if not valid and not validation_error:
+        if not is_time_valid:
+            validation_error = (
+                "certificado expirado" if expires_at and expires_at < datetime.now(timezone.utc)
+                else "certificado ainda não válido"
+            )
+        elif not verified:
+            validation_error = "cadeia/hostname não validados"
+
     return TLSInspection(
         valid=valid,
+        validation_error=None if valid else validation_error,
+        chain_source=chain_source,
         protocol=protocol,
         deprecated_protocol=deprecated_protocol,
         tls10_11_accepted=legacy_accepted,
@@ -755,6 +828,15 @@ def parse_tls_certificate(
         ocsp_stapling=ocsp_stapling,
         ocsp_status=ocsp_status,
     )
+
+
+_SENSITIVE_COOKIE_RE = re.compile(
+    os.getenv(
+        "ANHANGA_SENSITIVE_COOKIE_REGEX",
+        r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|csrf|xsrf|identity|account)",
+    ),
+    re.I,
+)
 
 
 def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditItem]:
@@ -781,8 +863,11 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
         issues: list[str] = []
         if is_https and not secure:
             issues.append("Ausência da flag Secure")
-        if not httponly:
-            issues.append("Ausência da flag HttpOnly")
+        # HttpOnly só é exigido de cookies de sessão/autenticação; analytics/preferências
+        # (ex.: _octo, _ga) precisam ser legíveis por JS e não são falha.
+        sensitive = bool(_SENSITIVE_COOKIE_RE.search(cookie_name))
+        if sensitive and not httponly:
+            issues.append("Ausência da flag HttpOnly (cookie de sessão/autenticação)")
         if not samesite:
             issues.append("Ausência de SameSite (Lax/Strict)")
         else:
@@ -795,6 +880,7 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
         cookies_audited.append(
             CookieAuditItem(
                 name=cookie_name,
+                sensitive=sensitive,
                 secure=secure,
                 httponly=httponly,
                 samesite=samesite,
@@ -879,6 +965,7 @@ def audit_http_security(
     is_https: bool,
     tls: TLSInspection | None,
     cors_audit: CORSInspection | None = None,
+    evaluated_url: str | None = None,
 ) -> SecurityAudit:
     present: dict[str, str] = {}
     missing_findings: list[SecurityFinding] = []
@@ -1145,6 +1232,10 @@ def audit_http_security(
     for leak_h in LEAK_HEADERS:
         if leak_h in headers:
             leak_val = headers[leak_h]
+            # `Server: cloudflare` / `Server: github.com` não revelam versão: não é vazamento acionável.
+            # Os demais (X-Powered-By, X-AspNet-Version, X-Generator) existem para divulgar tecnologia.
+            if leak_h == "Server" and not _VERSION_IN_HEADER_RE.search(leak_val):
+                continue
             leaks.append(f"{leak_h}: {leak_val}")
             missing_findings.append(
                 SecurityFinding(
@@ -1163,7 +1254,7 @@ def audit_http_security(
                 )
             )
     if leaks:
-        hygiene_score -= 10
+        hygiene_score -= min(10, 5 * len(leaks))  # coerente com o peso (5) declarado por finding
 
     # 3.2 Cookies (até 5 pontos)
     insecure_cookies = [c for c in cookies_audited if c.issues]
@@ -1251,4 +1342,5 @@ def audit_http_security(
         hsts_affected_sans=hsts_affected_sans,
         csp_frame_ancestors=csp_frame_ancestors,
         permissions_camera_restricted=permissions_camera_restricted,
+        evaluated_url=evaluated_url,
     )

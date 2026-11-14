@@ -46,7 +46,8 @@ def _format_tls_status(result: ProbeResult) -> str:
     if result.tls is None:
         return "N/A (HTTP sem TLS)"
     if not result.tls.valid:
-        return "INVÁLIDO / EXPIRADO"
+        reason = result.tls.validation_error
+        return f"INVÁLIDO ({reason})" if reason else "INVÁLIDO"
     days = (
         f"{result.tls.days_remaining}d restantes"
         if result.tls.days_remaining is not None
@@ -64,8 +65,16 @@ def _collect_violations(
     if not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
-    if result.tls and result.tls.alert_expiring:
-        msg = f"Certificado TLS expirando em {result.tls.days_remaining} dias"
+    if result.health == "degraded":
+        reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
+        items.append(f"Certificado TLS inválido: {reason}")
+    if result.tls and result.tls.alert_expiring and result.tls.days_remaining is not None:
+        days = result.tls.days_remaining
+        msg = (
+            f"Certificado TLS expirado há {-days} dias"
+            if days < 0
+            else f"Certificado TLS expirando em {days} dias"
+        )
         if msg not in items:
             items.append(msg)
     return items

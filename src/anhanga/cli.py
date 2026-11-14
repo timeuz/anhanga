@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from anhanga import __version__
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import execute_probe
 from anhanga.engine.webhooks import send_webhook_alert
@@ -29,7 +30,7 @@ SARIF_SCHEMA_URI = "https://json.schemastore.org/sarif-2.1.0.json"
 
 
 class CLIArgumentError(ValueError):
-    """Exceção interna para argumentos inválidos na CLI (exit code 2)."""
+    """Exceção interna para argumentos inválidos na CLI (exit code 3)."""
 
 
 class _NonExitingArgumentParser(argparse.ArgumentParser):
@@ -73,11 +74,13 @@ def parse_duration_ms(val: str | int | float) -> float:
     raise ValueError(f"Unidade de duração desconhecida: '{unit}'.")
 
 
-def _is_execution_or_ssrf_error(error_msg: str | None) -> bool:
+def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = None) -> bool:
     """Identifica se o erro foi bloqueio Anti-SSRF, falha de DNS ou URL inválida (exit code 2)."""
     if not error_msg:
         return False
     lower = error_msg.lower()
+    if error_code in ("ssrf_blocked", "dns_error", "invalid_url"):
+        return True
     return any(
         token in lower
         for token in (
@@ -95,18 +98,19 @@ def evaluate_probe_gates(
     min_grade: str | None = None,
     max_ttfb_ms: float | None = None,
     max_total_ms: float | None = None,
+    require_valid_cert: bool = True,
 ) -> tuple[bool, int, list[str]]:
     """
     Avalia os Quality Gates de SRE/DevSecOps sobre um ProbeResult.
     Retorna (passed, exit_code, violations):
-    - exit_code 3: Erro de DNS, bloqueio Anti-SSRF, target inválido ou erro de configuração
+    - exit_code 3: Erro de DNS, bloqueio Anti-SSRF, target inválido ou argumento/configuração inválidos
     - exit_code 2: Nota de segurança abaixo do mínimo exigido (--min-grade)
-    - exit_code 1: Alvo offline, falha de SLO (TTFB/Total) ou Content Assertion falhou
+    - exit_code 1: Alvo offline, certificado TLS inválido, falha de SLO (TTFB/Total) ou Content Assertion falhou
     - exit_code 0: Todas as verificações passaram
     """
     violations: list[str] = []
 
-    if _is_execution_or_ssrf_error(result.error):
+    if _is_execution_or_ssrf_error(result.error, result.error_code):
         violations.append(result.error or "Erro de DNS ou bloqueio Anti-SSRF.")
         return False, 3, violations
 
@@ -119,6 +123,11 @@ def evaluate_probe_gates(
             reason = result.error or f"HTTP {result.status_code or 'ERR'}"
             violations.append(f"Alvo OFFLINE: {reason}")
             slo_or_conn_failed = True
+
+    if require_valid_cert and result.health == "degraded":
+        reason = (result.tls.validation_error if result.tls else None) or "validação do certificado falhou"
+        violations.append(f"Certificado TLS inválido: {reason}")
+        slo_or_conn_failed = True
 
     if result.assertions and not result.assertions.passed:
         for fail_msg in result.assertions.failures:
@@ -200,7 +209,11 @@ def build_sarif_report(
     # 1. Violações de Quality Gates (SLO, Grade, Disponibilidade, Anti-SSRF)
     for idx, violation in enumerate(violations, start=1):
         v_lower = violation.lower()
-        if "anti-ssrf" in v_lower or "dns" in v_lower:
+        if "certificado tls inválido" in v_lower:
+            rule_id = "ANHANGA-TLS-INVALID"
+            rule_name = "InvalidTLSCertificate"
+            short_desc = "Certificado TLS inválido (expirado, hostname divergente ou cadeia não confiável)"
+        elif "anti-ssrf" in v_lower or "dns" in v_lower:
             rule_id = "ANHANGA-SSRF-OR-DNS"
             rule_name = "SSRFOrDNSValidationFailure"
             short_desc = "Bloqueio Anti-SSRF ou falha de resolução DNS"
@@ -289,14 +302,16 @@ def build_sarif_report(
                 "tool": {
                     "driver": {
                         "name": "Anhangá",
-                        "version": "0.1.0",
+                        "version": __version__,
                         "informationUri": "https://github.com/timeuz/anhanga",
                         "rules": list(rules_by_id.values()),
                     }
                 },
                 "invocations": [
                     {
-                        "executionSuccessful": exit_code != 2,
+                        # A ferramenta executou com sucesso mesmo quando um gate reprova;
+                        # só o exit 3 (erro de execução/argumento) é falha de execução.
+                        "executionSuccessful": exit_code != 3,
                         "exitCode": exit_code,
                     }
                 ],
@@ -331,11 +346,15 @@ def render_rich_report(
     """Renderiza relatório tático com Rich para exibição no terminal e retorna versão em texto."""
     console = Console(record=True, width=100)
 
-    status_badge = (
-        f"[bold green]ONLINE (HTTP {result.status_code})[/bold green]"
-        if result.is_up
-        else f"[bold red]OFFLINE ({result.error or result.status_code or 'ERR'})[/bold red]"
-    )
+    if result.health == "up":
+        status_badge = f"[bold green]ONLINE (HTTP {result.status_code})[/bold green]"
+    elif result.health == "degraded":
+        tls_reason = (result.tls.validation_error if result.tls else None) or "TLS inválido"
+        status_badge = (
+            f"[bold yellow]DEGRADADO (HTTP {result.status_code}, TLS inválido: {tls_reason})[/bold yellow]"
+        )
+    else:
+        status_badge = f"[bold red]OFFLINE ({result.error or result.status_code or 'ERR'})[/bold red]"
     grade = result.security.grade
     grade_color = (
         "green"
@@ -390,8 +409,12 @@ def render_rich_report(
     rtt_text = (
         f"🌐 [bold cyan]Decomposição Física:[/bold cyan] "
         f"RTT de Rede Estimado: [bold]{result.timings.estimated_rtt_ms:.2f} ms[/bold]  |  "
-        f"Processamento Servidor (TTFB − RTT): [bold]{result.timings.server_processing_ms:.2f} ms[/bold]"
+        f"Processamento Servidor (TTFB − RTT): [bold]"
+        f"{'N/D' if result.timings.server_processing_ms is None else format(result.timings.server_processing_ms, '.2f') + ' ms'}"
+        "[/bold]"
     )
+    for note in result.timings.timing_notes:
+        rtt_text += f"\nℹ️ {note}"
     console.print(Panel(rtt_text, border_style="blue"))
 
     # Estatísticas de Amostragem (P50 / P95 / P99 / Jitter / Fria vs Keep-Alive)
@@ -449,8 +472,9 @@ def render_rich_report(
                 f"Cifra: [bold]{result.tls.cipher or 'N/A'}[/bold]{port80_info}\n"
                 f"Emissor: {result.tls.issuer or 'N/A'}  |  "
                 f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold] "
-                f"({result.tls.relative_validity_percent_remaining:.1f}% restante)  |  "
-                f"OCSP: {result.tls.ocsp_status}",
+                f"({'N/A' if result.tls.relative_validity_percent_remaining is None else format(result.tls.relative_validity_percent_remaining, '.1f')}% restante)  |  "
+                f"OCSP: {result.tls.ocsp_status}"
+                + (f"\nMotivo da invalidez: {result.tls.validation_error}" if not result.tls.valid and result.tls.validation_error else ""),
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",
             )
@@ -535,6 +559,12 @@ def _build_parser() -> _NonExitingArgumentParser:
         action="store_true",
         default=False,
         help="Permite sondar IPs de rede interna / loopback (ambientes de Lab/CI local)",
+    )
+    check_parser.add_argument(
+        "--allow-invalid-cert",
+        action="store_true",
+        default=False,
+        help="Não reprova o gate quando o certificado TLS é inválido (por padrão reprova, exit 1)",
     )
     check_parser.add_argument(
         "--format",
@@ -663,12 +693,14 @@ async def _run_check_async(args: argparse.Namespace) -> int:
         min_grade=min_grade,
         max_ttfb_ms=max_ttfb_ms,
         max_total_ms=max_total_ms,
+        require_valid_cert=not args.allow_invalid_cert,
     )
 
     thresholds = {
         "min_grade": min_grade,
         "max_ttfb_ms": max_ttfb_ms,
         "max_total_ms": max_total_ms,
+        "require_valid_cert": not args.allow_invalid_cert,
     }
 
     if args.webhook_url:
@@ -757,7 +789,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             return await _run_check_async(parsed_args)
         else:
             parser.print_help(sys.stderr)
-            return 2
+            return 3
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
         return 3
@@ -773,13 +805,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not raw_args:
         parser.print_help(sys.stderr)
-        return 2
+        return 3
 
     try:
         parsed_args = parser.parse_args(raw_args)
     except CLIArgumentError as arg_err:
         print(f"Erro de argumento: {arg_err}", file=sys.stderr)
-        return 2
+        return 3
     except SystemExit as sys_exit:
         code = sys_exit.code
         return int(code) if isinstance(code, int) else 0
@@ -793,13 +825,17 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError:
             loop_running = False
 
-        if loop_running:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(lambda: asyncio.run(_run_check_async(parsed_args))).result()
-        return asyncio.run(_run_check_async(parsed_args))
+        try:
+            if loop_running:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(lambda: asyncio.run(_run_check_async(parsed_args))).result()
+            return asyncio.run(_run_check_async(parsed_args))
+        except CLIArgumentError as arg_err:
+            print(f"Erro de argumento: {arg_err}", file=sys.stderr)
+            return 3
     else:
         parser.print_help(sys.stderr)
-        return 2
+        return 3
 
 
 if __name__ == "__main__":

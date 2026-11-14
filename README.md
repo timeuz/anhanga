@@ -415,3 +415,11 @@ RC4-MD5 e DH1024), em 2026-11-14:
 - **SSLv2/SSLv3:** o Anhangá os reporta como `untestable` (o OpenSSL moderno os removeu); o `testssl.sh` os testa por
   sockets próprios. Hoje o `testssl.sh` é a referência para esses dois.
 - **Fora desta comparação:** nota de segurança e lista de cifras (só protocolos foram comparados).
+
+**Cobertura de cifras (validação com `testssl.sh`, com o OpenSSL embutido dele):** a lista de cifras TLS 1.2 do Anhangá
+foi **idêntica** à do `testssl.sh` em `example.com` (20), `github.com` (14) e `tls-v1-2.badssl.com` (22). Diferenças
+conhecidas, agora sinalizadas na interface e no CLI: (1) **TLS 1.3** lista só a suíte negociada (`ciphers_complete=false`),
+porque suítes 1.3 não são selecionáveis por exclusão em Python; (2) **RC4/3DES/SEED** não são ofertáveis pelo OpenSSL
+local, então um alvo que as aceite (ex.: `example.com` aceita 3DES em TLS 1.0) não as mostra e não dispara o achado de
+cifra fraca. `legacy_ciphers_untested=true` avisa que a ausência delas não prova nada. Para testá-las de verdade,
+use o `testssl.sh` ao lado.

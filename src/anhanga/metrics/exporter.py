@@ -227,7 +227,10 @@ def _parse_http_version_number(http_version: str | None) -> float:
 def _resolve_instance_label(result: ProbeResult, instance: str | None = None) -> str:
     if instance:
         return instance
-    parsed = urlparse(result.target_url)
+    try:
+        parsed = urlparse(result.target_url)
+    except ValueError:  # URL malformada (ex.: colchete IPv6): sem netloc utilizável
+        return result.target_url
     if parsed.netloc:
         return parsed.netloc
     return result.resolved_ip or result.target_url

@@ -125,25 +125,26 @@ def _run_py(code, env_file, extra_env=None):
 CODE = "import anhanga.engine.security as s; print(s._is_sensitive_cookie('zzz'), s._is_sensitive_cookie('sessionid'))"
 
 
-def test_cookie_regex_from_dotenv_is_applied(tmp_path):
+def test_cookie_regex_from_dotenv_is_applied_by_the_server_entrypoint(tmp_path):
     f = tmp_path / ".env"
     f.write_text("ANHANGA_SENSITIVE_COOKIE_REGEX=^zzz$\n")
-    out = _run_py(CODE, f)
+    out = _run_py("import anhanga.main\n" + CODE, f)  # o servidor carrega o .env; a regex é lida sob demanda
     assert out.returncode == 0, out.stderr[-300:]
-    assert out.stdout.split() == ["True", "False"], f".env ignorado na importação: {out.stdout!r}"
+    assert out.stdout.split() == ["True", "False"], f".env ignorado: {out.stdout!r}"
 
 
-def test_cookie_regex_from_dotenv_also_applies_when_the_cli_is_imported_first(tmp_path):
+def test_cookie_regex_from_dotenv_applies_even_if_the_engine_was_imported_first(tmp_path):
     f = tmp_path / ".env"
     f.write_text("ANHANGA_SENSITIVE_COOKIE_REGEX=^zzz$\n")
-    out = _run_py("import anhanga.cli\n" + CODE, f)  # o CLI importa probe -> security antes de qualquer load_dotenv tardio
+    code = "import anhanga.cli\nfrom anhanga.envfile import load_dotenv\nload_dotenv()\n" + CODE
+    out = _run_py(code, f)  # CLI importa probe -> security antes de `serve` carregar o .env
     assert out.stdout.split() == ["True", "False"], out.stdout + out.stderr[-200:]
 
 
 def test_real_environment_still_wins_over_dotenv(tmp_path):
     f = tmp_path / ".env"
     f.write_text("ANHANGA_SENSITIVE_COOKIE_REGEX=^zzz$\n")
-    out = _run_py(CODE, f, {"ANHANGA_SENSITIVE_COOKIE_REGEX": "^sessionid$"})
+    out = _run_py("import anhanga.main\n" + CODE, f, {"ANHANGA_SENSITIVE_COOKIE_REGEX": "^sessionid$"})
     assert out.stdout.split() == ["False", "True"], out.stdout
 
 

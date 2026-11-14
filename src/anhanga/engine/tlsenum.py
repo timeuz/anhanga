@@ -29,7 +29,9 @@ MAX_CIPHER_HANDSHAKES = 24
 CACHE_TTL = 6 * 3600
 MAX_SCAN_SECONDS = 60.0  # teto de uma enumeração completa (rodando em segundo plano)
 MIN_SCAN_INTERVAL = 120.0  # no máx. 1 enumeração nova por (ip, porta) a cada 2 min, qualquer que seja o hostname
+INCONCLUSIVE_TTL = 15 * 60  # resultado com algum `unknown`: reaproveitado por 15 min (não refaz dezenas de handshakes a cada 2 min)
 _cache: dict[tuple[str, int], tuple[float, TLSEnumeration]] = {}
+_inconclusive: dict[tuple[str, int], tuple[float, TLSEnumeration]] = {}
 _inflight: dict[tuple[str, int], "asyncio.Future[TLSEnumeration | None]"] = {}
 _last_scan: dict[tuple[str, int], float] = {}
 
@@ -170,6 +172,9 @@ async def enumerate_tls(
     hit = _cache.get(key)
     if use_cache and hit and now - hit[0] < CACHE_TTL:
         return hit[1]
+    soft = _inconclusive.get(key)
+    if use_cache and soft and now - soft[0] < INCONCLUSIVE_TTL:
+        return soft[1]
     results = await asyncio.gather(
         *(_scan_version(ip, port, hostname, n, v, timeout) for n, v in _VERSIONS)
     )
@@ -180,11 +185,12 @@ async def enumerate_tls(
     out = TLSEnumeration(
         protocols=protocols, tested_at=time.time(), legacy_ciphers_untested=not local_ciphers_complete()
     )
-    # Só cacheia resultado conclusivo: com algum `unknown` nas versões testáveis, tenta de novo no ciclo seguinte.
-    if all(p.status != "unknown" for p in results):
-        if len(_cache) > 512:
-            _cache.pop(next(iter(_cache)))
-        _cache[key] = (now, out)
+    # Conclusivo (nenhum `unknown`): 6 h. Inconclusivo (alvo que descarta o ClientHello, alerta de SNI/mTLS...): só 15 min,
+    # em cache à parte, para dar nova chance sem refazer o scan inteiro (até dezenas de handshakes) a cada ciclo.
+    store, ttl_cache = (_cache, 512) if all(p.status != "unknown" for p in results) else (_inconclusive, 512)
+    if len(store) > ttl_cache:
+        store.pop(next(iter(store)))
+    store[key] = (now, out)
     return out
 
 
@@ -203,6 +209,9 @@ async def enumerate_tls_bounded(
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < CACHE_TTL:
         return hit[1]
+    soft = _inconclusive.get(key)
+    if soft and time.monotonic() - soft[0] < INCONCLUSIVE_TTL:
+        return soft[1]
     task = _inflight.get(key)
     if task is not None and task.get_loop() is not asyncio.get_running_loop():
         task = None  # herdada de outro event loop
@@ -241,5 +250,6 @@ def cancel_background() -> None:
 
 def clear_cache() -> None:
     _cache.clear()
+    _inconclusive.clear()
     _inflight.clear()
     _last_scan.clear()

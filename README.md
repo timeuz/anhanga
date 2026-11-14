@@ -365,3 +365,19 @@ padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `tim
 - **Limites conhecidos (não corrigidos):** no desligamento, quem aguarda uma checagem cancelada recebe
   `CancelledError` (só ocorre ao encerrar); a fila cheia do `s_client` devolve o mesmo `([], None)` de uma falha do
   `openssl`, então sob carga a cadeia aparece como "não verificada" de forma intermitente.
+
+## 📏 Como ler os números e limites de uso
+
+- **Tempos por fase, não acumulados:** DNS, TCP, TLS, TTFB e transferência são durações de cada fase. O `curl -w`
+  reporta tempos *acumulados* (`time_connect`, `time_appconnect`, `time_starttransfer`): para comparar, subtraia a fase anterior.
+- **Protocolos/cifras TLS aparecem a partir do 2º ciclo:** a enumeração roda em segundo plano (orçamento de poucos
+  segundos por sondagem) e fica em cache por 6 h. Na 1ª sondagem de um alvo, e no `anhanga check` de execução única,
+  o bloco pode vir vazio ("não avaliado"), nunca "sem protocolos".
+- **Transferência que não termina:** se o servidor envia a resposta mas não a encerra (visto em `www.gnu.org`, onde o
+  `curl` também trava), a sondagem estoura o prazo total e o alvo é dado como OFFLINE. É o comportamento do alvo, não do monitor.
+- **Autenticação sem `ANHANGA_API_KEY`:** só conexões diretas por loopback são aceitas, e uma requisição que traga
+  `X-Forwarded-For`, `Forwarded` ou `X-Real-IP` é tratada como externa. Atrás de um proxy reverso que **não** envie
+  nenhum desses cabeçalhos, o proxy aparece como loopback e a API fica aberta: configure sempre `ANHANGA_API_KEY` ao
+  expor o serviço, e não publique `/probe` e `/api/v1/scan` sem ela (eles conectam a hosts escolhidos pelo chamador).
+- **Revisão de segurança:** uma leitura automatizada do código (subprocessos, SSRF, autenticação, SQL, XSS, YAML) não
+  encontrou vulnerabilidade de alta confiança. Não é um teste de intrusão.

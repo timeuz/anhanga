@@ -42,6 +42,15 @@ def detect_webhook_provider(
     return "slack"
 
 
+def _ms(result: ProbeResult, value: float) -> str:
+    """Latência formatada; sem resposta do alvo não há medição (0 ms seria mentira)."""
+    return "N/D" if result.status_code is None else f"{value:.2f} ms"
+
+
+def _grade_text(result: ProbeResult) -> str:
+    return "N/D" if result.status_code is None else f"{result.security.grade} ({result.security.score}/100)"
+
+
 def _format_tls_status(result: ProbeResult) -> str:
     if result.tls is None:
         return "N/A (HTTP sem TLS)"
@@ -59,32 +68,44 @@ def _format_tls_status(result: ProbeResult) -> str:
 
 
 def _collect_violations(
-    result: ProbeResult, violations: list[str] | None = None
+    result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> list[str]:
+    """Mensagens do payload. As do AlertManager são a fonte de verdade; o estado do resultado só completa o
+    que elas NÃO cobrem (uso avulso/CLI), por tópico e não por igualdade de texto: o texto divergia
+    ("expira em" × "expirando em") e a linha saía duplicada. Em lembrete e recuperação nada é acrescentado:
+    as mensagens já descrevem o que persiste ou foi resolvido ("...: resolvido")."""
     items = list(violations) if violations else []
-    if not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
+
+    def covered(*needles: str) -> bool:
+        return any(all(n in v.lower() for n in needles) for v in items)
+
+    # O motivo do OFFLINE vale em alerta e lembrete (não na recuperação: o selo seria RECUPERADO ao lado de OFFLINE): um lembrete/reenvio cujas mensagens estejam vazias ou
+    # genéricas não pode mostrar o selo vermelho sem razão.
+    if event != "recovery" and not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
-    if result.health == "degraded":
+    if event in ("recovery", "reminder"):
+        return items  # TLS: as mensagens do evento já descrevem o que persiste/foi resolvido
+    if result.health == "degraded" and not covered("certificado tls", "inválid"):
         reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
         items.append(f"Certificado TLS inválido: {reason}")
     if result.tls and result.tls.alert_expiring and result.tls.days_remaining is not None:
-        days = result.tls.days_remaining
-        msg = (
-            f"Certificado TLS expirado há {-days} dias"
-            if days < 0
-            else f"Certificado TLS expirando em {days} dias"
-        )
-        if msg not in items:
-            items.append(msg)
+        if not any(
+            "certificado tls" in v.lower() and any(f in v.lower() for f in ("expira em", "expirando", "expirado há"))
+            for v in items
+        ):
+            days = result.tls.days_remaining
+            items.append(
+                f"Certificado TLS expirado há {-days} dias" if days < 0 else f"Certificado TLS expira em {days} dias"
+            )
     return items
 
 
 def build_slack_payload(
-    result: ProbeResult, violations: list[str] | None = None
+    result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
     """Constrói payload Slack (Block Kit + Attachments coloridos)."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         color = "#ef4444"
         status_label = f"🔴 OFFLINE ({result.status_code or 'ERR'})"
@@ -94,6 +115,11 @@ def build_slack_payload(
     else:
         color = "#10b981"
         status_label = f"🟢 ONLINE (HTTP {result.status_code})"
+    if event == "recovery":
+        color = "#10b981"
+        status_label = f"🟢 RECUPERADO (HTTP {result.status_code})"
+    elif event == "reminder":
+        status_label += " — LEMBRETE (problema persiste)"
 
     tls_status = _format_tls_status(result)
     p95_ms = (
@@ -103,8 +129,8 @@ def build_slack_payload(
     )
     summary_text = (
         f"[Anhangá] {status_label} — {result.target_url} | "
-        f"Total: {result.timings.total_ms:.2f}ms | TTFB: {result.timings.ttfb_ms:.2f}ms | "
-        f"Nota: {result.security.grade} ({result.security.score}/100)"
+        f"Total: {_ms(result, result.timings.total_ms)} | TTFB: {_ms(result, result.timings.ttfb_ms)} | "
+        f"Nota: {_grade_text(result)}"
     )
 
     violations_text = (
@@ -127,15 +153,15 @@ def build_slack_payload(
                 {"type": "mrkdwn", "text": f"*Status:*\n{status_label}"},
                 {
                     "type": "mrkdwn",
-                    "text": f"*Nota de Segurança:*\n{result.security.grade} ({result.security.score}/100)",
+                    "text": f"*Nota de Segurança:*\n{_grade_text(result)}",
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Latência Total:*\n{result.timings.total_ms:.2f} ms (P95: {p95_ms:.2f} ms)",
+                    "text": f"*Latência Total:*\n{_ms(result, result.timings.total_ms)} (P95: {_ms(result, p95_ms)})",
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*TTFB:*\n{result.timings.ttfb_ms:.2f} ms",
+                    "text": f"*TTFB:*\n{_ms(result, result.timings.ttfb_ms)}",
                 },
                 {"type": "mrkdwn", "text": f"*Status TLS:*\n{tls_status}"},
                 {
@@ -164,17 +190,17 @@ def build_slack_payload(
             "fields": [
                 {
                     "title": "Latência Total",
-                    "value": f"{result.timings.total_ms:.2f} ms",
+                    "value": f"{_ms(result, result.timings.total_ms)}",
                     "short": True,
                 },
                 {
                     "title": "TTFB",
-                    "value": f"{result.timings.ttfb_ms:.2f} ms",
+                    "value": f"{_ms(result, result.timings.ttfb_ms)}",
                     "short": True,
                 },
                 {
                     "title": "Nota de Segurança",
-                    "value": f"{result.security.grade} ({result.security.score}/100)",
+                    "value": f"{_grade_text(result)}",
                     "short": True,
                 },
                 {
@@ -199,10 +225,10 @@ def build_slack_payload(
 
 
 def build_teams_payload(
-    result: ProbeResult, violations: list[str] | None = None
+    result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
     """Constrói payload Microsoft Teams no formato MessageCard com sections e facts."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         theme_color = "EF4444"
         status_label = f"OFFLINE ({result.status_code or 'ERR'})"
@@ -212,6 +238,11 @@ def build_teams_payload(
     else:
         theme_color = "10B981"
         status_label = f"ONLINE (HTTP {result.status_code})"
+    if event == "recovery":
+        theme_color = "10B981"
+        status_label = f"RECUPERADO (HTTP {result.status_code})"
+    elif event == "reminder":
+        status_label += " — LEMBRETE (problema persiste)"
 
     tls_status = _format_tls_status(result)
     violations_str = "; ".join(all_violations) if all_violations else "Nenhuma"
@@ -219,11 +250,11 @@ def build_teams_payload(
     facts = [
         {"name": "Alvo", "value": result.target_url},
         {"name": "Status", "value": status_label},
-        {"name": "Latência Total", "value": f"{result.timings.total_ms:.2f} ms"},
-        {"name": "TTFB", "value": f"{result.timings.ttfb_ms:.2f} ms"},
+        {"name": "Latência Total", "value": f"{_ms(result, result.timings.total_ms)}"},
+        {"name": "TTFB", "value": f"{_ms(result, result.timings.ttfb_ms)}"},
         {
             "name": "Nota de Segurança",
-            "value": f"{result.security.grade} ({result.security.score}/100)",
+            "value": f"{_grade_text(result)}",
         },
         {"name": "Status TLS", "value": tls_status},
         {"name": "Violações", "value": violations_str},
@@ -250,28 +281,33 @@ def build_telegram_payload(
     result: ProbeResult,
     violations: list[str] | None = None,
     chat_id: str | None = None,
+    event: str | None = None,
 ) -> dict[str, Any]:
     """Constrói payload para a API de Bots do Telegram."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         badge = "🔴 OFFLINE"
     elif all_violations:
         badge = "🟡 ALERTA"
     else:
         badge = "🟢 ONLINE"
+    if event == "recovery":
+        badge = "🟢 RECUPERADO"
+    elif event == "reminder":
+        badge += " — LEMBRETE"
 
     tls_str = html.escape(_format_tls_status(result))
     target_url_escaped = html.escape(str(result.target_url))
     http_ver_escaped = html.escape(str(result.http_version or "N/A"))
-    grade_escaped = html.escape(str(result.security.grade))
+    grade_escaped = html.escape(_grade_text(result))
 
     lines = [
         f"<b>🔥 Anhangá SRE Alert — {badge}</b>",
         f"<b>Alvo:</b> <code>{target_url_escaped}</code>",
         f"<b>HTTP Status:</b> {result.status_code or 'ERR'} ({http_ver_escaped})",
-        f"<b>Latência Total:</b> {result.timings.total_ms:.2f} ms",
-        f"<b>TTFB:</b> {result.timings.ttfb_ms:.2f} ms",
-        f"<b>Nota de Segurança:</b> {grade_escaped} ({result.security.score}/100)",
+        f"<b>Latência Total:</b> {_ms(result, result.timings.total_ms)}",
+        f"<b>TTFB:</b> {_ms(result, result.timings.ttfb_ms)}",
+        f"<b>Nota de Segurança:</b> {grade_escaped}",
         f"<b>Status TLS:</b> {tls_str}",
     ]
     if all_violations:
@@ -292,14 +328,15 @@ def build_webhook_payload(
     provider: str = "slack",
     violations: list[str] | None = None,
     chat_id: str | None = None,
+    event: str | None = None,
 ) -> dict[str, Any]:
     """Despacha a construção do payload de acordo com o provedor."""
     resolved = detect_webhook_provider("", provider)
     if resolved == "teams":
-        return build_teams_payload(result, violations=violations)
+        return build_teams_payload(result, violations=violations, event=event)
     if resolved == "telegram":
-        return build_telegram_payload(result, violations=violations, chat_id=chat_id)
-    return build_slack_payload(result, violations=violations)
+        return build_telegram_payload(result, violations=violations, chat_id=chat_id, event=event)
+    return build_slack_payload(result, violations=violations, event=event)
 
 
 async def send_webhook_alert(
@@ -310,6 +347,7 @@ async def send_webhook_alert(
     chat_id: str | None = None,
     allow_private: bool = False,
     timeout: float = 5.0,
+    event: str | None = None,
 ) -> dict[str, Any]:
     """
     Valida a URL do webhook contra SSRF (resolve_and_validate_host + IP pinning)
@@ -345,6 +383,7 @@ async def send_webhook_alert(
         provider=resolved_provider,
         violations=violations,
         chat_id=chat_id,
+        event=event,
     )
 
     backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)

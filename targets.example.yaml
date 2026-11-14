@@ -1,15 +1,41 @@
-interval_seconds: 30
-samples: 3
-allow_private: false
+# Anhangá — monitoramento contínuo. Validado na carga: erros são logados e a entrada inválida é descartada.
+# O arquivo é recarregado a quente quando muda (sem reiniciar o servidor).
+interval_seconds: 30      # 5 a 86400; o intervalo conta do início de cada ciclo
+samples: 3                # 1 a 20 amostras por ciclo
+allow_private: false      # true só para serviços de rede interna/lab
+
+# SLOs globais (opcionais). Cada alvo pode sobrescrever.
+slo:
+  max_ttfb: 800ms         # '500ms', '0.5s' ou '500' (ms). Com samples>=2 usa a mediana
+  max_total: 2s
+min_grade: C              # alerta se a nota de segurança ficar abaixo (A+, A, B, C, D, F)
+
 targets:
   - https://cloudflare.com
   - https://github.com
-  - https://news.ycombinator.com
+  - url: https://api.exemplo.com/health
+    samples: 5
+    slo: { max_ttfb: 300ms }
+    min_grade: B
   - https://httpbin.org/delay/1
 
-# Opcional: Disparo automático de alertas quando um alvo monitorado fica indisponível ou com certificado TLS expirando
+# Alertas com estado: um problema só notifica depois de N ciclos seguidos (anti-flapping),
+# não repete a cada ciclo (lembrete só após o cooldown) e avisa quando se resolve.
+alerting:
+  failure_threshold: 2      # ciclos consecutivos com o problema antes de alertar
+  recovery_threshold: 1     # ciclos consecutivos saudáveis antes de declarar recuperação
+  cooldown_seconds: 3600    # intervalo entre lembretes enquanto persistir (0 = sem lembretes)
+  notify_recovery: true
+
+# Persistência (SQLite): histórico, uptime, estado dos alertas, incidentes e outbox. ANHANGA_DB_PATH sobrescreve 'path'.
+storage:
+  enabled: true
+  path: anhanga.db
+  retention_days: 14
+
+# Destinos dos alertas (também a allowlist de POST /api/v1/webhooks/notify)
 # webhooks:
-#   - url: "https://hooks.slack.com/services/T000/B000/X000"
+#   - url: "${SLACK_WEBHOOK_URL}"          # ${VAR}: variável de ambiente
 #     provider: "slack"
 #   - url: "https://outlook.office.com/webhook/..."
 #     provider: "teams"

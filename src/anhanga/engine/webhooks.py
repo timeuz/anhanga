@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from anhanga.engine.config import webhook_provider_from_url
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ALLOWED_SCHEMES,
@@ -24,22 +25,7 @@ def detect_webhook_provider(
     if norm in ("slack", "teams", "telegram"):
         return norm  # type: ignore[return-value]
 
-    lower_url = (webhook_url or "").lower()
-    if "api.telegram.org" in lower_url or "telegram" in lower_url:
-        return "telegram"
-    if any(
-        domain in lower_url
-        for domain in (
-            "webhook.office.com",
-            "office.com",
-            "outlook.com",
-            "logic.azure.com",
-            "teams.microsoft.com",
-            "teams",
-        )
-    ):
-        return "teams"
-    return "slack"
+    return webhook_provider_from_url(webhook_url) or "slack"  # type: ignore[return-value]
 
 
 def _ms(result: ProbeResult, value: float) -> str:

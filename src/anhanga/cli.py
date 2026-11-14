@@ -14,17 +14,9 @@ from rich.text import Text
 
 from anhanga import __version__
 from anhanga.engine.models import ProbeResult
+from anhanga.engine.config import GRADE_RANK, parse_duration_ms
 from anhanga.engine.probe import execute_probe
 from anhanga.engine.webhooks import send_webhook_alert
-
-GRADE_RANK: dict[str, int] = {
-    "A+": 6,
-    "A": 5,
-    "B": 4,
-    "C": 3,
-    "D": 2,
-    "F": 1,
-}
 
 SARIF_SCHEMA_URI = "https://json.schemastore.org/sarif-2.1.0.json"
 
@@ -36,42 +28,6 @@ class CLIArgumentError(ValueError):
 class _NonExitingArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise CLIArgumentError(message)
-
-
-def parse_duration_ms(val: str | int | float) -> float:
-    """
-    Converte strings de duração ('500ms', '0.5s', '1.5s', '250') para milissegundos (float).
-    Levanta ValueError se o formato for inválido ou <= 0.
-    """
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        fval = float(val)
-        if fval <= 0:
-            raise ValueError(f"Duração deve ser maior que zero: {val}")
-        return round(fval, 2)
-
-    if not isinstance(val, str):
-        raise ValueError(f"Formato de duração inválido: {val!r}")
-
-    raw = val.strip().lower()
-    if not raw:
-        raise ValueError("Formato de duração vazio.")
-
-    m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*(ms|s|m)?$", raw)
-    if not m:
-        raise ValueError(f"Formato de duração inválido: '{val}'. Use ex: '500ms', '0.5s' ou '500'.")
-
-    number = float(m.group(1))
-    unit = m.group(2) or "ms"
-    if number <= 0:
-        raise ValueError(f"Duração deve ser positiva: '{val}'.")
-
-    if unit == "ms":
-        return round(number, 2)
-    if unit == "s":
-        return round(number * 1000.0, 2)
-    if unit == "m":
-        return round(number * 60_000.0, 2)
-    raise ValueError(f"Unidade de duração desconhecida: '{unit}'.")
 
 
 def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = None) -> bool:

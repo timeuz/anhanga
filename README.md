@@ -11,7 +11,7 @@ Inspirado no guardião mitológico de olhos de fogo que vigia o perímetro, o An
 ## 🚀 Principais Recursos
 
 ### 1. Diagnóstico Tático de Latência e Waterfall Real
-- **Decomposição Não-Cumulativa por Fase:** Mede isoladamente o tempo gasto em **DNS Lookup**, **TCP Handshake**, **TLS Handshake**, **TTFB (Processamento no Backend)** e **Transferência de Conteúdo**, apresentando offsets exatos de início e fim (`start_ms` → `end_ms`) e identificando automaticamente a **Fase Dominante (Gargalo)** com classificação visual por SLO.
+- **Decomposição Não-Cumulativa por Fase:** Mede isoladamente o tempo gasto em **DNS Lookup**, **TCP Handshake**, **TLS Handshake**, **TTFB (tempo até o primeiro byte; inclui 1 RTT de rede)** e **Transferência de Conteúdo**, apresentando offsets exatos de início e fim (`start_ms` → `end_ms`) e identificando automaticamente a **Fase Dominante (Gargalo)** com classificação visual por SLO.
 - **Amostragem Estatística Multi-Sonda:** Permite executar múltiplas amostras por verificação (`--samples N`), calculando **P50 (Mediana)**, **P95**, **P99**, **Média**, **Min/Max** e **Jitter**, além de comparar o tempo de **Conexão Fria (*Cold Start*)** com **Conexão Reaproveitada (*Keep-Alive*)**.
 - **Rastreamento de Cadeia de Redirects:** Mapeia cada salto (`301`, `302`, `303`, `307`, `308`) de `HTTP -> HTTPS` ou `apex -> www` com status, IP resolvido e latência individual por hop.
 
@@ -191,3 +191,24 @@ scrape_configs:
 - **Latência:** `server_processing_ms` só é calculado a partir de TTFB confiável (amostras quentes). TTFB frio em HTTP/2 pode incluir ~1 RTT extra; com `samples=1` o campo é `null`. `end_to_end_ms` inclui todos os redirects. Percentis de DNS/TCP/TLS usam só amostras com conexão nova.
 - **Alvos sem resposta** não geram séries de latência/nota/TLS em `/metrics` (nada de zeros falsos); o dashboard mostra "—".
 - **Heurísticas:** `Server:` só é vazamento se expõe versão; `HttpOnly` só é exigido de cookies de sessão/autenticação (`ANHANGA_SENSITIVE_COOKIE_REGEX` ajusta).
+
+
+---
+
+## 🔔 Alertas com estado e configuração validada
+
+O `targets.yaml` é **validado na carga** (erros e ajustes vão para o log; entradas inválidas são descartadas, o servidor não cai) e **recarregado a quente** quando o arquivo muda. Veja `targets.example.yaml` para todas as opções.
+
+- **Anti-flapping:** um problema só notifica após `failure_threshold` ciclos consecutivos (padrão 2).
+- **Deduplicação:** notifica **uma vez**; repete como *lembrete* só após `cooldown_seconds` (padrão 1 h; `0` = sem lembretes).
+- **Recuperação:** uma notificação quando o problema some (`recovery_threshold`, `notify_recovery`).
+- **Gatilhos:** alvo offline, TLS inválido, certificado expirando, SLO de TTFB/latência total (`slo:`; usa a mediana quando `samples ≥ 2`) e nota abaixo de `min_grade`. SLO e nota podem ser definidos por alvo.
+- **Entrega:** em paralelo e em background (webhook lento não atrasa as sondagens), com timeout e uma nova tentativa. Métrica: `anhanga_alert_notifications_total{kind,result}`.
+- **Limites conhecidos:** o estado de alertas vive em memória (reiniciar o servidor zera a contagem de ciclos e pode repetir um alerta ainda ativo).
+
+## 🧪 Desenvolvimento
+
+```bash
+uv pip install -e ".[dev]"
+pytest          # sem rede; ~3 s
+```

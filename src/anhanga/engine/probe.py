@@ -2,11 +2,13 @@ import asyncio
 import contextlib
 import ipaddress
 import math
-import multiprocessing
+import json
 import re
 import socket
 import ssl
 import statistics
+import subprocess
+import sys
 import time
 import typing
 from urllib.parse import urlparse
@@ -267,28 +269,30 @@ REGEX_TIMEOUT_SECONDS: float = 2.0
 def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     """Executa re.search em subprocesso descartável com timeout rígido (anti-ReDoS).
 
-    Retorna ("ok", bool) | ("invalid", msg) | ("timeout", None).
+    Usa `python -I -m` (e não multiprocessing/spawn, que reimporta o `__main__` do processo-pai e
+    quebra conforme a forma de execução). Retorna ("ok", bool) | ("invalid", msg) | ("timeout", None).
     """
     if len(pattern) > MAX_REGEX_LENGTH:
         return "invalid", f"padrão excede {MAX_REGEX_LENGTH} caracteres"
-    from anhanga.engine import _regex_worker
-
-    ctx = multiprocessing.get_context("spawn")
-    parent, child = ctx.Pipe(duplex=False)
-    proc = ctx.Process(target=_regex_worker.run, args=(child, pattern, text), daemon=True)
-    proc.start()
-    child.close()
     try:
-        if parent.poll(REGEX_TIMEOUT_SECONDS):
-            return parent.recv()
+        proc = subprocess.run(
+            [sys.executable, "-I", "-m", "anhanga.engine._regex_worker"],
+            input=json.dumps({"pattern": pattern, "text": text}).encode("utf-8"),
+            capture_output=True,
+            timeout=REGEX_TIMEOUT_SECONDS,
+            check=False,
+        )  # TimeoutExpired mata o filho antes de propagar
+    except subprocess.TimeoutExpired:
         return "timeout", None
-    except EOFError:
-        return "invalid", "worker encerrado inesperadamente"
-    finally:
-        if proc.is_alive():
-            proc.kill()
-        proc.join(1.0)
-        parent.close()
+    except OSError as err:
+        return "invalid", f"não foi possível iniciar o avaliador de regex: {err}"
+    if proc.returncode != 0:
+        return "invalid", "avaliador de regex encerrou com erro"
+    try:
+        status, value = json.loads(proc.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return "invalid", "resposta inválida do avaliador de regex"
+    return status, value
 
 
 async def _regex_search(pattern: str, text: str) -> tuple[str, typing.Any]:

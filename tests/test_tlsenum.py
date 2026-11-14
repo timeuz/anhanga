@@ -171,3 +171,87 @@ def test_handshake_failure_is_diagnosed_not_just_offline(server):
     assert "handshake TLS" in r.error and "TLSv1" in r.error
     assert r.tls is not None and r.tls.tls10_11_accepted
     assert r.tls.enumeration.get("TLSv1").weak_ciphers
+
+
+# ---- "handshake failure" é ambíguo: não prova que o servidor recusou a versão (achado da validação com testssl.sh) -------------------
+import ssl
+
+
+def _fail_with(monkeypatch, reason_text):
+    async def boom(*a, **k):
+        raise ssl.SSLError(1, f"[SSL: {reason_text}] alert (_ssl.c:1000)")
+
+    monkeypatch.setattr(tlsenum.asyncio, "open_connection", boom)
+
+
+def _hs(version, exclude=()):
+    return asyncio.run(tlsenum._handshake("203.0.113.1", 443, "h.test", version, list(exclude), 1.0))[0]
+
+
+@pytest.mark.parametrize("v", [ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_2])
+def test_handshake_failure_is_unknown_when_local_openssl_lacks_rc4_or_3des(monkeypatch, v):
+    # servidor só-RC4/3DES (rc4.badssl.com, 3des.badssl.com) responde assim; "rejected" seria afirmar algo que não foi provado
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: False)
+    _fail_with(monkeypatch, "SSLV3_ALERT_HANDSHAKE_FAILURE")
+    assert _hs(v) == "unknown"
+
+
+def test_handshake_failure_is_a_rejection_when_local_ciphers_are_complete(monkeypatch):
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: True)
+    _fail_with(monkeypatch, "SSLV3_ALERT_HANDSHAKE_FAILURE")
+    assert _hs(ssl.TLSVersion.TLSv1) == "rejected"
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_protocol_version_alert_is_always_a_rejection(monkeypatch, complete):
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: complete)
+    _fail_with(monkeypatch, "TLSV1_ALERT_PROTOCOL_VERSION")
+    assert _hs(ssl.TLSVersion.TLSv1) == "rejected"
+
+
+def test_tls13_handshake_failure_is_a_rejection_even_with_incomplete_ciphers(monkeypatch):
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: False)  # TLS 1.3 não depende de RC4/3DES
+    _fail_with(monkeypatch, "SSLV3_ALERT_HANDSHAKE_FAILURE")
+    assert _hs(ssl.TLSVersion.TLSv1_3) == "rejected"
+
+
+def test_cipher_exhaustion_still_ends_the_cipher_loop(monkeypatch):
+    # na iteração por exclusão, "sem cifra em comum" é exatamente o fim esperado da lista (não vira "unknown")
+    monkeypatch.setattr(tlsenum, "local_ciphers_complete", lambda: False)
+    _fail_with(monkeypatch, "SSLV3_ALERT_HANDSHAKE_FAILURE")
+    assert _hs(ssl.TLSVersion.TLSv1_2, exclude=["ECDHE-RSA-AES128-SHA"]) == "rejected"
+
+
+def test_local_ciphers_complete_is_a_bool():
+    assert isinstance(tlsenum.local_ciphers_complete(), bool)
+
+
+class _StubCtx:
+    def __init__(self, names, fail=False):
+        self._names, self._fail = names, fail
+
+    def set_ciphers(self, spec):
+        if self._fail:
+            raise ssl.SSLError("sem cifras")
+
+    def get_ciphers(self):
+        return [{"name": n} for n in self._names]
+
+
+@pytest.mark.parametrize(
+    "names, fail, expected",
+    [
+        (["ECDHE-RSA-AES128-GCM-SHA256", "RC4-SHA", "DES-CBC3-SHA"], False, True),
+        (["ECDHE-RSA-AES128-GCM-SHA256", "DES-CBC3-SHA"], False, False),  # sem RC4
+        (["ECDHE-RSA-AES128-GCM-SHA256", "RC4-SHA"], False, False),  # sem 3DES
+        ([], True, False),  # OpenSSL recusa a lista
+    ],
+)
+def test_local_ciphers_complete_needs_both_rc4_and_3des(monkeypatch, names, fail, expected):
+    tlsenum.local_ciphers_complete.cache_clear()
+    monkeypatch.setattr(tlsenum.ssl, "SSLContext", lambda *a, **k: _StubCtx(names, fail))
+    try:
+        assert tlsenum.local_ciphers_complete() is expected
+    finally:
+        monkeypatch.undo()
+        tlsenum.local_ciphers_complete.cache_clear()

@@ -79,9 +79,9 @@ def _collect_violations(
     def covered(*needles: str) -> bool:
         return any(all(n in v.lower() for n in needles) for v in items)
 
-    # O motivo do OFFLINE vale em qualquer evento: um lembrete/reenvio cujas mensagens estejam vazias ou
+    # O motivo do OFFLINE vale em alerta e lembrete (não na recuperação: o selo seria RECUPERADO ao lado de OFFLINE): um lembrete/reenvio cujas mensagens estejam vazias ou
     # genéricas não pode mostrar o selo vermelho sem razão.
-    if not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
+    if event != "recovery" and not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
     if event in ("recovery", "reminder"):

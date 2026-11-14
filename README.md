@@ -349,3 +349,19 @@ padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `tim
 - **Retry após certificado inválido:** só tenta com ≥ 1 s de prazo total restante; a mensagem de timeout cita o
   prazo realmente usado.
 - **Webhooks:** o motivo do OFFLINE é completado em qualquer evento (alerta, lembrete, reenvio).
+
+## 🔧 Refinamentos da revisão 4 e limites conhecidos
+
+- **Asserção não avaliada:** além da linha no dashboard, cada ocorrência incrementa
+  `anhanga_assertions_not_evaluated_total{target}` e gera um log `WARNING`. **Alerte em `rate(...) > 0`**: sem isso,
+  uma falha persistente do avaliador deixa as asserções de regex sem efeito em silêncio.
+- **Fila de revogação:** no máx. 32 checagens pendentes (acima disso, "fila cheia" na hora) e no máx. 60 s de espera
+  por vaga; quem desiste não é cacheado e tenta no ciclo seguinte.
+- **Cadeia `s_client`:** se a folha da cadeia obtida não for a da conexão atual (renovação no meio, ou balanceador
+  servindo certificados diferentes por backend), a cadeia é descartada ("não verificado"). Atrás de um balanceador com
+  certificados distintos por backend, a checagem de revogação pode ficar indisponível de forma intermitente.
+- **Cookies:** a exceção de double-submit aceita `__Host-`/`__Secure-` e `_` inicial (`__Host-csrf-token`, `_csrf_token`).
+- **`error_code`:** `_ssl.c` só conta no formato `(_ssl.c:NNNN)`; a mensagem de timeout cita sempre o prazo total.
+- **Limites conhecidos (não corrigidos):** no desligamento, quem aguarda uma checagem cancelada recebe
+  `CancelledError` (só ocorre ao encerrar); a fila cheia do `s_client` devolve o mesmo `([], None)` de uma falha do
+  `openssl`, então sob carga a cadeia aparece como "não verificada" de forma intermitente.

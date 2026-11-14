@@ -181,6 +181,13 @@ PROBE_EXECUTIONS_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+PROBE_ASSERTIONS_NOT_EVALUATED_TOTAL = Counter(
+    "anhanga_assertions_not_evaluated_total",
+    "Asserções de corpo (regex) que o Anhangá NÃO conseguiu avaliar (falha do monitor, não do alvo). Alerte em rate() > 0",
+    ["target"],
+    registry=REGISTRY,
+)
+
 PROBE_DURATION_HISTOGRAM_SECONDS = Histogram(
     "anhanga_probe_duration_seconds_histogram",
     "Histograma de distribuição de latência total da sondagem em segundos para uso com histogram_quantile()",
@@ -276,6 +283,9 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         PROBE_UP.labels(target=target).set(0)
         _clear_measurements(target)
         return
+
+    if result.assertions.not_evaluated:
+        PROBE_ASSERTIONS_NOT_EVALUATED_TOTAL.labels(target=target).inc(len(result.assertions.not_evaluated))
 
     dns_s = round(result.timings.dns_ms / 1000.0, 6)
     tcp_s = round(result.timings.tcp_ms / 1000.0, 6)

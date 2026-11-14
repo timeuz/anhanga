@@ -4,6 +4,7 @@ import contextlib
 import ipaddress
 import math
 import json
+import logging
 import re
 import socket
 import ssl
@@ -349,6 +350,9 @@ async def _evaluate_content_assertions(
         if status == "unavailable":
             # Falha do monitor, não do alvo: registra como "não avaliado" (visível) sem reprovar a asserção,
             # senão um problema de fork/arquivo derrubaria e alertaria TODOS os alvos com regex ao mesmo tempo.
+            logging.getLogger("anhanga.probe").warning(
+                "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
+            )
             not_evaluated.append(
                 f"{field}: avaliador de regex indisponível ({value}); o padrão não foi avaliado "
                 "(falha do Anhangá, não do alvo)"
@@ -1283,7 +1287,7 @@ async def execute_probe(
     except (asyncio.TimeoutError, httpx.TimeoutException) as timeout_err:
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({timeout}s): {timeout_err or 'limite de tempo esgotado'}",
+            error=f"Timeout rígido excedido ({overall_timeout:.1f}s): {timeout_err or 'limite de tempo esgotado'}",
         )
     except Exception as exc:
         exc_str = str(exc)
@@ -1327,7 +1331,7 @@ async def execute_probe(
                     timeout=remaining,
                 )
             except Exception as inner_exc:
-                return _failure_result(url, inner_exc, remaining) or ProbeResult(
+                return _failure_result(url, inner_exc, overall_timeout) or ProbeResult(
                     target_url=url,
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )

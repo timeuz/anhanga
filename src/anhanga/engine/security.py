@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import shutil
 from collections import deque
+import functools
 import hashlib
 import ipaddress
 import logging
@@ -982,9 +983,15 @@ def _compile_sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str
     return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I), False
 
 
-_SENSITIVE_COOKIE_RE, _CUSTOM_COOKIE_ACTIVE = _compile_sensitive_cookie_regex(
-    os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX")
-)
+
+
+@functools.lru_cache(maxsize=4)
+def _sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str], bool]":
+    """Compilada sob demanda (não na importação): o `.env` só é lido pelo entrypoint do servidor, que pode rodar
+    depois de este módulo ser importado (o CLI importa o motor antes de `serve`). Uma regex inválida loga uma vez."""
+    return _compile_sensitive_cookie_regex(custom)
+
+
 # Só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). Não basta conter
 # "csrf": `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
 _CSRF_TOKEN_COOKIE_RE = re.compile(r"^(?:__(?:host|secure)-)?_?(?:x-)?(?:csrf|xsrf)[-_]?token$", re.I)
@@ -993,9 +1000,10 @@ _CSRF_TOKEN_COOKIE_RE = re.compile(r"^(?:__(?:host|secure)-)?_?(?:x-)?(?:csrf|xs
 def _is_sensitive_cookie(name: str) -> bool:
     """Cookie de sessão/autenticação. No padrão, tokens CSRF de double-submit ficam de fora mesmo casando com
     `token`: precisam ser legíveis por JS. Regex válida do operador vale como escrita."""
-    if not _SENSITIVE_COOKIE_RE.search(name):
+    regex, custom_active = _sensitive_cookie_regex(os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX"))
+    if not regex.search(name):
         return False
-    return _CUSTOM_COOKIE_ACTIVE or not _CSRF_TOKEN_COOKIE_RE.match(name)
+    return custom_active or not _CSRF_TOKEN_COOKIE_RE.match(name)
 
 
 def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditItem]:

@@ -14,6 +14,7 @@ from rich.text import Text
 
 from anhanga import __version__
 from anhanga.engine.models import ProbeResult
+from anhanga.engine.alerting import effective_total_ms, effective_ttfb_ms
 from anhanga.engine.config import GRADE_RANK, parse_duration_ms
 from anhanga.engine.probe import execute_probe
 from anhanga.engine.webhooks import send_webhook_alert
@@ -90,16 +91,14 @@ def evaluate_probe_gates(
             violations.append(f"Content Assertion: {fail_msg}")
         slo_or_conn_failed = True
 
-    if max_ttfb_ms is not None and result.timings.ttfb_ms > max_ttfb_ms:
-        violations.append(
-            f"SLO de TTFB violado: {result.timings.ttfb_ms:.2f}ms excede o limite de {max_ttfb_ms:.2f}ms."
-        )
+    ttfb_ms = effective_ttfb_ms(result)
+    if max_ttfb_ms is not None and ttfb_ms > max_ttfb_ms:
+        violations.append(f"SLO de TTFB violado: {ttfb_ms:.2f}ms excede o limite de {max_ttfb_ms:.2f}ms.")
         slo_or_conn_failed = True
 
-    if max_total_ms is not None and result.timings.total_ms > max_total_ms:
-        violations.append(
-            f"SLO de Latência Total violado: {result.timings.total_ms:.2f}ms excede o limite de {max_total_ms:.2f}ms."
-        )
+    total_ms = effective_total_ms(result)
+    if max_total_ms is not None and total_ms > max_total_ms:
+        violations.append(f"SLO de Latência Total violado: {total_ms:.2f}ms excede o limite de {max_total_ms:.2f}ms.")
         slo_or_conn_failed = True
 
     grade_failed = False
@@ -164,32 +163,33 @@ def build_sarif_report(
 
     # 1. Violações de Quality Gates (SLO, Grade, Disponibilidade, Anti-SSRF)
     for idx, violation in enumerate(violations, start=1):
-        v_lower = violation.lower()
-        if "certificado tls inválido" in v_lower:
+        # Classificação pelo PREFIXO que `evaluate_probe_gates` gera (e pelo código de saída 3 = DNS/SSRF/argumento),
+        # nunca por substring solta: um padrão `total` ou um host `cdns.exemplo.com` não podem mudar a regra.
+        if violation.startswith("Certificado TLS inválido:"):
             rule_id = "ANHANGA-TLS-INVALID"
             rule_name = "InvalidTLSCertificate"
             short_desc = "Certificado TLS inválido (expirado, hostname divergente ou cadeia não confiável)"
-        elif "anti-ssrf" in v_lower or "dns" in v_lower:
+        elif exit_code == 3:
             rule_id = "ANHANGA-SSRF-OR-DNS"
             rule_name = "SSRFOrDNSValidationFailure"
             short_desc = "Bloqueio Anti-SSRF ou falha de resolução DNS"
-        elif "ttfb" in v_lower:
+        elif violation.startswith("SLO de TTFB"):
             rule_id = "ANHANGA-SLO-TTFB"
             rule_name = "TTFBSLOViolation"
             short_desc = "Violação de SLO de Time to First Byte (TTFB)"
-        elif "latência total" in v_lower or "total" in v_lower:
+        elif violation.startswith("SLO de Latência Total"):
             rule_id = "ANHANGA-SLO-TOTAL"
             rule_name = "TotalLatencySLOViolation"
             short_desc = "Violação de SLO de Latência Total"
-        elif "nota de segurança" in v_lower or "grade" in v_lower:
+        elif violation.startswith("Nota de segurança"):
             rule_id = "ANHANGA-GATE-SECURITY-GRADE"
             rule_name = "MinimumSecurityGradeViolation"
             short_desc = "Nota de segurança abaixo do mínimo exigido pelo Quality Gate"
-        elif "offline" in v_lower:
+        elif violation.startswith("Alvo OFFLINE:"):
             rule_id = "ANHANGA-AVAILABILITY"
             rule_name = "TargetUnavailable"
             short_desc = "Alvo indisponível ou retornando erro HTTP"
-        elif "content assertion" in v_lower or "assertion" in v_lower:
+        elif violation.startswith("Content Assertion:"):
             rule_id = "ANHANGA-ASSERTION"
             rule_name = "ContentAssertionFailure"
             short_desc = "Falha em verificação de asserção de conteúdo"
@@ -651,35 +651,11 @@ async def _run_check_async(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise CLIArgumentError(str(exc)) from exc
 
-    resolve_override: dict[str, str] = {}
-    if getattr(args, "resolve", None):
-        for res_item in args.resolve:
-            parts = res_item.split(":")
-            if len(parts) == 3:
-                # host:port:ip -> map host and host:port
-                h, p, ip = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                resolve_override[h] = ip
-                resolve_override[f"{h}:{p}"] = ip
-            elif len(parts) == 2:
-                # host:ip
-                h, ip = parts[0].strip(), parts[1].strip()
-                resolve_override[h] = ip
-            else:
-                raise CLIArgumentError(
-                    f"Formato inválido em --resolve '{res_item}'. Use 'host:port:ip' ou 'host:ip'."
-                )
-
     result = await execute_probe(
         raw_url=target_url,
         timeout=args.timeout,
         allow_private=args.allow_private,
         samples=args.samples,
-        resolve_override=resolve_override or None,
-        fail_if_body_not_matches_regexp=getattr(args, "fail_if_body_not_matches_regexp", None),
-        fail_if_body_matches_regexp=getattr(args, "fail_if_body_matches_regexp", None),
-        min_payload_bytes=getattr(args, "min_payload_bytes", None),
-        max_payload_bytes=getattr(args, "max_payload_bytes", None),
-        assert_final_url=getattr(args, "assert_final_url", None),
     )
 
     _, exit_code, violations = evaluate_probe_gates(

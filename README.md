@@ -276,6 +276,11 @@ alvo é de ~10–40 handshakes a cada 6 h, e não a cada ciclo. `ANHANGA_TLS_ENU
 - **Estados:** `accepted`, `rejected` (só um alerta TLS do servidor conta), `unknown` (timeout, falha de
   rede ou limitação do cliente; nunca vira "recusado" nem entra no cache) e `untestable` (SSLv2/SSLv3).
 
+**Prazos:** a enumeração nunca segura a sondagem por mais de 3 s. Se o alvo aceita muitas cifras (ex.: ~20 em TLS 1.2),
+ela termina em segundo plano e o resultado aparece a partir do ciclo seguinte (cache por `hostname:porta`). No máximo uma
+enumeração nova por `ip:porta` a cada 2 min. A checagem de revogação tem orçamento próprio de 4 s; se estourar, vira
+`error` em cache por 5 min, nunca derruba a sondagem.
+
 **Limites:** o teste usa o OpenSSL do sistema, que não oferece RC4/3DES/EXPORT nem SSLv3. Um servidor que só
 aceita essas cifras aparece como "nenhum protocolo testável aceito", não como "usa RC4". "Recusado" significa
 "recusou todas as cifras que este cliente oferece".
@@ -287,3 +292,14 @@ findings `SEC-COOP`/`SEC-COEP` com severidade `info` e **peso 0**: são endureci
 embeds de terceiros sem CORP/CORS), então não alteram a nota. Valor inválido (que o navegador ignora) vira `low`.
 `unsafe-none` conta como ausente. A ausência de CORP não é apontada, já que só faz sentido para recursos
 (imagens, scripts) e não para páginas HTML.
+
+## ⚙️ Configuração: regras de validação
+
+- **Booleanos estritos:** `allow_private`, `alerting.notify_recovery` e `storage.enabled` aceitam `true/false`,
+  `yes/no`, `on/off`, `1/0` (inclusive como string vinda de `${VAR}`). Qualquer outro valor (ex.: variável vazia) é
+  um erro registrado e cai no padrão **seguro** (`allow_private=false`). Nunca é interpretado como "verdadeiro".
+- **Recarga a quente:** se o `targets.yaml` salvo estiver ilegível ou com YAML inválido, a recarga é rejeitada e a
+  configuração anterior continua valendo (alvos, estado de alertas e incidentes abertos ficam intactos).
+- **Alvos duplicados** são detectados pela URL normalizada (`example.com` = `https://example.com` = `HTTPS://EXAMPLE.COM`).
+- **Dashboard:** o HTML é público, mas os dados em cache só vão embutidos para quem está autorizado.
+- **Desligamento:** entregas de alerta em voo ganham 5 s para concluir; as que não concluírem vão para a outbox.

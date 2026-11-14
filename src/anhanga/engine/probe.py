@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import contextlib
 import ipaddress
 import math
@@ -35,7 +36,7 @@ from anhanga.engine.models import (
     TLSInspection,
     build_timing_breakdown,
 )
-from anhanga.engine.tlsenum import enumerate_tls
+from anhanga.engine.tlsenum import enumerate_tls_bounded
 from anhanga.engine.security import (
     audit_cors_active,
     audit_http_security,
@@ -192,7 +193,15 @@ def _detect_system_dns_resolver() -> str:
     return "127.0.0.53 (systemd-resolved)"
 
 
+# True só dentro das sondagens da vigilância contínua (definido pelo loop do servidor). Scans avulsos
+# (API, /probe, CLI) não alimentam nem recebem o aviso: um terceiro varrendo 3 hosts ruins não pode
+# acusar "resolvedor quebrado" nos alvos monitorados.
+MONITORED_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar("anhanga_monitored_probe", default=False)
+
+
 def _check_common_mode_failure(current_host: str, dns_ms: float, has_error: bool) -> str | None:
+    if not MONITORED_PROBE.get():
+        return None
     now = time.monotonic()
     _GLOBAL_PROBE_HISTORY.append((now, current_host.lower(), dns_ms, has_error))
     cutoff = now - 60.0
@@ -913,8 +922,8 @@ async def _run_probe_session(
                     timeout=min(timeout, 2.0),
                     ip=target_ip_for_tls,
                 ),
-                enumerate_tls(
-                    target_ip_for_tls, final_port, final_host, timeout=min(3.0, timeout)
+                enumerate_tls_bounded(
+                    target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
                 ),
             )
 
@@ -955,7 +964,8 @@ async def _run_probe_session(
                 _apply_revocation(
                     tls_info,
                     await revocation.check_revocation(
-                        chain_der, allow_private=allow_private, timeout=min(timeout, 5.0)
+                        chain_der, allow_private=allow_private, timeout=min(timeout, 5.0),
+                        deadline=min(timeout, 4.0),
                     ),
                 )
 
@@ -1064,6 +1074,18 @@ def _validate_hostname_syntax(host: str) -> str | None:
     return None
 
 
+def _is_tls_handshake_error(exc: BaseException) -> bool:
+    """Por tipo (não por texto: um hostname 'ssl.exemplo.com' não é erro de TLS): há um ssl.SSLError na cadeia?"""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, ssl.SSLError):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 async def _diagnose_tls_failure(
     url: str, exc_str: str, allow_private: bool, timeout: float,
     resolve_override: dict[str, str] | None,
@@ -1079,9 +1101,8 @@ async def _diagnose_tls_failure(
             parsed.hostname, port, allow_private=allow_private, dns_timeout=min(3.0, timeout),
             resolve_override=resolve_override,
         ))[0]
-        enum = await asyncio.wait_for(
-            enumerate_tls(ip, port, parsed.hostname, timeout=min(3.0, timeout), use_cache=False),
-            timeout=15.0,
+        enum = await enumerate_tls_bounded(
+            ip, port, parsed.hostname, budget=10.0, timeout=min(3.0, timeout)
         )
     except Exception:
         return None
@@ -1186,7 +1207,9 @@ async def execute_probe(
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
-    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 3.0, timeout + 2.0))
+    # Folga para o que roda após a sondagem HTTP (enumeração TLS ≤ 3 s em paralelo com openssl/porta 80,
+    # depois revogação ≤ 4 s): cada etapa tem prazo próprio e degrada sozinha, então o prazo global não a corta.
+    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 9.0, timeout + 8.0))
 
     try:
         return await asyncio.wait_for(
@@ -1253,7 +1276,7 @@ async def execute_probe(
                     error=f"Erro HTTP/Conexão: {inner_exc}",
                 )
 
-        if isinstance(exc, ssl.SSLError) or "SSL" in exc_str.upper() or "TLS" in exc_str.upper():
+        if _is_tls_handshake_error(exc):
             diagnosed = await _diagnose_tls_failure(
                 url, exc_str, allow_private=allow_private, timeout=timeout,
                 resolve_override=resolve_override,

@@ -97,6 +97,24 @@ class MonitorConfig:
     storage: StorageSpec = field(default_factory=StorageSpec)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    load_failed: bool = False  # arquivo ilegível/YAML inválido/raiz não-mapa: não é uma config "vazia" legítima
+
+
+_TRUE = {"true", "yes", "on", "1"}
+_FALSE = {"false", "no", "off", "0"}
+
+
+def _as_bool(value: Any, name: str, default: bool, cfg: MonitorConfig) -> bool:
+    """Booleano estrito. `bool("false")` é True, e `${VAR}` interpolado chega sempre como string:
+    aceita só bool real ou true/false/yes/no/on/off/1/0; qualquer outra coisa vira erro + `default`."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in _TRUE | _FALSE:
+        return value.strip().lower() in _TRUE
+    cfg.errors.append(f"{name}: valor booleano inválido {value!r} (use true/false); usando {str(default).lower()}.")
+    return default
 
 
 def _interpolate_env_vars(obj: Any) -> Any:
@@ -177,6 +195,7 @@ def parse_config(raw: Any) -> MonitorConfig:
         raw = {}
     if not isinstance(raw, dict):
         cfg.errors.append("O arquivo de configuração deve ser um mapa YAML na raiz.")
+        cfg.load_failed = True
         return cfg
 
     for key in raw:
@@ -190,7 +209,7 @@ def parse_config(raw: Any) -> MonitorConfig:
     default_samples = (
         _as_int(raw["samples"], "samples", 1, 1, MAX_SAMPLES, cfg) if "samples" in raw else 1
     )
-    cfg.allow_private = bool(raw.get("allow_private", False))
+    cfg.allow_private = _as_bool(raw.get("allow_private", False), "allow_private", False, cfg)
     base_rules = _parse_rules(raw, SLORules(), "config", cfg)
 
     # alerting
@@ -214,7 +233,7 @@ def parse_config(raw: Any) -> MonitorConfig:
                     alerting.get("recovery_threshold", 1), "alerting.recovery_threshold", 1, 1, 20, cfg
                 ),
                 cooldown_seconds=float(cooldown),
-                notify_recovery=bool(alerting.get("notify_recovery", True)),
+                notify_recovery=_as_bool(alerting.get("notify_recovery", True), "alerting.notify_recovery", True, cfg),
             )
 
     # storage
@@ -228,7 +247,7 @@ def parse_config(raw: Any) -> MonitorConfig:
             for key in storage:
                 if key not in ("enabled", "path", "retention_days"):
                     cfg.warnings.append(f"storage: chave desconhecida ignorada: '{key}'.")
-            enabled = bool(storage.get("enabled", True))
+            enabled = _as_bool(storage.get("enabled", True), "storage.enabled", True, cfg)
             if isinstance(storage.get("path"), str) and storage["path"].strip() and not os.getenv("ANHANGA_DB_PATH"):
                 path = storage["path"].strip()
             retention = _as_int(storage.get("retention_days", 14), "storage.retention_days", 14, 1, 3650, cfg)
@@ -255,10 +274,15 @@ def parse_config(raw: Any) -> MonitorConfig:
         if err:
             cfg.errors.append(f"{where} ('{url}'): {err} Descartado.")
             continue
-        if url in seen:
-            cfg.warnings.append(f"{where}: alvo duplicado '{url}' ignorado.")
+        # Duplicata é decidida pela URL normalizada (é a chave de métricas, alertas e histórico).
+        from anhanga.engine.probe import _normalize_and_validate_scheme
+
+        norm = urlparse(_normalize_and_validate_scheme(url)[0])
+        key = norm._replace(scheme=norm.scheme.lower(), netloc=norm.netloc.lower()).geturl()
+        if key in seen:
+            cfg.warnings.append(f"{where}: alvo duplicado '{url}' ignorado (mesmo alvo que '{key}').")
             continue
-        seen.add(url)
+        seen.add(key)
         samples = (
             _as_int(spec_raw["samples"], f"{where}.samples", default_samples, 1, MAX_SAMPLES, cfg)
             if "samples" in spec_raw
@@ -268,7 +292,7 @@ def parse_config(raw: Any) -> MonitorConfig:
             TargetSpec(
                 url=url,
                 samples=samples,
-                allow_private=bool(spec_raw.get("allow_private", cfg.allow_private)),
+                allow_private=_as_bool(spec_raw.get("allow_private", cfg.allow_private), f"{where}.allow_private", cfg.allow_private, cfg),
                 rules=_parse_rules(spec_raw, base_rules, where, cfg),
             )
         )
@@ -312,7 +336,7 @@ def parse_config(raw: Any) -> MonitorConfig:
                 url=url,
                 provider=provider,
                 chat_id=chat_id,
-                allow_private=bool(entry.get("allow_private", cfg.allow_private)),
+                allow_private=_as_bool(entry.get("allow_private", cfg.allow_private), f"{where}.allow_private", cfg.allow_private, cfg),
             )
         )
     return cfg
@@ -338,5 +362,6 @@ def load_config(path: Path | None) -> MonitorConfig:
     except (OSError, yaml.YAMLError) as exc:
         cfg = MonitorConfig()
         cfg.errors.append(f"Falha ao ler {path}: {exc}")
+        cfg.load_failed = True
         return cfg
     return parse_config(_interpolate_env_vars(raw))

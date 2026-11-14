@@ -292,3 +292,17 @@ def test_non_revoked_outcomes_never_invalidate_the_certificate(mk, status):
     r = mk()
     _apply_revocation(r.tls, RevocationInspection(status=status))
     assert r.tls.valid is True and r.tls.revocation.status == status
+
+
+# ---- 2. cache de CRL por emissor -------------------------------------------------------------------------------
+def test_crl_cache_is_not_shared_across_issuers(pki):
+    import asyncio
+    ca = (pki / "ca.pem").read_text()
+    rogue = (pki / "rogue" / "ca.pem").read_text()
+    url = R._cert_fields(pem_to_der(pki / "crlgood.pem"))["crlDistributionPoints"][0]
+    R.clear_caches()
+    ok = asyncio.run(R._crl_revoked_map(url, ca, allow_private=True, timeout=5.0, now=time.time()))
+    assert isinstance(ok, dict)
+    # mesmo URL, outro emissor: precisa REVERIFICAR (e falhar), não devolver o mapa do cache
+    with pytest.raises(ValueError, match="assinatura"):
+        asyncio.run(R._crl_revoked_map(url, rogue, allow_private=True, timeout=5.0, now=time.time()))

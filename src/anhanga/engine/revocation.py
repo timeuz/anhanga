@@ -178,9 +178,11 @@ async def _ocsp_check(leaf_pem: str, issuer_pem: str, url: str, *, allow_private
 
 async def _crl_revoked_map(url: str, issuer_pem: str, *, allow_private: bool, timeout: float,
                            now: float) -> dict[str, datetime | None]:
-    cached = _CRL_CACHE.get(url)
+    # A chave inclui o emissor: a assinatura foi verificada contra ELE; um hit só vale para o mesmo emissor.
+    cache_key = f"{hashlib.sha256(issuer_pem.encode('ascii', 'ignore')).hexdigest()}|{url}"
+    cached = _CRL_CACHE.get(cache_key)
     if cached and cached[0] > now:
-        _CRL_CACHE.move_to_end(url)
+        _CRL_CACHE.move_to_end(cache_key)
         return cached[1]
     data = await _fetch(url, allow_private=allow_private, max_bytes=MAX_CRL_BYTES, timeout=timeout)
     with tempfile.TemporaryDirectory(prefix="anhanga-crl-") as tmp:
@@ -205,14 +207,19 @@ async def _crl_revoked_map(url: str, issuer_pem: str, *, allow_private: bool, ti
     ttl_until = now + CRL_CACHE_MAX_AGE
     if next_update is not None:
         ttl_until = min(ttl_until, next_update.timestamp())
-    _CRL_CACHE[url] = (ttl_until, revoked)
+    _CRL_CACHE[cache_key] = (ttl_until, revoked)
     while len(_CRL_CACHE) > CRL_CACHE_MAX:
         _CRL_CACHE.popitem(last=False)
     return revoked
 
 
-async def check_revocation(chain_der: list[bytes], *, allow_private: bool = False, timeout: float = 5.0) -> RevocationInspection:
-    """Folha = chain_der[0]. Retorna sempre um RevocationInspection (nunca lança)."""
+async def check_revocation(
+    chain_der: list[bytes], *, allow_private: bool = False, timeout: float = 5.0, deadline: float = 6.0
+) -> RevocationInspection:
+    """Folha = chain_der[0]. Retorna sempre um RevocationInspection (nunca lança).
+
+    `deadline` é o orçamento TOTAL (vários fetches em sequência): estourar vira um resultado "error" em cache
+    (nova tentativa em 5 min), nunca derruba a sondagem nem repete o mesmo trabalho a cada ciclo."""
     if not chain_der:
         return RevocationInspection(status="unavailable", detail="cadeia do servidor indisponível")
     leaf_der = chain_der[0]
@@ -221,7 +228,12 @@ async def check_revocation(chain_der: list[bytes], *, allow_private: bool = Fals
     cached = _RESULT_CACHE.get(key)
     if cached and cached[0] > now_ts:
         return cached[1]
-    result = await _check_uncached(chain_der, allow_private=allow_private, timeout=timeout)
+    try:
+        result = await asyncio.wait_for(
+            _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=deadline
+        )
+    except asyncio.TimeoutError:
+        result = RevocationInspection(status="error", detail=f"tempo esgotado ({deadline:.0f}s) ao consultar OCSP/CRL")
     ttl = CACHE_TTL.get(result.status, CACHE_TTL_DEFAULT)
     if result.next_update is not None:
         ttl = min(ttl, max(60.0, result.next_update.timestamp() - now_ts))

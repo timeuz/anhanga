@@ -26,7 +26,11 @@ _VERSIONS: list[tuple[str, ssl.TLSVersion]] = [
 ]
 MAX_CIPHER_HANDSHAKES = 24
 CACHE_TTL = 6 * 3600
-_cache: dict[tuple[str, int, str], tuple[float, TLSEnumeration]] = {}
+MAX_SCAN_SECONDS = 60.0  # teto de uma enumeração completa (rodando em segundo plano)
+MIN_SCAN_INTERVAL = 120.0  # no máx. 1 enumeração nova por (ip, porta) a cada 2 min, qualquer que seja o hostname
+_cache: dict[tuple[str, int], tuple[float, TLSEnumeration]] = {}
+_inflight: dict[tuple[str, int], "asyncio.Future[TLSEnumeration | None]"] = {}
+_last_scan: dict[tuple[str, int], float] = {}
 
 # Razões do OpenSSL que indicam que *o servidor* respondeu recusando (e não falha do cliente).
 _SERVER_REJECT_MARKERS = (
@@ -137,10 +141,10 @@ async def _scan_version(
 async def enumerate_tls(
     ip: str, port: int, hostname: str, timeout: float = 3.0, use_cache: bool = True
 ) -> TLSEnumeration | None:
-    """Enumera protocolos/cifras. None se desligado (`ANHANGA_TLS_ENUM=0`). Resultado em cache por 6 h."""
+    """Enumera protocolos/cifras. None se desligado (`ANHANGA_TLS_ENUM=0`). Resultado em cache por 6 h (por hostname:porta, já que CDNs rotacionam IPs)."""
     if not enabled():
         return None
-    key = (ip, port, hostname.lower())
+    key = (hostname.lower(), port)
     now = time.monotonic()
     hit = _cache.get(key)
     if use_cache and hit and now - hit[0] < CACHE_TTL:
@@ -161,5 +165,48 @@ async def enumerate_tls(
     return out
 
 
+async def enumerate_tls_bounded(
+    ip: str, port: int, hostname: str, budget: float = 3.0, timeout: float = 3.0
+) -> TLSEnumeration | None:
+    """Como `enumerate_tls`, mas nunca bloqueia a sondagem por mais de `budget` segundos.
+
+    Se estourar, a enumeração continua em segundo plano (uma só por chave) e preenche o cache: o ciclo
+    seguinte a encontra pronta. Sem isso, um alvo lento faria cada ciclo estourar o prazo e refazer
+    o mesmo trabalho. Também limita a amplificação: no máx. 1 enumeração nova por (ip, porta) a cada
+    `MIN_SCAN_INTERVAL`, mesmo que o chamador varie o hostname."""
+    if not enabled():
+        return None
+    key = (hostname.lower(), port)
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_TTL:
+        return hit[1]
+    task = _inflight.get(key)
+    if task is None:
+        now = time.monotonic()
+        last = _last_scan.get((ip, port))
+        if last is not None and now - last < MIN_SCAN_INTERVAL:
+            return None
+        if len(_last_scan) > 512:
+            _last_scan.clear()
+        _last_scan[(ip, port)] = now
+        task = asyncio.ensure_future(
+            asyncio.wait_for(enumerate_tls(ip, port, hostname, timeout=timeout), timeout=MAX_SCAN_SECONDS)
+        )
+        _inflight[key] = task
+
+        def _done(t: "asyncio.Future") -> None:
+            _inflight.pop(key, None)
+            if not t.cancelled():
+                t.exception()  # consome: evita "exception was never retrieved"
+
+        task.add_done_callback(_done)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+    except Exception:  # noqa: BLE001  (inclui TimeoutError do orçamento e falhas da própria enumeração)
+        return None
+
+
 def clear_cache() -> None:
     _cache.clear()
+    _inflight.clear()
+    _last_scan.clear()

@@ -321,3 +321,14 @@ O avaliador de regex (anti-ReDoS, subprocesso com timeout de 2 s) roda por **cam
 biblioteca padrão, então funciona também com `PYTHONPATH=src` (sem `pip install`). Se o próprio avaliador falhar,
 a asserção reporta "Avaliador de regex indisponível" (falha do Anhangá), nunca "Regexp inválida" (reservado a
 padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `timeout` pedido (no máximo 2× e 10 s).
+
+## 🧹 Refinamentos de payload, cookies e erros
+
+- **Webhooks:** as mensagens do AlertManager são a fonte de verdade. O estado do resultado só completa o que elas
+  não cobrem (por tópico, não por igualdade de texto), e em lembrete/recuperação nada é acrescentado.
+- **Cadeia/OCSP grampeado:** `openssl s_client` tem cache de 5 min por `host:porta` (invalidado se o certificado da
+  conexão mudou, ou seja, após uma renovação) e no máximo 8 execuções simultâneas.
+- **Cookies:** `csrftoken`/`XSRF-TOKEN` (double-submit) não exigem `HttpOnly`: precisam ser legíveis por JS.
+  `ANHANGA_SENSITIVE_COOKIE_REGEX` inválida é registrada e ignorada (usa o padrão), em vez de derrubar a aplicação.
+- **Erros:** `tls_error` só para marcadores reais de TLS (nunca por um hostname como `classless.example`). O retry
+  após certificado inválido usa só o prazo que sobrou, e timeout/SSRF nele recebem o mesmo tratamento do 1º passe.

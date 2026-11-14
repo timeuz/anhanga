@@ -68,24 +68,34 @@ def _format_tls_status(result: ProbeResult) -> str:
 
 
 def _collect_violations(
-    result: ProbeResult, violations: list[str] | None = None
+    result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> list[str]:
+    """Mensagens do payload. As do AlertManager são a fonte de verdade; o estado do resultado só completa o
+    que elas NÃO cobrem (uso avulso/CLI), por tópico e não por igualdade de texto: o texto divergia
+    ("expira em" × "expirando em") e a linha saía duplicada. Em lembrete e recuperação nada é acrescentado:
+    as mensagens já descrevem o que persiste ou foi resolvido ("...: resolvido")."""
     items = list(violations) if violations else []
+    if event in ("recovery", "reminder"):
+        return items
+
+    def covered(*needles: str) -> bool:
+        return any(all(n in v.lower() for n in needles) for v in items)
+
     if not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
-    if result.health == "degraded":
+    if result.health == "degraded" and not covered("certificado tls", "inválid"):
         reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
         items.append(f"Certificado TLS inválido: {reason}")
     if result.tls and result.tls.alert_expiring and result.tls.days_remaining is not None:
-        days = result.tls.days_remaining
-        msg = (
-            f"Certificado TLS expirado há {-days} dias"
-            if days < 0
-            else f"Certificado TLS expirando em {days} dias"
-        )
-        if msg not in items:
-            items.append(msg)
+        if not any(
+            "certificado tls" in v.lower() and any(f in v.lower() for f in ("expira em", "expirando", "expirado há"))
+            for v in items
+        ):
+            days = result.tls.days_remaining
+            items.append(
+                f"Certificado TLS expirado há {-days} dias" if days < 0 else f"Certificado TLS expira em {days} dias"
+            )
     return items
 
 
@@ -93,7 +103,7 @@ def build_slack_payload(
     result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
     """Constrói payload Slack (Block Kit + Attachments coloridos)."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         color = "#ef4444"
         status_label = f"🔴 OFFLINE ({result.status_code or 'ERR'})"
@@ -216,7 +226,7 @@ def build_teams_payload(
     result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
     """Constrói payload Microsoft Teams no formato MessageCard com sections e facts."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         theme_color = "EF4444"
         status_label = f"OFFLINE ({result.status_code or 'ERR'})"
@@ -272,7 +282,7 @@ def build_telegram_payload(
     event: str | None = None,
 ) -> dict[str, Any]:
     """Constrói payload para a API de Bots do Telegram."""
-    all_violations = _collect_violations(result, violations)
+    all_violations = _collect_violations(result, violations, event)
     if not result.is_up:
         badge = "🔴 OFFLINE"
     elif all_violations:

@@ -4,6 +4,7 @@ import shutil
 from collections import deque
 import hashlib
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -580,7 +581,48 @@ _HOSTNAME_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
 _PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
 
 
+EXTRAS_CACHE_TTL = 300.0
+EXTRAS_MAX_CONCURRENCY = 8
+_extras_cache: dict[tuple[str, int], tuple[float, list[bytes], bool | None]] = {}
+_extras_sem: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def clear_extras_cache() -> None:
+    global _extras_sem
+    _extras_cache.clear()
+    _extras_sem = None
+
+
+def _get_extras_semaphore() -> asyncio.Semaphore:
+    global _extras_sem
+    loop = asyncio.get_running_loop()
+    if _extras_sem is None or _extras_sem[0] is not loop:
+        _extras_sem = (loop, asyncio.Semaphore(EXTRAS_MAX_CONCURRENCY))
+    return _extras_sem[1]
+
+
 async def fetch_tls_extras(
+    ip: str, port: int, server_hostname: str, timeout: float = 4.0, expected_leaf: bytes | None = None
+) -> tuple[list[bytes], bool | None]:
+    """Com cache (5 min, por host:porta) e no máx. 8 `openssl s_client` simultâneos: sem isso, N alvos geravam
+    N forks + N handshakes extras a cada ciclo. `expected_leaf` (certificado da conexão atual) invalida o
+    cache quando o certificado foi renovado, para a cadeia/revogação nunca descreverem o certificado antigo."""
+    key = (server_hostname.lower(), port)
+    hit = _extras_cache.get(key)
+    if hit and time.monotonic() - hit[0] < EXTRAS_CACHE_TTL and (
+        expected_leaf is None or (hit[1] and hit[1][0] == expected_leaf)
+    ):
+        return hit[1], hit[2]
+    async with _get_extras_semaphore():
+        chain, stapled = await _fetch_tls_extras_uncached(ip, port, server_hostname, timeout)
+    if chain:
+        if len(_extras_cache) > 512:
+            _extras_cache.pop(next(iter(_extras_cache)))
+        _extras_cache[key] = (time.monotonic(), chain, stapled)
+    return chain, stapled
+
+
+async def _fetch_tls_extras_uncached(
     ip: str, port: int, server_hostname: str, timeout: float = 4.0
 ) -> tuple[list[bytes], bool | None]:
     """Obtém (cadeia DER enviada pelo servidor, OCSP grampeado?) via `openssl s_client`.
@@ -836,13 +878,34 @@ def parse_tls_certificate(
     )
 
 
-_SENSITIVE_COOKIE_RE = re.compile(
-    os.getenv(
-        "ANHANGA_SENSITIVE_COOKIE_REGEX",
-        r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|csrf|xsrf|identity|account)",
-    ),
-    re.I,
-)
+# csrf/xsrf ficam FORA de propósito: cookies de double-submit (csrftoken do Django, XSRF-TOKEN do Angular)
+# precisam ser legíveis por JS; exigir HttpOnly neles seria um falso positivo que penaliza o design correto.
+_DEFAULT_SENSITIVE_COOKIE_PATTERN = r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|identity|account)"
+
+
+def _compile_sensitive_cookie_regex(custom: str | None) -> "re.Pattern[str]":
+    """Regex do operador inválida não pode derrubar a importação do módulo (e a app inteira): cai no padrão."""
+    if custom:
+        try:
+            return re.compile(custom, re.I)
+        except re.error as exc:
+            logging.getLogger("anhanga").error(
+                f"ANHANGA_SENSITIVE_COOKIE_REGEX inválida ({exc}); usando o padrão."
+            )
+    return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I)
+
+
+_CUSTOM_COOKIE_REGEX = os.getenv("ANHANGA_SENSITIVE_COOKIE_REGEX")
+_SENSITIVE_COOKIE_RE = _compile_sensitive_cookie_regex(_CUSTOM_COOKIE_REGEX)
+_CSRF_COOKIE_RE = re.compile(r"csrf|xsrf", re.I)
+
+
+def _is_sensitive_cookie(name: str) -> bool:
+    """Cookie de sessão/autenticação. No padrão, cookies CSRF de double-submit ficam de fora mesmo casando
+    com `token` (csrftoken, XSRF-TOKEN): precisam ser legíveis por JS. Regex do operador vale como escrita."""
+    if not _SENSITIVE_COOKIE_RE.search(name):
+        return False
+    return bool(_CUSTOM_COOKIE_REGEX) or not _CSRF_COOKIE_RE.search(name)
 
 
 def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditItem]:
@@ -871,7 +934,7 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
             issues.append("Ausência da flag Secure")
         # HttpOnly só é exigido de cookies de sessão/autenticação; analytics/preferências
         # (ex.: _octo, _ga) precisam ser legíveis por JS e não são falha.
-        sensitive = bool(_SENSITIVE_COOKIE_RE.search(cookie_name))
+        sensitive = _is_sensitive_cookie(cookie_name)
         if sensitive and not httponly:
             issues.append("Ausência da flag HttpOnly (cookie de sessão/autenticação)")
         if not samesite:

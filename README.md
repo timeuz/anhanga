@@ -423,3 +423,17 @@ porque suítes 1.3 não são selecionáveis por exclusão em Python; (2) **RC4/3
 local, então um alvo que as aceite (ex.: `example.com` aceita 3DES em TLS 1.0) não as mostra e não dispara o achado de
 cifra fraca. `legacy_ciphers_untested=true` avisa que a ausência delas não prova nada. Para testá-las de verdade,
 use o `testssl.sh` ao lado.
+
+## 🔁 Correções da revisão da `main` (lote A)
+
+- **CSP com várias políticas:** são conjuntivas. Uma política **sem** `script-src`/`default-src` não restringe scripts,
+  então não esconde o `'unsafe-inline'` de outra (antes, o par virava "strong" com nota cheia). `object-src` e `base-uri`
+  continuam neutralizados por qualquer política que os restrinja.
+- **Amostras 2..N:** se uma amostra quente falhar (conexão keep-alive resetada, timeout), a 1ª amostra já obtida é
+  mantida, as seguintes são interrompidas e o fato fica em `timings.timing_notes`. O alvo só é OFFLINE se a 1ª falhar.
+- **Enumeração TLS:** só alerta de versão (`protocol_version`...) e alerta de "sem cifra em comum" provam recusa; SNI
+  não reconhecido, certificado de cliente exigido, erro interno etc. deixam a versão como `unknown`.
+- **`.env`:** é carregado quando o pacote `anhanga` é importado, antes de qualquer módulo que leia variáveis na
+  importação (`ANHANGA_SENSITIVE_COOKIE_REGEX` no `.env` era ignorada).
+- **`anhanga serve` sem `--workers`:** instância única. Cada worker rodaria o loop de monitoramento, e uma queda geraria
+  um alerta por worker. Também não use `uvicorn anhanga.main:app --workers N` nem `WEB_CONCURRENCY` > 1.

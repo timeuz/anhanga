@@ -522,9 +522,6 @@ def _docs_enabled() -> bool:
     return os.getenv("ANHANGA_DOCS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-from anhanga.envfile import load_dotenv  # noqa: E402
-
-load_dotenv()  # .env local (variáveis já definidas no ambiente têm precedência); antes de ler ANHANGA_DOCS/CHAVE
 _DOCS = _docs_enabled()
 app = FastAPI(
     title="Anhangá",

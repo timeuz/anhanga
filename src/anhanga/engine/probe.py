@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import ipaddress
 import math
+import multiprocessing
 import re
 import socket
 import ssl
@@ -17,6 +19,7 @@ from httpcore._backends.base import AsyncNetworkBackend, AsyncNetworkStream, SOC
 from collections import deque
 import os
 
+from anhanga import __version__
 from anhanga.engine.models import (
     ContentAssertionsResult,
     PhasePercentiles,
@@ -32,6 +35,7 @@ from anhanga.engine.security import (
     audit_cors_active,
     audit_http_security,
     check_tls10_11_accepted_async,
+    fetch_tls_extras,
     is_ssrf_safe,
     parse_tls_certificate,
 )
@@ -205,16 +209,43 @@ async def _check_port_80(
     host: str,
     allow_private: bool = False,
     timeout: float = 1.5,
+    ip: str | None = None,
 ) -> str:
-    """Verifica se a porta 80 (HTTP) redireciona apropriadamente para HTTPS."""
-    test_url = f"http://{host}/"
+    """Verifica a porta 80 e se ela redireciona para HTTPS, distinguindo a causa de cada falha."""
+    target_ip = ip or host
+    if not is_ssrf_safe(target_ip, allow_private):
+        return "Porta 80 não verificada (IP bloqueado pela política Anti-SSRF)"
+
+    # 1. Conectividade TCP: distingue recusada (fechada) de timeout (filtrada) e reset.
+    writer = None
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, 80), timeout)
+    except asyncio.TimeoutError:
+        return "Porta 80 sem resposta (timeout; possível filtro de firewall/egress)"
+    except ConnectionRefusedError:
+        return "Porta 80 fechada (conexão recusada)"
+    except ConnectionResetError:
+        return "Porta 80 inacessível (conexão resetada)"
+    except OSError as err:
+        return f"Porta 80 inacessível ({err.strerror or type(err).__name__})"
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    # 2. Resposta HTTP, conectando ao IP já validado (sem nova resolução DNS).
+    backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)
+    backend.pinned_ips[host.lower()] = target_ip
+    transport = _create_instrumented_transport(backend, verify=True, http2=False)
     try:
         async with httpx.AsyncClient(
+            transport=transport,
             follow_redirects=False,
             timeout=timeout,
-            headers={"User-Agent": "Anhanga-Probe/0.3 (+https://github.com/timeuz/anhanga)"},
+            headers={"User-Agent": f"Anhanga-Probe/{__version__} (+https://github.com/timeuz/anhanga)"},
         ) as c:
-            resp = await c.get(test_url)
+            resp = await c.get(f"http://{host}/")
             if resp.status_code in (301, 302, 307, 308):
                 loc = resp.headers.get("location", "").strip()
                 if loc.lower().startswith("https://"):
@@ -223,11 +254,50 @@ async def _check_port_80(
             if 200 <= resp.status_code < 400:
                 return f"{resp.status_code} Sem Redirecionamento HTTPS (Inseguro)"
             return f"HTTP {resp.status_code}"
-    except Exception:
-        return "Porta 80 Inacessível / Fechada"
+    except httpx.TimeoutException:
+        return "Porta 80 aberta, mas o HTTP não respondeu a tempo"
+    except Exception as err:  # noqa: BLE001
+        return f"Porta 80 aberta, mas a requisição HTTP falhou ({type(err).__name__})"
 
 
-def _evaluate_content_assertions(
+MAX_REGEX_LENGTH: int = 512
+REGEX_TIMEOUT_SECONDS: float = 2.0
+
+
+def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
+    """Executa re.search em subprocesso descartável com timeout rígido (anti-ReDoS).
+
+    Retorna ("ok", bool) | ("invalid", msg) | ("timeout", None).
+    """
+    if len(pattern) > MAX_REGEX_LENGTH:
+        return "invalid", f"padrão excede {MAX_REGEX_LENGTH} caracteres"
+    from anhanga.engine import _regex_worker
+
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_regex_worker.run, args=(child, pattern, text), daemon=True)
+    proc.start()
+    child.close()
+    try:
+        if parent.poll(REGEX_TIMEOUT_SECONDS):
+            return parent.recv()
+        return "timeout", None
+    except EOFError:
+        return "invalid", "worker encerrado inesperadamente"
+    finally:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(1.0)
+        parent.close()
+
+
+async def _regex_search(pattern: str, text: str) -> tuple[str, typing.Any]:
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _regex_search_isolated, pattern, text
+    )
+
+
+async def _evaluate_content_assertions(
     body_text: str,
     payload_bytes: int,
     final_url: str,
@@ -239,23 +309,23 @@ def _evaluate_content_assertions(
 ) -> ContentAssertionsResult:
     failures: list[str] = []
 
-    if fail_if_body_not_matches_regexp:
-        try:
-            if not re.search(fail_if_body_not_matches_regexp, body_text):
-                failures.append(
-                    f"Corpo não contém o padrão esperado: '{fail_if_body_not_matches_regexp}'"
-                )
-        except re.error as err:
-            failures.append(f"Regexp inválida em fail_if_body_not_matches_regexp: {err}")
-
-    if fail_if_body_matches_regexp:
-        try:
-            if re.search(fail_if_body_matches_regexp, body_text):
-                failures.append(
-                    f"Corpo contém o padrão proibido: '{fail_if_body_matches_regexp}'"
-                )
-        except re.error as err:
-            failures.append(f"Regexp inválida em fail_if_body_matches_regexp: {err}")
+    for field, pattern, must_match in (
+        ("fail_if_body_not_matches_regexp", fail_if_body_not_matches_regexp, True),
+        ("fail_if_body_matches_regexp", fail_if_body_matches_regexp, False),
+    ):
+        if not pattern:
+            continue
+        status, value = await _regex_search(pattern, body_text)
+        if status == "invalid":
+            failures.append(f"Regexp inválida em {field}: {value}")
+        elif status == "timeout":
+            failures.append(
+                f"Regexp em {field} abortada após {REGEX_TIMEOUT_SECONDS:.0f}s (custo exponencial / ReDoS)"
+            )
+        elif must_match and not value:
+            failures.append(f"Corpo não contém o padrão esperado: '{pattern}'")
+        elif not must_match and value:
+            failures.append(f"Corpo contém o padrão proibido: '{pattern}'")
 
     if min_payload_bytes is not None and payload_bytes < min_payload_bytes:
         failures.append(
@@ -416,10 +486,12 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         round(statistics.mean(warm_totals), 2) if warm_totals else None
     )
 
+    # DNS/TCP/TLS só existem em conexões novas: amostras reaproveitadas (0 ms) distorceriam a mediana.
+    cold_samples = [s for s in raw_samples if not s.connection_reused] or raw_samples[:1]
     phase_series: dict[str, list[float]] = {
-        "dns": [s.timings.dns_ms for s in raw_samples],
-        "tcp": [s.timings.tcp_ms for s in raw_samples],
-        "tls": [s.timings.tls_ms for s in raw_samples],
+        "dns": [s.timings.dns_ms for s in cold_samples],
+        "tcp": [s.timings.tcp_ms for s in cold_samples],
+        "tls": [s.timings.tls_ms for s in cold_samples],
         "ttfb": [s.timings.ttfb_ms for s in raw_samples],
         "transfer": [s.timings.transfer_ms for s in raw_samples],
         "total": totals,
@@ -456,6 +528,10 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         p99_valid=p99_valid,
         sample_size_notice=sample_size_notice,
         phase_stats=phase_stats,
+        phase_stats_note=(
+            f"DNS/TCP/TLS calculados apenas sobre as {len(cold_samples)} amostra(s) com conexão nova; "
+            "TTFB, transferência e total usam todas."
+        ),
         raw_samples=raw_samples,
     )
 
@@ -547,10 +623,11 @@ async def _run_probe_session(
     min_payload_bytes: int | None = None,
     max_payload_bytes: int | None = None,
     assert_final_url: str | None = None,
+    tls_validation_error: str | None = None,
 ) -> ProbeResult:
     backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)
     transport = _create_instrumented_transport(backend, verify=verify_ssl, http2=True)
-    headers = {"User-Agent": "Anhanga-Probe/0.3 (+https://github.com/timeuz/anhanga)"}
+    headers = {"User-Agent": f"Anhanga-Probe/{__version__} (+https://github.com/timeuz/anhanga)"}
 
     redirect_chain: list[RedirectHop] = []
     origin_conn_timings: dict[tuple[str, str, int], tuple[float, float, float]] = {}
@@ -647,7 +724,7 @@ async def _run_probe_session(
                     redirect_hops=len(redirect_chain),
                     redirect_chain=redirect_chain,
                     timings=last_dns_timings,
-                    error=f"Erro de DNS: {dns_exc}",
+                    error=_format_dns_error(dns_exc, host),
                 )
 
             resp, step_timings, conn_reused, p_bytes, p_trunc, p_body = (
@@ -714,6 +791,7 @@ async def _run_probe_session(
                         status_code=resp.status_code,
                         location=raw_location,
                         protocol=resp.http_version,
+                        insecure=(scheme == "http"),
                         timings=step_timings,
                     )
                 )
@@ -721,7 +799,10 @@ async def _run_probe_session(
                 continue
 
             # Chegou na resposta final!
+            final_actual_total_ms = step_timings.total_ms
+            inherited_setup = False
             if conn_reused and origin_key in origin_conn_timings:
+                inherited_setup = True
                 o_dns, o_tcp, o_tls = origin_conn_timings[origin_key]
                 step_timings = build_timing_breakdown(
                     dns_ms=o_dns,
@@ -741,6 +822,9 @@ async def _run_probe_session(
 
         assert final_resp is not None
 
+        end_to_end_ms = round(
+            sum(h.timings.total_ms for h in redirect_chain) + final_actual_total_ms, 2
+        )
         raw_samples: list[SampleMeasurement] = [
             SampleMeasurement(
                 sample_index=1,
@@ -760,6 +844,12 @@ async def _run_probe_session(
                 max_body_bytes=max_body_bytes,
                 reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
             )
+            if s_reused:
+                # Conexão reaproveitada: TCP=0, então o RTT vem da conexão fria (senão o TTFB inteiro viraria "servidor")
+                s_timings.estimated_rtt_ms = final_timings.estimated_rtt_ms
+                s_timings.server_processing_ms = max(
+                    0.0, round(s_timings.ttfb_ms - final_timings.estimated_rtt_ms, 2)
+                )
             raw_samples.append(
                 SampleMeasurement(
                     sample_index=sample_idx,
@@ -767,6 +857,28 @@ async def _run_probe_session(
                     status_code=s_resp.status_code,
                     timings=s_timings,
                 )
+            )
+
+        # Tempo de processamento do servidor: só a partir de TTFB confiável.
+        warm_ttfbs = sorted(s.timings.ttfb_ms for s in raw_samples[1:] if s.connection_reused)
+        if warm_ttfbs:
+            final_timings.server_processing_ms = max(
+                0.0,
+                round(_percentile(warm_ttfbs, 50.0) - final_timings.estimated_rtt_ms, 2),
+            )
+            final_timings.timing_notes.append(
+                "Processamento do servidor estimado pela mediana do TTFB das amostras quentes menos o RTT."
+            )
+        elif final_resp.http_version in ("HTTP/2", "h2"):
+            final_timings.server_processing_ms = None
+            final_timings.timing_notes.append(
+                "TTFB frio em HTTP/2 pode incluir ~1 RTT extra (o servidor aguarda o ACK de SETTINGS): "
+                "use samples ≥ 2 para estimar o processamento do servidor."
+            )
+        if inherited_setup:
+            final_timings.timing_notes.append(
+                "DNS/TCP/TLS herdados da conexão aberta em hop anterior (reaproveitada); "
+                f"tempo total incluindo redirects: {end_to_end_ms} ms."
             )
 
         sampling_stats = _build_sampling_stats(raw_samples)
@@ -793,22 +905,34 @@ async def _run_probe_session(
                     timeout=min(0.8, timeout * 0.25),
                 )
 
+            # Cadeia/OCSP via openssl (o módulo ssl não os expõe) e porta 80, em paralelo.
+            (chain_der, ocsp_stapled), http_port_80_status = await asyncio.gather(
+                fetch_tls_extras(
+                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout)
+                ),
+                _check_port_80(
+                    final_host,
+                    allow_private=allow_private,
+                    timeout=min(timeout, 2.0),
+                    ip=target_ip_for_tls,
+                ),
+            )
+
             if ssl_obj is not None:
                 tls_info = parse_tls_certificate(
                     ssl_obj,
-                    verified=(verify_ssl or allow_private),
+                    verified=verify_ssl,
                     tls10_11_accepted=legacy_tls_accepted,
+                    chain_der=chain_der,
+                    ocsp_stapled=ocsp_stapled,
+                    validation_error=tls_validation_error,
                 )
             else:
                 tls_info = TLSInspection(
                     valid=False,
+                    validation_error=tls_validation_error or "handshake TLS sem objeto SSL",
                     tls10_11_accepted=legacy_tls_accepted,
                 )
-
-            # Sonda automática de porta 80 (HTTP) para checar redirecionamento obrigatório
-            http_port_80_status = await _check_port_80(
-                final_host, allow_private=allow_private, timeout=min(timeout, 2.0)
-            )
 
         # Sonda ativa de CORS enviando Origin hostil
         cors_result = await audit_cors_active(
@@ -816,12 +940,16 @@ async def _run_probe_session(
         )
 
         sec_audit = audit_http_security(
-            final_resp.headers, is_https, tls_info, cors_audit=cors_result
+            final_resp.headers,
+            is_https,
+            tls_info,
+            cors_audit=cors_result,
+            evaluated_url=str(final_resp.url),
         )
 
         # Avaliação de Asserções de Conteúdo
         body_text = final_body_bytes.decode("utf-8", errors="replace")
-        assertions_res = _evaluate_content_assertions(
+        assertions_res = await _evaluate_content_assertions(
             body_text=body_text,
             payload_bytes=final_payload_bytes,
             final_url=str(final_resp.url),
@@ -875,8 +1003,40 @@ async def _run_probe_session(
             http3_alt_svc=http3_alt_svc,
             compression=compression,
             history_ms=[s.timings.total_ms for s in raw_samples],
+            end_to_end_ms=end_to_end_ms,
             error=err_msg,
         )
+
+
+def _format_dns_error(exc: BaseException, host: str) -> str:
+    """Mensagem de DNS consistente (mesmo formato e causa explícita) para qualquer falha de resolução."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return f"Erro de DNS: tempo esgotado ao resolver '{host}'"
+    if isinstance(exc, socket.gaierror):
+        code = exc.errno
+        if code in (socket.EAI_NONAME, getattr(socket, "EAI_NODATA", None)):
+            return f"Erro de DNS: o domínio '{host}' não existe ou não possui registros (NXDOMAIN)"
+        if code == socket.EAI_AGAIN:
+            return f"Erro de DNS: falha temporária do resolvedor ao consultar '{host}'"
+        return f"Erro de DNS: não foi possível resolver '{host}' ({exc.strerror or exc})"
+    return f"Erro de DNS: não foi possível resolver '{host}' ({exc})"
+
+
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
+
+
+def _validate_hostname_syntax(host: str) -> str | None:
+    """Valida a sintaxe do host (IP literal ou nome DNS). Retorna a mensagem de erro, se houver."""
+    candidate = host.strip("[]").split("%", 1)[0]
+    with contextlib.suppress(ValueError):
+        ipaddress.ip_address(candidate)
+        return None
+    name = host.rstrip(".")
+    if not name or len(name) > 253:
+        return "URL inválida: hostname vazio ou longo demais."
+    if not all(_HOST_LABEL_RE.match(label) for label in name.split(".")):
+        return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
+    return None
 
 
 def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
@@ -938,6 +1098,13 @@ async def execute_probe(
         return ProbeResult(
             target_url=url, error="URL inválida: hostname não encontrado."
         )
+    try:
+        _ = parsed.port
+    except ValueError:
+        return ProbeResult(target_url=url, error="URL inválida: porta fora do intervalo 1-65535.")
+    host_err = _validate_hostname_syntax(parsed.hostname)
+    if host_err:
+        return ProbeResult(target_url=url, error=host_err)
 
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
@@ -980,6 +1147,10 @@ async def execute_probe(
             or "SSLCertVerificationError" in exc_str
         )
         if is_ssl_verify_err:
+            reason_match = re.search(r"certificate verify failed:\s*([^(]+?)\s*(?:\(|$)", exc_str)
+            verify_reason = (
+                reason_match.group(1).strip() if reason_match else "falha na verificação do certificado"
+            )
             try:
                 return await asyncio.wait_for(
                     _run_probe_session(
@@ -989,6 +1160,7 @@ async def execute_probe(
                         samples=samples,
                         max_body_bytes=max_body_bytes,
                         verify_ssl=False,
+                        tls_validation_error=verify_reason,
                         resolve_override=resolve_override,
                         fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
                         fail_if_body_matches_regexp=fail_if_body_matches_regexp,

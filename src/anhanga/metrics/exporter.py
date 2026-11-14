@@ -133,6 +133,13 @@ PROBE_TLS_EXPIRY_DAYS = Gauge(
     registry=REGISTRY,
 )
 
+PROBE_TLS_VALID = Gauge(
+    "anhanga_probe_tls_valid",
+    "1 se a cadeia/hostname/validade do certificado TLS foram validados com sucesso",
+    ["target"],
+    registry=REGISTRY,
+)
+
 PROBE_SECURITY_SCORE = Gauge(
     "anhanga_probe_security_score",
     "Pontuação de auditoria de headers de segurança DevSecOps (0 a 100)",
@@ -199,12 +206,45 @@ def _resolve_instance_label(result: ProbeResult, instance: str | None = None) ->
     return result.resolved_ip or result.target_url
 
 
+def _remove_series(gauge: Gauge, target: str) -> None:
+    """Remove as séries de um Gauge para o alvo (evita séries obsoletas e valores 0 falsos)."""
+    try:
+        idx = list(gauge._labelnames).index("target")  # noqa: SLF001
+        for key in [k for k in list(gauge._metrics) if k[idx] == target]:  # noqa: SLF001
+            gauge.remove(*key)
+    except (ValueError, KeyError, AttributeError):
+        pass
+
+
+def _clear_measurements(target: str) -> None:
+    """Alvo sem resposta: não existe latência, status, nota nem TLS a reportar (e 0 seria mentira)."""
+    for g in (
+        BLACKBOX_PROBE_DURATION_SECONDS, BLACKBOX_PROBE_HTTP_DURATION_SECONDS,
+        BLACKBOX_PROBE_HTTP_STATUS_CODE, BLACKBOX_PROBE_HTTP_REDIRECTS, BLACKBOX_PROBE_HTTP_SSL,
+        BLACKBOX_PROBE_SSL_EARLIEST_CERT_EXPIRY, BLACKBOX_PROBE_HTTP_VERSION,
+        PROBE_STATUS_CODE, PROBE_REDIRECTS, PROBE_DURATION_SECONDS, PROBE_LATENCY_QUANTILE_SECONDS,
+        PROBE_JITTER_SECONDS, PROBE_CONNECTION_COLD_SECONDS, PROBE_CONNECTION_WARM_SECONDS,
+        PROBE_TLS_EXPIRY_DAYS, PROBE_TLS_VALID, PROBE_SECURITY_SCORE,
+        PROBE_SERVER_PROCESSING_SECONDS, PROBE_ESTIMATED_RTT_SECONDS,
+    ):
+        _remove_series(g, target)
+
+
 def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> None:
     """Atualiza os Gauges e Counters do Prometheus (padrão blackbox_exporter + série estendida Anhangá)."""
     target = result.target_url
     inst = _resolve_instance_label(result, instance)
     status_label = "success" if result.is_up else "failure"
     up_val = 1 if result.is_up else 0
+    # probe_success segue a semântica do blackbox: certificado inválido = falha.
+    success_val = 1 if result.health == "up" else 0
+
+    if result.status_code is None:
+        BLACKBOX_PROBE_SUCCESS.labels(target=target, instance=inst).set(0)
+        PROBE_EXECUTIONS_TOTAL.labels(target=target, result=status_label).inc()
+        PROBE_UP.labels(target=target).set(0)
+        _clear_measurements(target)
+        return
 
     dns_s = round(result.timings.dns_ms / 1000.0, 6)
     tcp_s = round(result.timings.tcp_ms / 1000.0, 6)
@@ -214,7 +254,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     total_s = round(result.timings.total_ms / 1000.0, 6)
 
     # 1. Série compatível com blackbox_exporter
-    BLACKBOX_PROBE_SUCCESS.labels(target=target, instance=inst).set(up_val)
+    BLACKBOX_PROBE_SUCCESS.labels(target=target, instance=inst).set(success_val)
     BLACKBOX_PROBE_DURATION_SECONDS.labels(target=target, instance=inst).set(total_s)
 
     blackbox_phases = {
@@ -262,6 +302,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_REDIRECTS.labels(target=target).set(result.redirect_hops)
 
     if result.status_code:
+        _remove_series(PROBE_STATUS_CODE, target)  # http_version pode mudar entre ciclos
         http_ver = result.http_version or "unknown"
         PROBE_STATUS_CODE.labels(target=target, http_version=http_ver).set(
             result.status_code
@@ -325,7 +366,12 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_CONNECTION_WARM_SECONDS.labels(target=target).set(round(warm_ms / 1000.0, 6))
 
     # Métricas de Certificado TLS
-    if result.tls and result.tls.valid and result.tls.days_remaining is not None:
+    _remove_series(PROBE_TLS_EXPIRY_DAYS, target)
+    _remove_series(PROBE_TLS_VALID, target)
+    if result.tls is not None:
+        PROBE_TLS_VALID.labels(target=target).set(1 if result.tls.valid else 0)
+    # Dias restantes são exportados mesmo com certificado inválido (negativo = expirado) para permitir alertas
+    if result.tls and result.tls.days_remaining is not None:
         PROBE_TLS_EXPIRY_DAYS.labels(
             target=target,
             issuer=result.tls.issuer or "Unknown",
@@ -333,14 +379,18 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         ).set(result.tls.days_remaining)
 
     # Métricas de Auditoria de Segurança
+    _remove_series(PROBE_SECURITY_SCORE, target)  # o label grade muda entre ciclos
     PROBE_SECURITY_SCORE.labels(target=target, grade=result.security.grade).set(
         result.security.score
     )
 
     # Física de Rede e Processamento de Servidor (TTFB - RTT)
-    PROBE_SERVER_PROCESSING_SECONDS.labels(target=target).set(
-        round(result.timings.server_processing_ms / 1000.0, 6)
-    )
+    if result.timings.server_processing_ms is None:
+        _remove_series(PROBE_SERVER_PROCESSING_SECONDS, target)
+    else:
+        PROBE_SERVER_PROCESSING_SECONDS.labels(target=target).set(
+            round(result.timings.server_processing_ms / 1000.0, 6)
+        )
     PROBE_ESTIMATED_RTT_SECONDS.labels(target=target).set(
         round(result.timings.estimated_rtt_ms / 1000.0, 6)
     )
@@ -360,3 +410,34 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
 def render_prometheus_metrics() -> tuple[bytes, str]:
     """Gera o payload de texto plano no formato Prometheus."""
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST
+
+def render_adhoc_probe_metrics(result: ProbeResult) -> tuple[bytes, str]:
+    """Métricas estilo Blackbox de UMA sondagem avulsa, em registry descartável.
+
+    Nunca toca o REGISTRY global: alvos arbitrários não criam séries permanentes (anti-cardinalidade).
+    """
+    reg = CollectorRegistry()
+
+    def gauge(name: str, doc: str, value: float, labels: dict[str, str] | None = None) -> None:
+        g = Gauge(name, doc, list(labels or {}), registry=reg)
+        (g.labels(**labels) if labels else g).set(value)
+
+    t = result.timings
+    gauge("probe_success", "1 se a sondagem foi bem-sucedida (HTTP ok e TLS válido)", 1.0 if result.health == "up" else 0.0)
+    if result.status_code is None:
+        return generate_latest(reg), CONTENT_TYPE_LATEST
+    gauge("probe_duration_seconds", "Duração total da sondagem", round(t.total_ms / 1000.0, 6))
+    gauge("probe_http_status_code", "Código HTTP final", float(result.status_code or 0))
+    gauge("probe_http_redirects", "Quantidade de redirecionamentos", float(result.redirect_hops))
+    gauge("probe_http_ssl", "1 se a conexão final usou TLS válido", 1.0 if (result.tls and result.tls.valid) else 0.0)
+    phases = {
+        "resolve": t.dns_ms,
+        "connect": t.tcp_ms,
+        "tls": t.tls_ms,
+        "processing": t.ttfb_ms,
+        "transfer": t.transfer_ms,
+    }
+    g = Gauge("probe_http_duration_seconds", "Duração por fase", ["phase"], registry=reg)
+    for phase, ms in phases.items():
+        g.labels(phase=phase).set(round(ms / 1000.0, 6))
+    return generate_latest(reg), CONTENT_TYPE_LATEST

@@ -39,6 +39,8 @@ from anhanga.engine.models import (
     build_timing_breakdown,
 )
 from anhanga.engine.tlsenum import enumerate_tls_bounded
+
+logger = logging.getLogger("anhanga.probe")
 from anhanga.engine.security import (
     audit_cors_active,
     audit_http_security,
@@ -350,7 +352,7 @@ async def _evaluate_content_assertions(
         if status == "unavailable":
             # Falha do monitor, não do alvo: registra como "não avaliado" (visível) sem reprovar a asserção,
             # senão um problema de fork/arquivo derrubaria e alertaria TODOS os alvos com regex ao mesmo tempo.
-            logging.getLogger("anhanga.probe").warning(
+            logger.warning(
                 "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
             )
             not_evaluated.append(
@@ -876,15 +878,23 @@ async def _run_probe_session(
         ]
 
         # 2. Amostras adicionais (2..samples) reutilizando a mesma conexão Keep-Alive
+        extra_sample_failure: str | None = None
         for sample_idx in range(2, max(1, samples) + 1):
-            s_resp, s_timings, s_reused, _, _, _ = await _execute_single_http_step(
-                client=client,
-                backend=backend,
-                url=current_url,
-                dns_ms=0.0,
-                max_body_bytes=max_body_bytes,
-                reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
-            )
+            try:
+                s_resp, s_timings, s_reused, _, _, _ = await _execute_single_http_step(
+                    client=client,
+                    backend=backend,
+                    url=current_url,
+                    dns_ms=0.0,
+                    max_body_bytes=max_body_bytes,
+                    reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A 1ª amostra já provou que o alvo responde: uma conexão keep-alive fechada/resetada ou o timeout de
+                # uma amostra quente não pode descartá-la nem marcar o alvo como OFFLINE. Encerra as amostras aqui.
+                extra_sample_failure = f"Amostra {sample_idx} falhou ({type(exc).__name__}); amostras restantes interrompidas."
+                logger.warning("amostra %d de %s falhou: %s", sample_idx, current_url, exc)
+                break
             if s_reused:
                 # Conexão reaproveitada: TCP=0, então o RTT vem da conexão fria (senão o TTFB inteiro viraria "servidor")
                 s_timings.estimated_rtt_ms = final_timings.estimated_rtt_ms
@@ -899,6 +909,9 @@ async def _run_probe_session(
                     timings=s_timings,
                 )
             )
+
+        if extra_sample_failure:
+            final_timings.timing_notes.append(extra_sample_failure)
 
         # Tempo de processamento do servidor: só a partir de TTFB confiável.
         warm_ttfbs = sorted(s.timings.ttfb_ms for s in raw_samples[1:] if s.connection_reused)

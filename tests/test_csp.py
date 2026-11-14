@@ -122,3 +122,45 @@ def test_weak_csp_cannot_reach_top_grade():
     a = _audit({**perfect, "Content-Security-Policy": STRICT})
     b = _audit({**perfect, "Content-Security-Policy": "default-src 'self' 'unsafe-inline'; frame-ancestors 'self'"})
     assert a.score > b.score
+
+
+# ---- revisão da main: política sem script-src não neutraliza a fraqueza de scripts de outra ---------------------------------------
+WEAK_SCRIPTS = "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+
+
+def test_a_policy_without_script_src_does_not_hide_unsafe_inline_from_another():
+    both = analyze_csp(f"{WEAK_SCRIPTS}, frame-ancestors 'self'", None)
+    assert "csp-unsafe-inline" in {i.id for i in both.issues}
+    assert both.strength == "weak", "nota inflada: duas políticas viravam 'strong'"
+    assert both.strength == analyze_csp(WEAK_SCRIPTS, None).strength
+
+
+def test_order_of_policies_does_not_matter():
+    a = analyze_csp(f"{WEAK_SCRIPTS}, frame-ancestors 'self'", None)
+    b = analyze_csp(f"frame-ancestors 'self', {WEAK_SCRIPTS}", None)
+    assert {i.id for i in a.issues} == {i.id for i in b.issues} and a.strength == b.strength == "weak"
+
+
+def test_only_policies_defining_scripts_count_for_script_weaknesses():
+    tight = "script-src 'self'; object-src 'none'; base-uri 'self'"
+    got = ids(f"{WEAK_SCRIPTS}, frame-ancestors 'self', {tight}")
+    assert "csp-unsafe-inline" not in got and "csp-no-script-src" not in got  # a política restrita neutraliza
+
+
+def test_no_policy_defining_scripts_keeps_the_missing_script_src_issue():
+    got = ids("frame-ancestors 'self', object-src 'none'")
+    assert "csp-no-script-src" in got
+
+
+def test_object_src_and_base_uri_are_still_neutralised_by_any_policy():
+    only_scripts = "script-src 'self'"
+    covers_rest = "object-src 'none'; base-uri 'none'"
+    got = ids(f"{only_scripts}, {covers_rest}")
+    assert "csp-object-src" not in got and "csp-base-uri" not in got
+
+
+def test_script_weakness_requires_every_script_defining_policy_to_have_it():
+    a = "script-src 'self' 'unsafe-inline' *; object-src 'none'; base-uri 'self'"
+    b = "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+    got = ids(f"{a}, {b}")
+    assert "csp-unsafe-inline" in got and "csp-wildcard" not in got  # '*' bloqueado por b

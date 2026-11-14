@@ -343,7 +343,10 @@ async def send_webhook_alert(
     if not raw_url:
         raise ValueError("URL de webhook vazia.")
 
-    parsed = urlparse(raw_url)
+    try:
+        parsed = urlparse(raw_url)
+    except ValueError as exc:
+        raise ValueError(f"URL de webhook malformada: {exc}") from exc
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
         raise SSRFBlockedError(

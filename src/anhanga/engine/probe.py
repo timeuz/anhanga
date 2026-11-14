@@ -38,6 +38,7 @@ from anhanga.engine.models import (
     TLSInspection,
     build_timing_breakdown,
 )
+from anhanga.engine.config import safe_urlparse
 from anhanga.engine.tlsenum import enumerate_tls_bounded
 
 logger = logging.getLogger("anhanga.probe")
@@ -1247,7 +1248,9 @@ async def execute_probe(
     if scheme_err:
         return ProbeResult(target_url=raw_url.strip() or raw_url, error=scheme_err)
 
-    parsed = urlparse(url)
+    parsed = safe_urlparse(url)
+    if parsed is None:
+        return ProbeResult(target_url=url, error="URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar).")
     if parsed.scheme.lower() not in ALLOWED_SCHEMES:
         return ProbeResult(
             target_url=url,

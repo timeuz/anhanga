@@ -128,7 +128,7 @@ def test_invalid_operator_regex_does_not_break_import():
     import sys
 
     out = subprocess.run(
-        [sys.executable, "-c", "import anhanga.engine.security as s; print(bool(s._SENSITIVE_COOKIE_RE.search('sessionid')))"],
+        [sys.executable, "-c", "import anhanga.engine.security as s; print(s._is_sensitive_cookie('sessionid'))"],
         env={**os.environ, "ANHANGA_SENSITIVE_COOKIE_REGEX": "([unclosed"}, capture_output=True, text=True, timeout=60,
     )
     assert out.returncode == 0, out.stderr[-400:]

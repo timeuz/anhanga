@@ -1039,10 +1039,12 @@ async def _run_probe_session(
         is_up = (200 <= final_resp.status_code < 400) and assertions_res.passed
 
         # Detecção de Falha em Modo Comum
+        # Houve resposta HTTP: 5xx ou asserção reprovada são falhas da APLICAÇÃO, não do resolvedor/rede da sonda.
+        # Só a latência de DNS conta aqui; as falhas reais de DNS/timeout/conexão entram em `_flag_connectivity_failure`.
         cmf_warning = _check_common_mode_failure(
             current_host=final_parsed.hostname or "",
             dns_ms=final_timings.dns_ms,
-            has_error=not is_up,
+            has_error=False,
         )
 
         # Suporte a protocolos modernos e compressão
@@ -1231,7 +1233,28 @@ def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
     return f"https://{url}", None
 
 
-async def execute_probe(
+_CONNECTIVITY_ERROR_CODES = frozenset({"dns_error", "timeout", "connect_error"})
+
+
+def _flag_connectivity_failure(result: ProbeResult) -> ProbeResult:
+    """Falha de DNS/timeout/conexão (sem resposta do alvo) alimenta a heurística de falha em modo comum:
+    é exatamente o que um resolvedor ou uma saída de rede quebrados produzem em vários alvos ao mesmo tempo."""
+    if result.error_code in _CONNECTIVITY_ERROR_CODES and MONITORED_PROBE.get():
+        parsed = safe_urlparse(result.final_url or result.target_url)
+        host = (parsed.hostname if parsed else None) or ""
+        if host:
+            warning = _check_common_mode_failure(current_host=host, dns_ms=0.0, has_error=True)
+            if warning and not result.common_mode_failure_warning:
+                result.common_mode_failure_warning = warning
+    return result
+
+
+async def execute_probe(*args: typing.Any, **kwargs: typing.Any) -> ProbeResult:
+    """Sondagem completa de uma URL (ver `_execute_probe_inner`); sinaliza falha em modo comum de conectividade."""
+    return _flag_connectivity_failure(await _execute_probe_inner(*args, **kwargs))
+
+
+async def _execute_probe_inner(
     raw_url: str,
     timeout: float = 5.0,
     allow_private: bool = False,

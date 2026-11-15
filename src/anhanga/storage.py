@@ -353,7 +353,7 @@ class Store:
             self._conn.execute("DELETE FROM incidents WHERE ended_ts IS NOT NULL AND ended_ts < ?", (cutoff,))
             self._conn.execute("DELETE FROM outbox WHERE created_ts < ?", (now - OUTBOX_MAX_AGE_SECONDS,))
             if self.path != ":memory:":
-                self._conn.execute("PRAGMA incremental_vacuum")
+                self._conn.execute("PRAGMA incremental_vacuum").fetchall()  # consumir: cada linha lida libera uma página
                 self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return n
 
@@ -362,7 +362,7 @@ def backup_database(src: str, dest: str, force: bool = False) -> Path:
     """Cópia consistente do banco (API de backup do SQLite: segura com o servidor rodando e com WAL).
 
     O destino é gravado num arquivo temporário (0600) e só então renomeado; nunca sobrescreve sem `force`."""
-    src_path, dest_path = Path(src), Path(dest)
+    src_path, dest_path = Path(src).expanduser(), Path(dest).expanduser()
     if not src_path.is_file():
         raise FileNotFoundError(f"banco não encontrado: {src_path}")
     if dest_path.exists() and not force:
@@ -373,7 +373,7 @@ def backup_database(src: str, dest: str, force: bool = False) -> Path:
     tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)
-    source = sqlite3.connect(f"file:{src_path.resolve()}?mode=ro", uri=True)
+    source = sqlite3.connect(f"{src_path.resolve().as_uri()}?mode=ro", uri=True)  # as_uri escapa ?, # e %
     target = sqlite3.connect(tmp)
     try:
         source.backup(target)

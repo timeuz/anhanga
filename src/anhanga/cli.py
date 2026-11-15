@@ -8,6 +8,7 @@ import sys
 from typing import Any, NoReturn
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -35,19 +36,9 @@ def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = 
     """Identifica se o erro foi bloqueio Anti-SSRF, falha de DNS ou URL inválida (exit code 2)."""
     if not error_msg:
         return False
-    lower = error_msg.lower()
-    if error_code in ("ssrf_blocked", "dns_error", "invalid_url"):
-        return True
-    return any(
-        token in lower
-        for token in (
-            "anti-ssrf",
-            "erro de dns",
-            "url inválida",
-            "esquema",
-            "hostname não encontrado",
-        )
-    )
+    # Só o `error_code` estruturado decide: o texto pode embutir o padrão de uma asserção do usuário
+    # (ex.: "Erro de DNS") e não pode virar "erro de execução" (exit 3).
+    return error_code in ("ssrf_blocked", "dns_error", "invalid_url")
 
 
 def evaluate_probe_gates(
@@ -300,7 +291,7 @@ def _revocation_text(tls: Any) -> str:
     labels = {"good": "não revogado", "revoked": "[bold red]REVOGADO[/bold red]", "unknown": "desconhecido pelo respondedor",
               "unavailable": "não verificável", "error": "falha na checagem"}
     method = f" ({rev.method.upper()})" if rev.method and rev.status != "unavailable" else ""
-    return labels.get(rev.status, rev.status) + method
+    return labels.get(rev.status, escape(str(rev.status))) + method
 
 
 def _protocols_text(tls: Any) -> str | None:
@@ -333,12 +324,12 @@ def render_rich_report(
     if result.health == "up":
         status_badge = f"[bold green]ONLINE (HTTP {result.status_code})[/bold green]"
     elif result.health == "degraded":
-        tls_reason = (result.tls.validation_error if result.tls else None) or "TLS inválido"
+        tls_reason = escape((result.tls.validation_error if result.tls else None) or "TLS inválido")
         status_badge = (
             f"[bold yellow]DEGRADADO (HTTP {result.status_code}, TLS inválido: {tls_reason})[/bold yellow]"
         )
     else:
-        status_badge = f"[bold red]OFFLINE ({result.error or result.status_code or 'ERR'})[/bold red]"
+        status_badge = f"[bold red]OFFLINE ({escape(str(result.error or result.status_code or 'ERR'))})[/bold red]"
     grade = result.security.grade
     grade_color = (
         "green"
@@ -348,8 +339,8 @@ def render_rich_report(
 
     header_text = Text.from_markup(
         f"[bold orange1]🔥 ANHANGÁ — AUDITORIA SRE & DEVSECOPS[/bold orange1]\n"
-        f"Alvo: [bold cyan]{result.target_url}[/bold cyan]  |  "
-        f"IP: [bold]{result.resolved_ip or 'N/A'}[/bold]  |  "
+        f"Alvo: [bold cyan]{escape(result.target_url)}[/bold cyan]  |  "
+        f"IP: [bold]{escape(result.resolved_ip or 'N/A')}[/bold]  |  "
         f"Status: {status_badge}  |  "
         f"Nota: [bold {grade_color}]{grade} ({result.security.score}/100)[/bold {grade_color}]"
     )
@@ -433,7 +424,7 @@ def render_rich_report(
     if result.common_mode_failure_warning:
         console.print(
             Panel(
-                f"[bold red]⚠️ FALHA DE MODO COMUM DETECTADA:[/bold red] {result.common_mode_failure_warning}",
+                f"[bold red]⚠️ FALHA DE MODO COMUM DETECTADA:[/bold red] {escape(result.common_mode_failure_warning)}",
                 border_style="red",
             )
         )
@@ -446,21 +437,21 @@ def render_rich_report(
             else "[bold red]INVÁLIDO[/bold red]"
         )
         port80_info = (
-            f"  |  Porta 80 (HTTP→HTTPS): [bold]{result.http_port_80_status or 'N/A'}[/bold]"
+            f"  |  Porta 80 (HTTP→HTTPS): [bold]{escape(result.http_port_80_status or 'N/A')}[/bold]"
             if result.http_port_80_status
             else ""
         )
         console.print(
             Panel(
-                f"Certificado: {tls_valid_str}  |  Protocolo: [bold]{result.tls.protocol or 'N/A'}[/bold]  |  "
-                f"Cifra: [bold]{result.tls.cipher or 'N/A'}[/bold]{port80_info}\n"
-                f"Emissor: {result.tls.issuer or 'N/A'}  |  "
+                f"Certificado: {tls_valid_str}  |  Protocolo: [bold]{escape(result.tls.protocol or 'N/A')}[/bold]  |  "
+                f"Cifra: [bold]{escape(result.tls.cipher or 'N/A')}[/bold]{port80_info}\n"
+                f"Emissor: {escape(result.tls.issuer or 'N/A')}  |  "
                 f"Dias Restantes: [bold]{result.tls.days_remaining if result.tls.days_remaining is not None else 'N/A'}[/bold] "
                 f"({'N/A' if result.tls.relative_validity_percent_remaining is None else format(result.tls.relative_validity_percent_remaining, '.1f')}% restante)  |  "
-                f"OCSP: {result.tls.ocsp_status}  |  "
+                f"OCSP: {escape(str(result.tls.ocsp_status))}  |  "
                 f"Revogação: {_revocation_text(result.tls)}"
                 + (f"\nProtocolos aceitos: {_protocols_text(result.tls)}" if _protocols_text(result.tls) else "")
-                + (f"\nMotivo da invalidez: {result.tls.validation_error}" if not result.tls.valid and result.tls.validation_error else ""),
+                + (f"\nMotivo da invalidez: {escape(result.tls.validation_error)}" if not result.tls.valid and result.tls.validation_error else ""),
                 title="Inspeção de Certificado TLS",
                 border_style="cyan",
             )
@@ -475,7 +466,7 @@ def render_rich_report(
             )
         )
     else:
-        v_lines = "\n".join(f"• [bold red]{v}[/bold red]" for v in violations)
+        v_lines = "\n".join(f"• [bold red]{escape(v)}[/bold red]" for v in violations)
         console.print(
             Panel(
                 f"[bold red]❌ FALHA NOS QUALITY GATES (Exit Code {exit_code})[/bold red]\n{v_lines}",

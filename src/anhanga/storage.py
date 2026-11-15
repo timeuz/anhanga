@@ -21,7 +21,7 @@ from typing import Any
 
 from anhanga.engine.models import ProbeResult
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 OUTBOX_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 600, 1800, 3600)  # após a n-ésima falha
 VACUUM_CHUNK_PAGES = 256  # ~1 MiB por bloco
 VACUUM_MAX_CHUNKS = 20  # por poda
@@ -79,6 +79,13 @@ _MIGRATIONS: dict[int, str] = {
         next_attempt_ts REAL NOT NULL
     );
     CREATE INDEX idx_outbox_due ON outbox (next_attempt_ts);
+    """,
+    2: """
+    CREATE TABLE managed_targets (
+        url TEXT PRIMARY KEY,
+        samples INTEGER NOT NULL DEFAULT 1,
+        created_ts REAL NOT NULL
+    );
     """,
 }
 
@@ -341,6 +348,28 @@ class Store:
                 (attempts, now + OUTBOX_BACKOFF_SECONDS[attempts], outbox_id),
             )
             return False
+
+    # ------------------------------------------------------------------ alvos gerenciados pela UI
+    def add_managed_target(self, url: str, samples: int, limit: int, now: float | None = None) -> str:
+        """'added' | 'exists' | 'limit'. O limite é checado na mesma instrução do INSERT (sem corrida)."""
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM managed_targets WHERE url = ?", (url,)).fetchone():
+                return "exists"
+            cur = self._conn.execute(
+                "INSERT INTO managed_targets (url, samples, created_ts) "
+                "SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM managed_targets) < ?",
+                (url, samples, now if now is not None else time.time(), limit),
+            )
+            return "added" if cur.rowcount else "limit"
+
+    def remove_managed_target(self, url: str) -> bool:
+        with self._lock:
+            return self._conn.execute("DELETE FROM managed_targets WHERE url = ?", (url,)).rowcount > 0
+
+    def list_managed_targets(self) -> list[tuple[str, int]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT url, samples FROM managed_targets ORDER BY created_ts, url").fetchall()
+        return [(r["url"], r["samples"]) for r in rows]
 
     def outbox_size(self) -> int:
         with self._lock:

@@ -227,6 +227,9 @@ class TLSInspection(BaseModel):
     protocol: str | None = None
     deprecated_protocol: bool = False
     tls10_11_accepted: bool = False
+    # True: a verificação de TLS 1.0/1.1 não foi concluída (etapa pulada por falta de prazo). "Não aceito" não está provado:
+    # a nota não concede o bônus de TLS moderno.
+    legacy_check_incomplete: bool = False
     enumeration: TLSEnumeration | None = None
     cipher: str | None = None
     cipher_bits: int | None = None

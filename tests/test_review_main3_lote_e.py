@@ -159,8 +159,12 @@ def test_slow_post_http_stages_degrade_to_a_partial_result_instead_of_a_false_ti
 
 
 def test_regex_assertion_skipped_for_lack_of_time_is_not_evaluated_not_failed(monkeypatch):
+    real_eval = P._evaluate_content_assertions
+
     async def slow_eval(*a, **k):
-        await asyncio.sleep(30)
+        if k.get("fail_if_body_not_matches_regexp") or k.get("fail_if_body_matches_regexp"):
+            await asyncio.sleep(30)  # só o regex (subprocesso) é lento
+        return await real_eval(*a, **k)
 
     monkeypatch.setattr(P, "_evaluate_content_assertions", slow_eval)
     monkeypatch.setattr(P, "_overall_timeout", lambda timeout, samples: 3.0)

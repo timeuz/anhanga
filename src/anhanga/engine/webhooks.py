@@ -87,6 +87,10 @@ def _collect_violations(
     return items
 
 
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def build_slack_payload(
     result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
@@ -130,7 +134,8 @@ def build_slack_payload(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Anhangá SRE & DevSecOps — {result.target_url}",
+                # `plain_text` de header: no máx. 150 caracteres (senão o Slack recusa o payload inteiro, 400 invalid_blocks)
+                "text": _clip(f"Anhangá SRE & DevSecOps — {result.target_url}", 150),
             },
         },
         {

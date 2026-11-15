@@ -497,3 +497,19 @@ use o `testssl.sh` ao lado.
 - **`max_payload_bytes`:** se a leitura foi truncada no teto (`max_body_bytes`) e o limite está acima dele, a asserção fica
   "não avaliada" (nunca aprovada em silêncio). Se mesmo o tamanho truncado já excede o limite, ela reprova.
 - **Backup:** `~` é expandido e caminhos com `?`, `#`, `%` funcionam.
+
+## 🔁 Correções da 4ª revisão da `main` (lote F)
+
+- **Orçamento das etapas pós-HTTP (refino):** cada etapa tem o **seu** prazo (cadeia TLS/OCSP, porta 80, enumeração, TLS legado,
+  revogação, CORS, regex); se uma estourar, as que já terminaram são mantidas. URL final e tamanho do payload são calculados
+  **antes** do regex, então uma falha definitiva (`assert_final_url`, `max_payload_bytes`) nunca se perde se o regex estourar.
+  Um `TimeoutError` próprio da etapa (socket, OCSP) é distinguido de "prazo da sondagem esgotado" em `timing_notes`.
+- **TLS legado não verificado:** se a verificação de TLS 1.0/1.1 foi pulada por falta de prazo, `tls.legacy_check_incomplete`
+  fica `true` e a nota **não concede o bônus de TLS moderno** (não verificado ≠ seguro).
+- **Webhooks:** o bloco de violações do Slack (≤ 3000 caracteres) e a mensagem do Telegram (≤ 4096, contando o HTML escapado)
+  são cortados por linha, com "… (+N omitidas)"; antes, muitas violações geravam 400 e o alerta se perdia.
+- **Recuperação de `tls_expiring`:** só é calada quando o certificado **expirou ou foi revogado** (a causa); renovar com
+  outro defeito (hostname, cadeia) continua anunciando "expirando: resolvido".
+- **IDN:** normalização IDNA 2008 do `httpx` (`faß.de` ≠ `fass.de`), trocando só o host (userinfo e porta intactos).
+- **SQLite:** `incremental_vacuum` em blocos de 256 páginas (até 20 por poda), sem segurar o lock por segundos.
+- **CLI:** `backup` trata `sqlite3.Error` (erro claro, sem traceback) e limpa o `.tmp`.

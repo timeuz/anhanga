@@ -1292,6 +1292,7 @@ def audit_http_security(
             tls.protocol in ("TLSv1.2", "TLSv1.3")
             and not tls.deprecated_protocol
             and not tls.tls10_11_accepted
+            and not tls.legacy_check_incomplete  # não verificado != seguro: sem bônus
         )
         if is_modern_tls:
             transport_score += 10

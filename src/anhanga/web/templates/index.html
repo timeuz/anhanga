@@ -587,8 +587,8 @@
                                     <div class="flex items-center justify-between">
                                         <span class="text-zinc-300" x-text="t('tlsLegacyCheck')">TLS 1.0 / 1.1 Legado:</span>
                                         <strong class="font-mono text-[11px] px-2 py-0.5 rounded border"
-                                                :class="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? 'bg-red-950/90 text-red-200 border-red-500/60' : 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60'"
-                                                x-text="(result.tls.tls10_11_accepted || result.tls.deprecated_protocol) ? t('tlsLegacyAccepted') : t('tlsLegacyBlocked')"></strong>
+                                                :class="legacyClass(result.tls)"
+                                                x-text="t(legacyKey(result.tls))"></strong>
                                     </div>
                                     <template x-if="result.tls.enumeration">
                                         <div class="space-y-1">
@@ -1204,6 +1204,7 @@
                 tlsLegacyCheck: 'TLS 1.0 / 1.1 Legado:',
                 tlsLegacyAccepted: 'Aceito (Risco)',
                 tlsLegacyBlocked: 'Bloqueado (Seguro)',
+                tlsLegacyUnverified: 'Não verificado',
                 tlsCertChain: 'Cadeia de Certificação (Hierarquia X.509)',
                 notAvailable: 'Não disponível',
                 tlsSansLabel: 'Nomes Alternativos (SANs)',
@@ -1350,6 +1351,7 @@
                 tlsLegacyCheck: 'Legacy TLS 1.0 / 1.1:',
                 tlsLegacyAccepted: 'Accepted (Risk)',
                 tlsLegacyBlocked: 'Blocked (Secure)',
+                tlsLegacyUnverified: 'Not verified',
                 tlsCertChain: 'Certificate Chain (X.509 Hierarchy)',
                 notAvailable: 'Not available',
                 tlsSansLabel: 'Subject Alternative Names (SANs)',
@@ -1747,6 +1749,17 @@
                     const st = { accepted: 'aceito', rejected: 'recusado', unknown: 'não foi possível testar', untestable: 'não testável (removido do OpenSSL moderno)' }[p.status];
                     const c = (p.ciphers || []).join(', ');
                     return st + (c ? ' | ' + c + (p.ciphers_complete === false ? ' …' : '') : '');
+                },
+                // TLS 1.0/1.1: aceito (risco) > não verificado (etapa pulada por falta de prazo) > bloqueado. Nunca "seguro" sem prova.
+                legacyKey(tls) {
+                    if (tls.tls10_11_accepted || tls.deprecated_protocol) return 'tlsLegacyAccepted';
+                    return tls.legacy_check_incomplete ? 'tlsLegacyUnverified' : 'tlsLegacyBlocked';
+                },
+                legacyClass(tls) {
+                    const k = this.legacyKey(tls);
+                    if (k === 'tlsLegacyAccepted') return 'bg-red-950/90 text-red-200 border-red-500/60';
+                    if (k === 'tlsLegacyUnverified') return 'bg-amber-950/90 text-amber-200 border-amber-500/60';
+                    return 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60';
                 },
                 weakCipherCount(tls) {
                     const e = tls && tls.enumeration;

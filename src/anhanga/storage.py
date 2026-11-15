@@ -357,11 +357,14 @@ class Store:
             self._conn.execute("DELETE FROM outbox WHERE created_ts < ?", (now - OUTBOX_MAX_AGE_SECONDS,))
             if self.path != ":memory:":
                 # Em blocos de 256 páginas (~1 MiB) e no máx. 20 por poda: não segura o lock do banco por segundos. O resto
-                # é liberado nas podas seguintes (a cada hora). `.fetchall()`: cada linha lida libera uma página.
-                for _ in range(VACUUM_MAX_CHUNKS):
+                # é liberado nas podas seguintes (a cada hora). `executescript`: no Python 3.11 `execute().fetchall()` libera só
+                # 1 página por chamada; executescript esgota o statement em qualquer versão (conexão em autocommit).
+                # `auto_vacuum` só é definido ao criar o banco: bancos antigos (NONE) nunca devolvem páginas por aqui.
+                incremental = self._conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+                for _ in range(VACUUM_MAX_CHUNKS if incremental else 0):
                     if self._conn.execute("PRAGMA freelist_count").fetchone()[0] == 0:
                         break
-                    self._conn.execute(f"PRAGMA incremental_vacuum({int(VACUUM_CHUNK_PAGES)})").fetchall()
+                    self._conn.executescript(f"PRAGMA incremental_vacuum({int(VACUUM_CHUNK_PAGES)})")
                 self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return n
 

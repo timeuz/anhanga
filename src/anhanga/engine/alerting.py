@@ -159,9 +159,12 @@ class AlertManager:
             if st.active:
                 st.clear_streak += 1
                 if st.clear_streak >= self.policy.recovery_threshold:
-                    recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
                     closed.append(key)
                     del state.problems[key]
+                    # "Expirando" que some porque o certificado EXPIROU (ou foi revogado) não é recuperação: o problema
+                    # escalou para `degraded`. Fecha o estado, mas sem a mensagem verde de "resolvido".
+                    if not (key == "tls_expiring" and "degraded" in problems):
+                        recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
             else:
                 del state.problems[key]  # problema que nunca chegou a alertar: some em silêncio
 

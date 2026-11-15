@@ -513,3 +513,16 @@ use o `testssl.sh` ao lado.
 - **IDN:** normalização IDNA 2008 do `httpx` (`faß.de` ≠ `fass.de`), trocando só o host (userinfo e porta intactos).
 - **SQLite:** `incremental_vacuum` em blocos de 256 páginas (até 20 por poda), sem segurar o lock por segundos.
 - **CLI:** `backup` trata `sqlite3.Error` (erro claro, sem traceback) e limpa o `.tmp`.
+
+## 🔁 Revisão do diff do lote F (lote G)
+
+- **Telegram/Slack:** o limite de caracteres é medido no texto **já escapado** (aspas, `<` e `&` multiplicam o texto por 4 a 6) e a
+  **1ª violação sempre entra**, encolhida até caber, mesmo com URL enorme. Entidades HTML nunca são cortadas no meio.
+- **"Expirando: resolvido":** só é anunciado quando o certificado deixou de estar prestes a expirar (renovação de verdade). O mesmo
+  certificado, ainda quase expirando mas falhando por cadeia/hostname, não gera mensagem de resolvido.
+- **TLS 1.0/1.1 "não verificado":** além de etapa pulada por prazo, vale quando a enumeração termina com TLS 1.0 ou 1.1 em
+  `unknown` (timeout, erro de rede). A interface mostra **"Não verificado"** (âmbar) em vez de "Bloqueado (Seguro)", e a nota
+  não concede o bônus de TLS moderno.
+- **SQLite:** o `incremental_vacuum` só roda em bancos criados com `auto_vacuum=INCREMENTAL`; bancos antigos não pagam 20 PRAGMAs vazios por poda.
+- **Baixos conhecidos (sem correção):** a mesclagem manual de `ContentAssertionsResult` no `probe.py` é frágil a campos novos; `_idna_url`
+  descarta a porta `0` e marcadores `?`/`#` vazios; a folga de 50 ms que distingue "prazo esgotado" de "timeout da etapa" é uma heurística.

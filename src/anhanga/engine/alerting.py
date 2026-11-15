@@ -61,12 +61,13 @@ class _TargetState:
 
 
 def _cert_escalated(result: ProbeResult) -> bool:
-    """O certificado "expirando" agora está EXPIRADO ou REVOGADO: o problema piorou (não foi resolvido).
-    Decidido pela causa real; uma renovação com outro defeito (hostname, cadeia) continua sendo uma recuperação."""
+    """O problema "certificado expirando" NÃO foi resolvido: o certificado continua prestes a expirar (ou até já expirou
+    ou foi revogado), mesmo que agora também falhe por outro motivo (cadeia, hostname). Decidido pelo certificado, não
+    pela presença de `degraded`. Só uma renovação de verdade (sem `alert_expiring`) é anunciada como resolvida."""
     tls = result.tls
     if tls is None:
         return False
-    if tls.days_remaining is not None and tls.days_remaining <= 0:
+    if tls.alert_expiring or (tls.days_remaining is not None and tls.days_remaining <= 0):
         return True
     return bool(tls.revocation is not None and tls.revocation.status == "revoked")
 

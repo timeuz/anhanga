@@ -1,4 +1,5 @@
 import html
+import typing
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -91,18 +92,31 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _fit_violations(violations: list[str], limit: int, per_item: int = 500) -> list[str]:
-    """Cabe as violações no limite do canal (Slack: 3000 por bloco de texto; Telegram: 4096 por mensagem), cortando
-    cada linha e omitindo as últimas com um aviso. Um payload acima do limite é recusado inteiro (400) e o alerta se perde."""
+def _fit_violations(
+    violations: list[str], limit: int, per_item: int = 500, render: "typing.Callable[[str], str] | None" = None
+) -> list[str]:
+    """Cabe as violações no limite do canal (Slack: 3000 por bloco de texto; Telegram: 4096 por mensagem).
+
+    O tamanho é medido no texto JÁ RENDERIZADO (`render`: marcador + escape HTML, que pode multiplicar o texto por 4 a 6),
+    cada linha é cortada em `per_item` e as últimas são omitidas com "… (+N omitidas)". A 1ª violação sempre entra (encolhida
+    até caber): um alerta sem nenhum motivo é pior que um motivo cortado. Cortar o texto BRUTO, antes de renderizar, evita
+    partir uma entidade HTML no meio (`&#x27`)."""
+    render = render or (lambda v: v)
     out: list[str] = []
     used = 0
+    reserve = 60  # para a linha "… (+N omitidas)"
     for i, v in enumerate(violations):
-        line = _clip(str(v), per_item)
-        if used + len(line) + 3 > limit - 40:  # 40: folga para a linha "… (+N omitidas)"
-            out.append(f"… (+{len(violations) - i} omitidas)")
+        raw = _clip(str(v), per_item)
+        line = render(raw)
+        if i == 0:
+            while len(line) + 1 > max(limit - reserve, 80) and len(raw) > 40:
+                raw = _clip(raw, max(40, len(raw) // 2))
+                line = render(raw)
+        elif used + len(line) + 1 > limit - reserve:
+            out.append(render(f"… (+{len(violations) - i} omitidas)"))
             break
         out.append(line)
-        used += len(line) + 3
+        used += len(line) + 1
     return out
 
 
@@ -139,7 +153,7 @@ def build_slack_payload(
     )
 
     violations_text = (
-        "\n".join(f"• {v}" for v in _fit_violations(all_violations, 2800))
+        "\n".join(_fit_violations(all_violations, 2800, render=lambda v: f"• {v}"))
         if all_violations
         else "Nenhuma violação detectada."
     )
@@ -302,8 +316,8 @@ def build_telegram_payload(
     elif event == "reminder":
         badge += " — LEMBRETE"
 
-    tls_str = html.escape(_format_tls_status(result))
-    target_url_escaped = html.escape(str(result.target_url))
+    tls_str = html.escape(_clip(_format_tls_status(result), 300))
+    target_url_escaped = html.escape(_clip(str(result.target_url), 400))
     http_ver_escaped = html.escape(str(result.http_version or "N/A"))
     grade_escaped = html.escape(_grade_text(result))
 
@@ -318,10 +332,9 @@ def build_telegram_payload(
     ]
     if all_violations:
         lines.append("<b>Violações:</b>")
-        # cortar ANTES de escapar (html.escape aumenta o texto) e dentro do limite de 4096 da mensagem
-        budget = 3900 - len("\n".join(lines))
-        for v in _fit_violations(all_violations, max(200, budget // 2), per_item=300):
-            lines.append(f"• {html.escape(v)}")
+        # orçamento = 4096 menos o já usado; cada violação é medida DEPOIS de escapada (aspas e < & expandem 4-6x)
+        budget = 4000 - len("\n".join(lines))
+        lines.extend(_fit_violations(all_violations, budget, per_item=300, render=lambda v: f"• {html.escape(v)}"))
 
     return {
         "chat_id": chat_id or "",

@@ -100,6 +100,7 @@ class MonitorConfig:
     storage: StorageSpec = field(default_factory=StorageSpec)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    default_rules: SLORules = field(default_factory=SLORules)  # slo/min_grade de topo: valem também para alvos da UI
     load_failed: bool = False  # arquivo ilegível/YAML inválido/raiz não-mapa: não é uma config "vazia" legítima
 
 
@@ -220,6 +221,14 @@ def _valid_target_url(raw_url: str) -> str | None:
     return _validate_hostname_syntax(parsed.hostname)
 
 
+def target_key(url: str) -> str:
+    """Chave de identidade de um alvo (URL normalizada, esquema e host em minúsculas): decide duplicatas."""
+    from anhanga.engine.probe import _normalize_and_validate_scheme
+
+    norm = urlparse(_normalize_and_validate_scheme(url)[0])
+    return norm._replace(scheme=norm.scheme.lower(), netloc=norm.netloc.lower()).geturl()
+
+
 def parse_config(raw: Any) -> MonitorConfig:
     cfg = MonitorConfig()
     if raw is None:
@@ -242,6 +251,7 @@ def parse_config(raw: Any) -> MonitorConfig:
     )
     cfg.allow_private = _as_bool(raw.get("allow_private", False), "allow_private", False, cfg)
     base_rules = _parse_rules(raw, SLORules(), "config", cfg)
+    cfg.default_rules = base_rules
 
     # alerting
     alerting = raw.get("alerting")
@@ -308,8 +318,7 @@ def parse_config(raw: Any) -> MonitorConfig:
         # Duplicata é decidida pela URL normalizada (é a chave de métricas, alertas e histórico).
         from anhanga.engine.probe import _normalize_and_validate_scheme
 
-        norm = urlparse(_normalize_and_validate_scheme(url)[0])
-        key = norm._replace(scheme=norm.scheme.lower(), netloc=norm.netloc.lower()).geturl()
+        key = target_key(url)
         if key in seen:
             cfg.warnings.append(f"{where}: alvo duplicado '{url}' ignorado (mesmo alvo que '{key}').")
             continue

@@ -17,7 +17,16 @@ from pydantic import BaseModel, Field
 
 from anhanga import __version__
 from anhanga.engine.alerting import AlertEvent, AlertManager, Evaluation
-from anhanga.engine.config import MonitorConfig, WebhookSpec, find_config_path, load_config
+from anhanga.engine.config import (
+    MAX_SAMPLES,
+    MonitorConfig,
+    TargetSpec,
+    WebhookSpec,
+    _valid_target_url,
+    find_config_path,
+    load_config,
+    target_key,
+)
 from anhanga.engine.models import ProbeResult
 from anhanga.engine import revocation, tlsenum
 from anhanga.engine.probe import (
@@ -222,6 +231,29 @@ def _log_config_issues(cfg: MonitorConfig, path: Path | None) -> None:
 
 
 _STORE: Store | None = None
+MAX_MANAGED_TARGETS = 50  # alvos adicionados pela UI (os do targets.yaml não entram na conta)
+_MANAGED: list[TargetSpec] = []  # espelho dos alvos da UI (SQLite); atualizado a cada ciclo e a cada add/remove
+
+
+def _yaml_keys(cfg: MonitorConfig) -> set[str]:
+    return {target_key(t.url) for t in cfg.targets}
+
+
+def _all_targets(cfg: MonitorConfig) -> list[TargetSpec]:
+    """Alvos do targets.yaml + alvos da UI. O YAML vence em duplicata."""
+    yaml_keys = _yaml_keys(cfg)
+    return cfg.targets + [t for t in _MANAGED if target_key(t.url) not in yaml_keys]
+
+
+def _db_exists(path: str) -> bool:
+    return path != ":memory:" and Path(path).expanduser().is_file()
+
+
+async def _refresh_managed(cfg: MonitorConfig) -> None:
+    rows = await _store_call(Store.list_managed_targets, _STORE) if _STORE is not None else []
+    if rows is None:  # erro de leitura: mantém o que já se sabia
+        return
+    _MANAGED[:] = [TargetSpec(url=u, samples=n, allow_private=False, rules=cfg.default_rules) for u, n in rows]
 _OUTBOX_RUNNING = False
 _LAST_PRUNE = 0.0
 PRUNE_INTERVAL_SECONDS = 3600.0
@@ -388,7 +420,7 @@ def _persist_batch(store: Store, items: list[tuple[ProbeResult, Evaluation, list
 async def _open_store(cfg: MonitorConfig, manager: AlertManager) -> None:
     """Abre a persistência (só quando há alvos monitorados) e repovoa sparkline e estado de alertas."""
     global _STORE
-    if _STORE is not None or not cfg.storage.enabled or not cfg.targets:
+    if _STORE is not None or not cfg.storage.enabled or (not cfg.targets and not _db_exists(cfg.storage.path)):
         return
     try:
         store = await asyncio.to_thread(Store, cfg.storage.path, cfg.storage.retention_days)
@@ -450,17 +482,19 @@ async def background_guardian_loop():
                     manager.policy = cfg.policy
 
             await _open_store(cfg, manager)
+            await _refresh_managed(cfg)
+            targets = _all_targets(cfg)
 
-            if cfg.targets:
+            if targets:
                 results = await asyncio.gather(
                     *(
                         _monitored_probe(t.url, allow_private=t.allow_private, samples=t.samples)
-                        for t in cfg.targets
+                        for t in targets
                     ),
                     return_exceptions=True,
                 )
                 batch: list[tuple[ProbeResult, Evaluation, list[dict]]] = []
-                for spec, res in zip(cfg.targets, results):
+                for spec, res in zip(targets, results):
                     if not isinstance(res, ProbeResult):
                         logger.error(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}")
                         continue
@@ -477,7 +511,7 @@ async def background_guardian_loop():
                     await _store_call(_persist_batch, _STORE, batch, time.time())
 
             # Alvos removidos da config somem do dashboard, das métricas, do estado de alertas e dos incidentes abertos.
-            expected = {_normalize_and_validate_scheme(t.url)[0] for t in cfg.targets}
+            expected = {_normalize_and_validate_scheme(t.url)[0] for t in targets}
             for stale in [k for k in STATE_CACHE if k not in expected]:
                 STATE_CACHE.pop(stale, None)
                 HISTORY_CACHE.pop(stale, None)
@@ -667,6 +701,88 @@ def _require_store() -> Store:
             detail="Persistência indisponível (desabilitada, sem alvos configurados ou falha ao abrir o banco).",
         )
     return _STORE
+
+
+class ManagedTargetIn(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2048, description="URL ou hostname a monitorar")
+    samples: int = Field(1, ge=1, le=MAX_SAMPLES)
+
+
+async def _store_for_managed_targets() -> Store:
+    """Store para gravar alvos da UI; cria o banco só se ele ainda não existe (senão o loop de vigilância o abre
+    e restaura o estado de alertas)."""
+    global _STORE
+    if _STORE is not None:
+        return _STORE
+    cfg = _current_config()
+    if not cfg.storage.enabled:
+        raise HTTPException(status_code=503, detail="Persistência desabilitada: alvos pela UI exigem 'storage.enabled'.")
+    if _db_exists(cfg.storage.path):
+        raise HTTPException(status_code=503, detail="Persistência ainda inicializando; tente novamente em instantes.")
+    try:
+        _STORE = await asyncio.to_thread(Store, cfg.storage.path, cfg.storage.retention_days)
+    except Exception as exc:  # noqa: BLE001
+        STORAGE_ERRORS_TOTAL.inc()
+        raise HTTPException(status_code=503, detail=f"Não foi possível abrir o banco: {exc}") from exc
+    return _STORE
+
+
+@app.get("/api/v1/targets/managed", tags=["Diagnostics"])
+async def list_managed_targets():
+    """Alvos adicionados pela UI (removíveis). Os do targets.yaml não aparecem aqui."""
+    return {"limit": MAX_MANAGED_TARGETS, "targets": [{"url": t.url, "samples": t.samples} for t in _MANAGED]}
+
+
+@app.post("/api/v1/targets/managed", status_code=201, tags=["Diagnostics"])
+async def add_managed_target(request: Request, body: ManagedTargetIn):
+    """Adiciona um alvo fixo de monitoramento (persistido no SQLite). Sempre com anti-SSRF (sem allow_private)."""
+    _enforce_rate_limit(request, cost=body.samples)
+    raw = body.url.strip()
+    err = _valid_target_url(raw)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    key = target_key(raw)
+    if key in _yaml_keys(_current_config()):
+        raise HTTPException(status_code=409, detail="Alvo já definido no targets.yaml.")
+    if any(target_key(t.url) == key for t in _MANAGED):
+        raise HTTPException(status_code=409, detail="Alvo já monitorado.")
+    store = await _store_for_managed_targets()
+    url = _normalize_and_validate_scheme(raw)[0]
+    result = await _monitored_probe(url, allow_private=False, samples=body.samples)
+    if result.error_code in ("ssrf_blocked", "invalid_url"):
+        _raise_for_unreachable(result)  # alvo proibido nunca é gravado
+    status = await _store_call(store.add_managed_target, url, body.samples, MAX_MANAGED_TARGETS)
+    if status is None:
+        raise HTTPException(status_code=503, detail="Falha ao gravar o alvo.")
+    if status == "exists":
+        raise HTTPException(status_code=409, detail="Alvo já monitorado.")
+    if status == "limit":
+        raise HTTPException(status_code=409, detail=f"Limite de {MAX_MANAGED_TARGETS} alvos adicionados pela UI atingido.")
+    _MANAGED.append(TargetSpec(url=url, samples=body.samples, allow_private=False, rules=_current_config().default_rules))
+    _update_state_and_history(result, is_continuous=True)
+    record_probe_metrics(result)
+    return {"url": url, "samples": body.samples}
+
+
+@app.delete("/api/v1/targets/managed", tags=["Diagnostics"])
+async def remove_managed_target(request: Request, url: str = Query(..., min_length=1, max_length=2048)):
+    """Remove um alvo adicionado pela UI. Alvos do targets.yaml só se removem editando o arquivo."""
+    _enforce_rate_limit(request)
+    err = _valid_target_url(url.strip())
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    key = target_key(url.strip())
+    if key in _yaml_keys(_current_config()):
+        raise HTTPException(status_code=409, detail="Alvo definido no targets.yaml: remova-o editando o arquivo.")
+    store = _require_store()
+    stored = next((u for u, _ in (await _store_call(store.list_managed_targets) or []) if target_key(u) == key), None)
+    if stored is None or not await _store_call(store.remove_managed_target, stored):
+        raise HTTPException(status_code=404, detail="Alvo não encontrado entre os adicionados pela UI.")
+    _MANAGED[:] = [t for t in _MANAGED if target_key(t.url) != key]
+    STATE_CACHE.pop(stored, None)
+    HISTORY_CACHE.pop(stored, None)
+    forget_target(stored)
+    return {"removed": stored}
 
 
 @app.get("/api/v1/history", tags=["Persistence"])

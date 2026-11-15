@@ -59,7 +59,7 @@ uvicorn anhanga.main:app --reload --host 127.0.0.1 --port 7890
 ```
 
 - **Dashboard Web Interativo (PT-BR / EN):** `http://127.0.0.1:7890`
-  - Permite executar inspeções sob demanda, simular correções no Runbook, comparar re-escaneamentos e exportar relatórios em **Link Permanente**, **JSON** e **Markdown**.
+  - Permite executar inspeções sob demanda, simular correções no Runbook, comparar re-escaneamentos e exportar relatórios em **Link da Análise** (copiável), **JSON** e **Markdown**.
 - **Documentação OpenAPI / Swagger:** `http://127.0.0.1:7890/docs`
 - **Healthcheck (Kubernetes Liveness/Readiness):** `http://127.0.0.1:7890/healthz`
 

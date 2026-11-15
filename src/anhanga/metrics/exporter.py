@@ -377,16 +377,6 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         if (has_samples or result.sampling.p50_ms > 0)
         else result.timings.total_ms
     )
-    p95_ms = (
-        result.sampling.p95_ms
-        if (has_samples or result.sampling.p95_ms > 0)
-        else result.timings.total_ms
-    )
-    p99_ms = (
-        result.sampling.p99_ms
-        if (has_samples or result.sampling.p99_ms > 0)
-        else result.timings.total_ms
-    )
     cold_ms = (
         result.sampling.cold_total_ms
         if (has_samples or result.sampling.cold_total_ms > 0)
@@ -402,12 +392,19 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_LATENCY_QUANTILE_SECONDS.labels(target=target, quantile="0.5").set(
         round(p50_ms / 1000.0, 6)
     )
-    PROBE_LATENCY_QUANTILE_SECONDS.labels(target=target, quantile="0.95").set(
-        round(p95_ms / 1000.0, 6)
-    )
-    PROBE_LATENCY_QUANTILE_SECONDS.labels(target=target, quantile="0.99").set(
-        round(p99_ms / 1000.0, 6)
-    )
+    # P95/P99 só existem com amostras suficientes (n >= 20 / n >= 100, a mesma regra da UI e do CLI). Abaixo disso o
+    # "percentil" seria só o máximo do ciclo; a série é removida em vez de exportar um número sem significado.
+    # Para a cauda ao longo do tempo, use anhanga_probe_duration_seconds_histogram com histogram_quantile().
+    for quantile, valid, value_ms in (
+        ("0.95", bool(result.sampling and result.sampling.p95_valid), result.sampling.p95_ms if result.sampling else 0.0),
+        ("0.99", bool(result.sampling and result.sampling.p99_valid), result.sampling.p99_ms if result.sampling else 0.0),
+    ):
+        try:
+            PROBE_LATENCY_QUANTILE_SECONDS.remove(target, quantile)
+        except KeyError:
+            pass
+        if valid:
+            PROBE_LATENCY_QUANTILE_SECONDS.labels(target=target, quantile=quantile).set(round(value_ms / 1000.0, 6))
     PROBE_JITTER_SECONDS.labels(target=target).set(round(jitter_ms / 1000.0, 6))
     PROBE_CONNECTION_COLD_SECONDS.labels(target=target).set(round(cold_ms / 1000.0, 6))
     PROBE_CONNECTION_WARM_SECONDS.labels(target=target).set(round(warm_ms / 1000.0, 6))

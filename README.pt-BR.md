@@ -361,6 +361,11 @@ A cobertura de cifras foi verificada com o `testssl.sh` usando o OpenSSL embutid
 - **Instância única:** um worker e um processo; não há clusterização.
 - **Fora do primeiro lançamento:** auditoria de DNS e e-mail (CAA, SPF, DMARC, DNSSEC), refatoração do layout do dashboard e integração com o SSL Labs. Veja o `BACKLOG.md`.
 
+## A fazer
+
+- **Validar a entrega real de webhooks.** Os payloads de Slack, Microsoft Teams e Telegram são cobertos por testes contra mocks e limites de tamanho, mas uma mensagem real ainda não foi entregue a cada serviço de ponta a ponta.
+- Itens de prazo mais longo (auditoria de DNS e e-mail, refatoração do layout do dashboard, integração com o SSL Labs) estão no `BACKLOG.md`.
+
 ## Desenvolvimento
 
 ```bash

@@ -690,7 +690,12 @@ async def _bounded(
     try:
         return await asyncio.wait_for(factory(), timeout=remaining)
     except asyncio.TimeoutError:
-        skipped.append(label)
+        if time.monotonic() >= deadline - 0.05:
+            skipped.append(label)  # o prazo da sondagem acabou de fato
+        else:
+            # Timeout PRÓPRIO da etapa (socket/OCSP...) que vazou: não é falta de prazo, e a etapa não concluiu.
+            logger.warning("etapa '%s' levantou TimeoutError antes do prazo da sondagem", label)
+            skipped.append(f"{label} (timeout da própria etapa)")
         return default
 
 
@@ -993,28 +998,33 @@ async def _run_probe_session(
 
             # Cadeia/OCSP via openssl (o módulo ssl não os expõe), porta 80 e enumeração de
             # protocolos/cifras (em cache por 6 h), em paralelo.
-            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await _bounded(
-                lambda: asyncio.gather(
-                    fetch_tls_extras(
+            # Cada etapa tem o SEU prazo: se a cadeia TLS estourar, a porta 80 e a enumeração que já terminaram são mantidas.
+            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
+                _bounded(
+                    lambda: fetch_tls_extras(
                         target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
                         expected_leaf=_peer_leaf_der(ssl_obj),
                     ),
-                    _check_port_80(
+                    stage_deadline, ([], None), skipped_stages, "cadeia TLS/OCSP grampeado",
+                ),
+                _bounded(
+                    lambda: _check_port_80(
                         final_host,
                         allow_private=allow_private,
                         timeout=min(timeout, 2.0),
                         ip=target_ip_for_tls,
                     ),
-                    enumerate_tls_bounded(
+                    stage_deadline, "Porta 80 não verificada (prazo da sondagem esgotado)", skipped_stages, "porta 80",
+                ),
+                _bounded(
+                    lambda: enumerate_tls_bounded(
                         target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
                     ),
+                    stage_deadline, None, skipped_stages, "enumeração TLS",
                 ),
-                stage_deadline,
-                (([], None), "Porta 80 não verificada (prazo da sondagem esgotado)", None),
-                skipped_stages,
-                "cadeia TLS/porta 80/enumeração",
             )
 
+            legacy_unknown = False
             legacy_tls_accepted = bool(ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"))
             if tls_enum is not None:
                 legacy_tls_accepted = legacy_tls_accepted or any(
@@ -1022,15 +1032,19 @@ async def _run_probe_session(
                     for v in ("TLSv1", "TLSv1.1")
                 )
             elif not legacy_tls_accepted and target_ip_for_tls and final_host:
-                legacy_tls_accepted = await _bounded(
+                legacy_probe = await _bounded(
                     lambda: check_tls10_11_accepted_async(
                         ip=target_ip_for_tls,
                         server_hostname=final_host,
                         port=final_port,
                         timeout=min(0.8, timeout * 0.25),
                     ),
-                    stage_deadline, False, skipped_stages, "TLS 1.0/1.1 legado",
+                    stage_deadline, None, skipped_stages, "TLS 1.0/1.1 legado",
                 )
+                if legacy_probe is None:
+                    legacy_unknown = True  # não houve verificação: "não aceito" seria uma afirmação sem prova
+                else:
+                    legacy_tls_accepted = bool(legacy_probe)
 
             if ssl_obj is not None:
                 tls_info = parse_tls_certificate(
@@ -1042,6 +1056,7 @@ async def _run_probe_session(
                     validation_error=tls_validation_error,
                 )
                 tls_info.enumeration = tls_enum
+                tls_info.legacy_check_incomplete = legacy_unknown and not tls_info.tls10_11_accepted
             else:
                 tls_info = TLSInspection(
                     valid=False,
@@ -1082,31 +1097,44 @@ async def _run_probe_session(
 
         # Avaliação de Asserções de Conteúdo
         body_text = final_body_bytes.decode("utf-8", errors="replace")
-        has_regex = bool(fail_if_body_not_matches_regexp or fail_if_body_matches_regexp)
-        assertions_res = await _bounded(
-            lambda: _evaluate_content_assertions(
-                body_text=body_text,
-                payload_bytes=final_payload_bytes,
-                payload_truncated=final_payload_truncated,
-                final_url=str(final_resp.url),
-                fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
-                fail_if_body_matches_regexp=fail_if_body_matches_regexp,
-                min_payload_bytes=min_payload_bytes,
-                max_payload_bytes=max_payload_bytes,
-                assert_final_url=assert_final_url,
-            ),
-            stage_deadline if has_regex else None,  # só o regex (subprocesso) é lento; o resto é instantâneo
-            ContentAssertionsResult(
-                passed=True,
-                not_evaluated=["asserções de regex não avaliadas: prazo da sondagem esgotado antes da avaliação"],
-            ),
-            skipped_stages,
-            "asserções de regex",
+        # URL final e tamanho do payload são instantâneos: calculados SEMPRE e primeiro, para que uma falha definitiva
+        # nunca se perca se o regex (subprocesso lento) estourar o prazo.
+        assertions_res = await _evaluate_content_assertions(
+            body_text=body_text,
+            payload_bytes=final_payload_bytes,
+            payload_truncated=final_payload_truncated,
+            final_url=str(final_resp.url),
+            min_payload_bytes=min_payload_bytes,
+            max_payload_bytes=max_payload_bytes,
+            assert_final_url=assert_final_url,
         )
+        if fail_if_body_not_matches_regexp or fail_if_body_matches_regexp:
+            regex_res = await _bounded(
+                lambda: _evaluate_content_assertions(
+                    body_text=body_text,
+                    payload_bytes=final_payload_bytes,
+                    final_url=str(final_resp.url),
+                    fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+                    fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+                ),
+                stage_deadline,
+                ContentAssertionsResult(
+                    passed=True,
+                    not_evaluated=["asserções de regex não avaliadas: prazo da sondagem esgotado antes da avaliação"],
+                ),
+                skipped_stages,
+                "asserções de regex",
+            )
+            assertions_res = ContentAssertionsResult(
+                passed=assertions_res.passed and regex_res.passed,
+                failures=assertions_res.failures + regex_res.failures,
+                not_evaluated=assertions_res.not_evaluated + regex_res.not_evaluated,
+            )
 
         if skipped_stages:
             final_timings.timing_notes.append(
-                "Resultado parcial: etapas puladas por falta de prazo da sondagem: " + ", ".join(skipped_stages) + "."
+                "Resultado parcial: etapas não concluídas (prazo da sondagem ou timeout da própria etapa): "
+                + ", ".join(skipped_stages) + "."
             )
 
         is_up = (200 <= final_resp.status_code < 400) and assertions_res.passed
@@ -1185,10 +1213,10 @@ def _validate_hostname_syntax(host: str) -> str | None:
     name = host.rstrip(".")
     if not name or len(name) > 253:
         return "URL inválida: hostname vazio ou longo demais."
-    if not name.isascii():  # nome internacionalizado (münchen.de): valida a forma Punycode (IDNA)
+    if not name.isascii():  # nome internacionalizado (münchen.de): valida a forma Punycode (IDNA 2008, a do httpx)
         try:
-            name = name.encode("idna").decode("ascii")
-        except UnicodeError:
+            name = httpx.URL(f"http://{name}/").raw_host.decode("ascii")
+        except (httpx.InvalidURL, ValueError):
             return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
         if len(name) > 253:
             return "URL inválida: hostname vazio ou longo demais."
@@ -1288,10 +1316,15 @@ def _idna_url(url: str) -> str:
     if not host or host.isascii():
         return url
     try:
-        ascii_host = host.encode("idna").decode("ascii")
-    except UnicodeError:
+        ascii_host = httpx.URL(url).raw_host.decode("ascii")  # IDNA 2008 (UTS 46): `faß.de` NÃO vira `fass.de` (o codec idna do Python é 2003)
+        port = parsed.port
+    except (httpx.InvalidURL, ValueError):
         return url  # a validação de sintaxe do host recusa
-    return re.sub(re.escape(host), ascii_host, url, count=1, flags=re.IGNORECASE)
+    userinfo = parsed.netloc.rpartition("@")[0]  # só o host é trocado, nunca o userinfo
+    netloc = (userinfo + "@" if userinfo else "") + (f"[{ascii_host}]" if ":" in ascii_host else ascii_host)
+    if port:
+        netloc += f":{port}"
+    return parsed._replace(netloc=netloc).geturl()
 
 
 def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
@@ -1392,8 +1425,8 @@ async def _execute_probe_inner(
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
-    # Folga para o que roda após a sondagem HTTP (enumeração TLS ≤ 3 s em paralelo com openssl/porta 80,
-    # depois revogação ≤ 4 s): cada etapa tem prazo próprio e degrada sozinha, então o prazo global não a corta.
+    # Folga para o que roda após a sondagem HTTP. As etapas pós-HTTP têm orçamento combinado (`_bounded` até
+    # `stage_deadline`): se faltar prazo elas são puladas (resultado parcial) e a resposta HTTP já obtida é mantida.
     overall_timeout = _overall_timeout(timeout, samples)
 
     started = time.monotonic()

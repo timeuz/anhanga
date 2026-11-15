@@ -9,6 +9,7 @@ Segurança: o arquivo é criado com permissão 0600; a outbox guarda só um hash
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -22,6 +23,8 @@ from anhanga.engine.models import ProbeResult
 
 SCHEMA_VERSION = 1
 OUTBOX_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 600, 1800, 3600)  # após a n-ésima falha
+VACUUM_CHUNK_PAGES = 256  # ~1 MiB por bloco
+VACUUM_MAX_CHUNKS = 20  # por poda
 OUTBOX_MAX_AGE_SECONDS = 24 * 3600  # alerta velho demais deixa de ser útil
 
 _MIGRATIONS: dict[int, str] = {
@@ -353,7 +356,12 @@ class Store:
             self._conn.execute("DELETE FROM incidents WHERE ended_ts IS NOT NULL AND ended_ts < ?", (cutoff,))
             self._conn.execute("DELETE FROM outbox WHERE created_ts < ?", (now - OUTBOX_MAX_AGE_SECONDS,))
             if self.path != ":memory:":
-                self._conn.execute("PRAGMA incremental_vacuum").fetchall()  # consumir: cada linha lida libera uma página
+                # Em blocos de 256 páginas (~1 MiB) e no máx. 20 por poda: não segura o lock do banco por segundos. O resto
+                # é liberado nas podas seguintes (a cada hora). `.fetchall()`: cada linha lida libera uma página.
+                for _ in range(VACUUM_MAX_CHUNKS):
+                    if self._conn.execute("PRAGMA freelist_count").fetchone()[0] == 0:
+                        break
+                    self._conn.execute(f"PRAGMA incremental_vacuum({int(VACUUM_CHUNK_PAGES)})").fetchall()
                 self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return n
 
@@ -373,13 +381,17 @@ def backup_database(src: str, dest: str, force: bool = False) -> Path:
     tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)
-    source = sqlite3.connect(f"{src_path.resolve().as_uri()}?mode=ro", uri=True)  # as_uri escapa ?, # e %
-    target = sqlite3.connect(tmp)
+    source: sqlite3.Connection | None = None
+    target: sqlite3.Connection | None = None
     try:
+        source = sqlite3.connect(f"{src_path.resolve().as_uri()}?mode=ro", uri=True)  # as_uri escapa ?, # e %
+        target = sqlite3.connect(tmp)
         source.backup(target)
     except BaseException:
-        target.close()
-        source.close()
+        for conn in (target, source):
+            if conn is not None:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
         tmp.unlink(missing_ok=True)
         raise
     target.close()

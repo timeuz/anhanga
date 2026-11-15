@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 from pathlib import Path
 import re
+import sqlite3
 import sys
 from typing import Any, NoReturn
 
@@ -34,11 +35,9 @@ class _NonExitingArgumentParser(argparse.ArgumentParser):
 
 def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = None) -> bool:
     """Identifica se o erro foi bloqueio Anti-SSRF, falha de DNS ou URL inválida (exit code 2)."""
-    if not error_msg:
-        return False
-    # Só o `error_code` estruturado decide: o texto pode embutir o padrão de uma asserção do usuário
-    # (ex.: "Erro de DNS") e não pode virar "erro de execução" (exit 3).
-    return error_code in ("ssrf_blocked", "dns_error", "invalid_url")
+    # Só o `error_code` estruturado decide (a mensagem só indica que houve erro): o texto pode embutir o padrão de uma
+    # asserção do usuário (ex.: "Erro de DNS") e não pode virar "erro de execução" (exit 3).
+    return bool(error_msg) and error_code in ("ssrf_blocked", "dns_error", "invalid_url")
 
 
 def evaluate_probe_gates(
@@ -748,7 +747,7 @@ def _run_backup(args: argparse.Namespace) -> int:
         src = load_config(find_config_path()).storage.path
     try:
         dest = backup_database(src, args.destination, force=args.force)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:  # banco travado/corrompido: erro claro, sem traceback
         print(f"Erro no backup: {exc}", file=sys.stderr)
         return 2
     print(f"Backup de {src} gravado em {dest} (0600).")

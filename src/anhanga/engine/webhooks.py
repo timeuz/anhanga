@@ -91,6 +91,21 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _fit_violations(violations: list[str], limit: int, per_item: int = 500) -> list[str]:
+    """Cabe as violações no limite do canal (Slack: 3000 por bloco de texto; Telegram: 4096 por mensagem), cortando
+    cada linha e omitindo as últimas com um aviso. Um payload acima do limite é recusado inteiro (400) e o alerta se perde."""
+    out: list[str] = []
+    used = 0
+    for i, v in enumerate(violations):
+        line = _clip(str(v), per_item)
+        if used + len(line) + 3 > limit - 40:  # 40: folga para a linha "… (+N omitidas)"
+            out.append(f"… (+{len(violations) - i} omitidas)")
+            break
+        out.append(line)
+        used += len(line) + 3
+    return out
+
+
 def build_slack_payload(
     result: ProbeResult, violations: list[str] | None = None, event: str | None = None
 ) -> dict[str, Any]:
@@ -124,7 +139,7 @@ def build_slack_payload(
     )
 
     violations_text = (
-        "\n".join(f"• {v}" for v in all_violations)
+        "\n".join(f"• {v}" for v in _fit_violations(all_violations, 2800))
         if all_violations
         else "Nenhuma violação detectada."
     )
@@ -303,8 +318,10 @@ def build_telegram_payload(
     ]
     if all_violations:
         lines.append("<b>Violações:</b>")
-        for v in all_violations:
-            lines.append(f"• {html.escape(str(v))}")
+        # cortar ANTES de escapar (html.escape aumenta o texto) e dentro do limite de 4096 da mensagem
+        budget = 3900 - len("\n".join(lines))
+        for v in _fit_violations(all_violations, max(200, budget // 2), per_item=300):
+            lines.append(f"• {html.escape(v)}")
 
     return {
         "chat_id": chat_id or "",

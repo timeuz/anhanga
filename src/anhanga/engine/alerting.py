@@ -60,6 +60,17 @@ class _TargetState:
     problems: dict[str, _ProblemState] = field(default_factory=dict)
 
 
+def _cert_escalated(result: ProbeResult) -> bool:
+    """O certificado "expirando" agora está EXPIRADO ou REVOGADO: o problema piorou (não foi resolvido).
+    Decidido pela causa real; uma renovação com outro defeito (hostname, cadeia) continua sendo uma recuperação."""
+    tls = result.tls
+    if tls is None:
+        return False
+    if tls.days_remaining is not None and tls.days_remaining <= 0:
+        return True
+    return bool(tls.revocation is not None and tls.revocation.status == "revoked")
+
+
 def effective_ttfb_ms(result: ProbeResult) -> float:
     """TTFB que vale para o SLO: mediana das amostras quando há mais de uma (o TTFB frio em HTTP/2 é inflado),
     senão a medida única. Monitor e CLI usam a mesma, para o mesmo limite dar o mesmo veredicto."""
@@ -163,7 +174,7 @@ class AlertManager:
                     del state.problems[key]
                     # "Expirando" que some porque o certificado EXPIROU (ou foi revogado) não é recuperação: o problema
                     # escalou para `degraded`. Fecha o estado, mas sem a mensagem verde de "resolvido".
-                    if not (key == "tls_expiring" and "degraded" in problems):
+                    if not (key == "tls_expiring" and _cert_escalated(result)):
                         recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
             else:
                 del state.problems[key]  # problema que nunca chegou a alertar: some em silêncio

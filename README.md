@@ -105,6 +105,15 @@ webhooks:
 
 ---
 
+### Alvos adicionados pelo dashboard
+
+O campo "Adicionar alvo" do dashboard grava alvos fixos no **SQLite** (até 50), sem editar o `targets.yaml`; o botão "Remover" (com confirmação em dois cliques) aparece só nesses cartões. Regras:
+
+- Os alvos do `targets.yaml` continuam só no arquivo (não são removíveis pela UI) e vencem em caso de duplicata.
+- Alvos da UI **nunca** usam `allow_private` (é decisão do operador, só no YAML): loopback/IP privado é recusado (403) e não é gravado.
+- Herdam `slo`/`min_grade` de topo do `targets.yaml`. Endpoints: `GET/POST/DELETE /api/v1/targets/managed` (exigem a chave de API como o resto de `/api/`; o corpo do POST precisa ser JSON).
+- O banco SQLite vira parte do estado: faça backup (`anhanga backup`) e use o volume `/data` no Docker.
+
 ## 🖥️ Modo CLI para Pipelines de CI/CD (`anhanga check`)
 
 Use o comando `anhanga check` em esteiras de CI/CD (GitHub Actions, GitLab CI, Jenkins, Azure DevOps) para validar Quality Gates de performance e segurança após o deploy:

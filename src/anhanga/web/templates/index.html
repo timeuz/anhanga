@@ -12,16 +12,17 @@
     <script>
         // Chave da API (ANHANGA_API_KEY): guardada apenas na sessão da aba; pedida ao receber 401.
         let keyPromptShown = false;
-        async function apiFetch(url, retried = false) {
+        async function apiFetch(url, retried = false, init = {}) {
             let key = '';
             try { key = sessionStorage.getItem('anhanga_key') || ''; } catch (_) {}
-            const resp = await fetch(url, key ? { headers: { Authorization: 'Bearer ' + key } } : {});
+            const headers = Object.assign({}, init.headers || {}, key ? { Authorization: 'Bearer ' + key } : {});
+            const resp = await fetch(url, Object.assign({}, init, { headers }));
             if (resp.status === 401 && !retried && !keyPromptShown) {
                 keyPromptShown = true;
                 const entered = window.prompt('API key do Anhangá (ANHANGA_API_KEY):');
                 if (entered) {
                     try { sessionStorage.setItem('anhanga_key', entered.trim()); } catch (_) {}
-                    return apiFetch(url, true);
+                    return apiFetch(url, true, init);
                 }
             }
             return resp;
@@ -945,6 +946,17 @@
                 </div>
             </div>
 
+            <!-- Adicionar alvo fixo (guardado no SQLite; os do targets.yaml continuam só no arquivo) -->
+            <form @submit.prevent="addManagedTarget()" class="flex flex-wrap items-center gap-2" aria-label="Adicionar alvo">
+                <input type="text" x-model="newTargetUrl" :placeholder="t('addTargetPlaceholder')" maxlength="2048" autocomplete="off" spellcheck="false"
+                       class="flex-1 min-w-[12rem] bg-obsidian border border-bordercolor rounded-lg px-3 py-1.5 text-xs font-mono text-zinc-100 focus:outline-none focus:border-fire-400">
+                <button type="submit" :disabled="addingTarget || !newTargetUrl.trim()"
+                        class="px-3 py-1.5 rounded-lg bg-fire-600/20 hover:bg-fire-600/30 text-amber-200 border border-fire-400/60 text-xs font-semibold transition cursor-pointer disabled:opacity-50">
+                    <span x-text="addingTarget ? t('addTargetBusy') : t('addTargetBtn')">Adicionar alvo</span>
+                </button>
+                <p x-show="targetMsg" x-cloak role="status" class="basis-full text-xs break-words" :class="targetMsgError ? 'text-red-300' : 'text-emerald-300'" x-text="targetMsg"></p>
+            </form>
+
             <!-- Resumo + filtro + ordenação -->
             <div x-show="targetsList.length > 0" x-cloak class="filter-row flex flex-wrap items-center gap-2">
                 <template x-for="f in [['all','filterAll','border-zinc-600 text-zinc-100'],['up','filterUp','border-emerald-500/60 text-emerald-200'],['degraded','filterDegraded','border-amber-500/60 text-amber-200'],['down','filterDown','border-red-500/60 text-red-200']]" :key="f[0]">
@@ -1015,11 +1027,20 @@
                             </div>
                         </div>
 
-                        <button type="button"
-                                @click="selectCachedTarget(item)"
-                                class="w-full py-2 px-3 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-100 border border-bordercolor text-xs font-semibold transition cursor-pointer">
-                            <span x-text="t('openTargetReportBtn')">Abrir Relatório Completo</span>
-                        </button>
+                        <div class="flex gap-2">
+                            <button type="button"
+                                    @click="selectCachedTarget(item)"
+                                    class="flex-1 py-2 px-3 rounded-xl bg-obsidian hover:bg-zinc-800 text-zinc-100 border border-bordercolor text-xs font-semibold transition cursor-pointer">
+                                <span x-text="t('openTargetReportBtn')">Abrir Relatório Completo</span>
+                            </button>
+                            <button type="button" x-show="isManaged(item)" x-cloak
+                                    @click="removeManagedTarget(item.target_url)"
+                                    class="py-2 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer whitespace-nowrap"
+                                    :class="pendingRemove === item.target_url ? 'bg-red-950/80 text-red-200 border-red-500/70' : 'bg-obsidian hover:bg-zinc-800 text-zinc-300 border-bordercolor'"
+                                    :aria-label="t('removeTargetBtn') + ' ' + item.target_url">
+                                <span x-text="pendingRemove === item.target_url ? t('removeTargetConfirm') : t('removeTargetBtn')">Remover</span>
+                            </button>
+                        </div>
                     </div>
                 </template>
             </div>
@@ -1241,6 +1262,12 @@
                 latencyWord: 'Latência',
                 sparklineTrendLabel: 'Tendência de Latência',
                 openTargetReportBtn: 'Abrir Relatório Completo',
+                addTargetPlaceholder: 'Adicionar alvo fixo ao monitoramento (ex.: https://meusite.com)',
+                addTargetBtn: 'Adicionar alvo',
+                addTargetBusy: 'Verificando…',
+                addTargetOk: 'Alvo adicionado ao monitoramento.',
+                removeTargetBtn: 'Remover',
+                removeTargetConfirm: 'Confirmar?',
                 footerText: 'Motor Anhangá // Desenvolvido para equipes de SRE, Engenharia de Plataforma e DevSecOps.'
             },
             'en-US': {
@@ -1388,6 +1415,12 @@
                 latencyWord: 'Latency',
                 sparklineTrendLabel: 'Latency Trend',
                 openTargetReportBtn: 'Open Full Report',
+                addTargetPlaceholder: 'Add a permanent monitoring target (e.g. https://mysite.com)',
+                addTargetBtn: 'Add target',
+                addTargetBusy: 'Checking…',
+                addTargetOk: 'Target added to monitoring.',
+                removeTargetBtn: 'Remove',
+                removeTargetConfirm: 'Confirm?',
                 footerText: 'Anhangá Engine // Built for demanding SRE, Platform Engineering, and DevSecOps teams.'
             }
         };
@@ -1407,6 +1440,12 @@
                 copiedSnippetIndex: null,
                 permalinkCopied: false,
                 targetsList: [],
+                managedUrls: [],
+                newTargetUrl: '',
+                addingTarget: false,
+                targetMsg: '',
+                targetMsgError: false,
+                pendingRemove: '',
                 uptimeMap: {},
                 incidentsList: [],
                 persistenceAvailable: true,
@@ -1463,7 +1502,7 @@
                     if (this.autoRefresh) this.refreshAll();
                 },
                 async refreshAll() {
-                    await Promise.all([this.refreshTargets(), this.loadPersistence()]);
+                    await Promise.all([this.refreshTargets(), this.loadPersistence(), this.loadManagedTargets()]);
                     this.lastRefresh = Date.now();
                 },
                 async loadPersistence() {
@@ -1535,6 +1574,47 @@
                 },
                 incidentTime(ts) {
                     try { return new Date(ts * 1000).toLocaleString(); } catch (_) { return String(ts); }
+                },
+                isManaged(item) { return this.managedUrls.includes(item.target_url); },
+                async loadManagedTargets() {
+                    try {
+                        const resp = await apiFetch('/api/v1/targets/managed');
+                        if (resp.ok) this.managedUrls = ((await resp.json()).targets || []).map(t => t.url);
+                    } catch (_) {}
+                },
+                async _errorDetail(resp) {
+                    try { const d = (await resp.json()).detail; return typeof d === 'string' ? d : (d && d.message) || JSON.stringify(d); } catch (_) { return 'HTTP ' + resp.status; }
+                },
+                async addManagedTarget() {
+                    const url = this.newTargetUrl.trim();
+                    if (!url || this.addingTarget) return;
+                    this.addingTarget = true; this.targetMsg = '';
+                    try {
+                        const resp = await apiFetch('/api/v1/targets/managed', false, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+                        });
+                        if (resp.ok) {
+                            this.newTargetUrl = ''; this.targetMsg = this.t('addTargetOk'); this.targetMsgError = false;
+                            await this.refreshAll();
+                        } else {
+                            this.targetMsg = await this._errorDetail(resp); this.targetMsgError = true;
+                        }
+                    } catch (e) {
+                        this.targetMsg = String(e); this.targetMsgError = true;
+                    } finally { this.addingTarget = false; }
+                },
+                async removeManagedTarget(url) {
+                    if (this.pendingRemove !== url) {  // 1º clique arma; 2º confirma (sem diálogo nativo)
+                        this.pendingRemove = url;
+                        setTimeout(() => { if (this.pendingRemove === url) this.pendingRemove = ''; }, 4000);
+                        return;
+                    }
+                    this.pendingRemove = ''; this.targetMsg = '';
+                    try {
+                        const resp = await apiFetch('/api/v1/targets/managed?url=' + encodeURIComponent(url), false, { method: 'DELETE' });
+                        if (resp.ok) { this.targetsList = this.targetsList.filter(t => t.target_url !== url); await this.refreshAll(); }
+                        else { this.targetMsg = await this._errorDetail(resp); this.targetMsgError = true; }
+                    } catch (e) { this.targetMsg = String(e); this.targetMsgError = true; }
                 },
                 async refreshTargets() {
                     try {

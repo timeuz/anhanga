@@ -370,4 +370,4 @@ A suíte (cerca de 500 testes) roda offline, exceto por fixtures de PKI local (u
 
 ## Licença
 
-MIT, conforme declarado no `pyproject.toml`.
+MIT. Veja o arquivo [LICENSE](LICENSE).

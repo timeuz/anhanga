@@ -1031,6 +1031,12 @@ async def _run_probe_session(
                     (tls_enum.get(v) is not None and tls_enum.get(v).status == "accepted")  # type: ignore[union-attr]
                     for v in ("TLSv1", "TLSv1.1")
                 )
+                if not legacy_tls_accepted:
+                    # Enumeração concluída, mas com TLS 1.0/1.1 "unknown" (timeout, erro de rede) ou ausente: não há prova.
+                    legacy_unknown = any(
+                        tls_enum.get(v) is None or tls_enum.get(v).status == "unknown"  # type: ignore[union-attr]
+                        for v in ("TLSv1", "TLSv1.1")
+                    )
             elif not legacy_tls_accepted and target_ip_for_tls and final_host:
                 legacy_probe = await _bounded(
                     lambda: check_tls10_11_accepted_async(

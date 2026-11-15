@@ -256,6 +256,8 @@ scrape_configs:
         replacement: 127.0.0.1:7890
 ```
 
+O `anhanga_probe_latency_quantile_seconds` sempre traz a mediana (`quantile="0.5"`); as séries `0.95` e `0.99` só são exportadas quando o ciclo tem amostras suficientes (pelo menos 20 e 100, respectivamente), a mesma regra do dashboard e do CLI, e são removidas caso contrário. As mensagens de alerta e o export em Markdown seguem a mesma regra. Para a latência de cauda ao longo do tempo, use o `anhanga_probe_duration_seconds_histogram` com `histogram_quantile()`.
+
 Alvos que não responderam não exportam séries de latência, nota ou TLS (sem zeros falsos). O contador `anhanga_assertions_not_evaluated_total{target}` incrementa quando o próprio avaliador de regex falha; alerte em `rate(...) > 0`, senão uma falha persistente do avaliador desativa as asserções de regex em silêncio.
 
 ## Alertas
@@ -351,7 +353,7 @@ A cobertura de cifras foi verificada com o `testssl.sh` usando o OpenSSL embutid
 
 - **Não validado contra serviços reais:** os payloads de webhook são testados contra mocks e limites de tamanho; a entrega real para Slack, Microsoft Teams e Telegram não foi exercitada de ponta a ponta.
 - **Sem soak longo ainda:** uma execução de 14 minutos contra 12 alvos mostrou memória estável (cerca de 125 MB) e nenhum processo `openssl` órfão. O comportamento ao longo de dias não foi verificado.
-- **Sem P99 no dashboard:** veja [Percentis](#percentis). Separadamente, o `/metrics` exporta `anhanga_probe_latency_quantile_seconds{quantile="0.95"|"0.99"}` por ciclo, calculados sobre as amostras daquele ciclo sem aplicar a regra de amostra mínima acima; com poucas amostras eles não têm significado estatístico. Prefira o histograma.
+- **Sem P99 no dashboard nem nas métricas por ciclo:** veja [Percentis](#percentis). Use o histograma para a latência de cauda.
 - **Enumeração TLS:** o OpenSSL local não testa RC4, 3DES, EXPORT nem SSLv3 (veja [Validação](#validação)). "Rejeitado" significa "recusou todas as cifras que este cliente oferece".
 - **Cadeia de certificados atrás de balanceadores:** se a folha da cadeia difere do certificado da conexão (renovação no meio da sondagem, ou certificados diferentes por backend), a cadeia é descartada como "não verificado", então a revogação pode ficar indisponível de forma intermitente atrás desses balanceadores. Quando a fila do `s_client` está cheia o resultado é indistinguível de uma falha do `openssl`, então sob carga a cadeia pode aparecer "não verificada" de forma intermitente.
 - **Desligamento:** quem aguarda uma checagem de revogação cancelada recebe `CancelledError`; isso só ocorre ao encerrar.

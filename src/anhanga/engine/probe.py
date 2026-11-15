@@ -28,6 +28,7 @@ from anhanga import __version__
 from anhanga.engine import revocation
 from anhanga.engine.models import (
     ContentAssertionsResult,
+    CORSInspection,
     PhasePercentiles,
     ProbeResult,
     RedirectHop,
@@ -264,8 +265,9 @@ async def _check_port_80(
             timeout=timeout,
             headers={"User-Agent": f"Anhanga-Probe/{__version__} (+https://github.com/timeuz/anhanga)"},
         ) as c:
-            resp = await c.get(f"http://{host}/")
-            if resp.status_code in (301, 302, 307, 308):
+            url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host  # IPv6 literal
+            resp = await c.get(f"http://{url_host}/")
+            if resp.status_code in (301, 302, 303, 307, 308):
                 loc = resp.headers.get("location", "").strip()
                 if loc.lower().startswith("https://"):
                     return f"{resp.status_code} Redireciona para HTTPS (Correto)"
@@ -339,6 +341,7 @@ async def _evaluate_content_assertions(
     min_payload_bytes: int | None = None,
     max_payload_bytes: int | None = None,
     assert_final_url: str | None = None,
+    payload_truncated: bool = False,
 ) -> ContentAssertionsResult:
     failures: list[str] = []
     not_evaluated: list[str] = []
@@ -379,6 +382,12 @@ async def _evaluate_content_assertions(
     if max_payload_bytes is not None and payload_bytes > max_payload_bytes:
         failures.append(
             f"Payload recebido ({payload_bytes} bytes) acima do máximo permitido ({max_payload_bytes} bytes)"
+        )
+    elif max_payload_bytes is not None and payload_truncated:
+        # A leitura parou no teto (max_body_bytes): o tamanho real é desconhecido e `payload_bytes` é só o teto.
+        not_evaluated.append(
+            f"max_payload_bytes: a resposta foi truncada em {payload_bytes} bytes (limite de leitura); o máximo de "
+            f"{max_payload_bytes} bytes não pôde ser avaliado"
         )
 
     if assert_final_url and final_url != assert_final_url:
@@ -654,6 +663,37 @@ async def _execute_single_http_step(
     return resp, timings, connection_reused, payload_bytes, payload_truncated, b"".join(body_chunks)
 
 
+STAGE_RESERVE_SECONDS = 1.0  # folga reservada para montar o resultado depois das etapas
+
+
+def _overall_timeout(timeout: float, samples: int) -> float:
+    """Prazo global da sondagem. A folga de +9 s cobre as etapas pós-HTTP, que também têm orçamento combinado
+    (`_bounded`): se faltar prazo, elas degradam para resultado parcial em vez de cancelar tudo."""
+    return min(60.0, max(timeout * min(samples, 5) + 9.0, timeout + 8.0))
+
+
+async def _bounded(
+    factory: typing.Callable[[], typing.Awaitable[typing.Any]],
+    deadline: float | None,
+    default: typing.Any,
+    skipped: list[str],
+    label: str,
+) -> typing.Any:
+    """Roda uma etapa pós-HTTP sem estourar o prazo da sondagem: sem prazo restante (ou ao estourá-lo) devolve
+    `default` e registra a etapa em `skipped`. A resposta HTTP já obtida nunca é descartada por causa disso."""
+    if deadline is None:
+        return await factory()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        skipped.append(label)
+        return default
+    try:
+        return await asyncio.wait_for(factory(), timeout=remaining)
+    except asyncio.TimeoutError:
+        skipped.append(label)
+        return default
+
+
 async def _run_probe_session(
     initial_url: str,
     timeout: float,
@@ -668,7 +708,9 @@ async def _run_probe_session(
     max_payload_bytes: int | None = None,
     assert_final_url: str | None = None,
     tls_validation_error: str | None = None,
+    stage_deadline: float | None = None,
 ) -> ProbeResult:
+    skipped_stages: list[str] = []
     backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)
     transport = _create_instrumented_transport(backend, verify=verify_ssl, http2=True)
     headers = {"User-Agent": f"Anhanga-Probe/{__version__} (+https://github.com/timeuz/anhanga)"}
@@ -951,20 +993,26 @@ async def _run_probe_session(
 
             # Cadeia/OCSP via openssl (o módulo ssl não os expõe), porta 80 e enumeração de
             # protocolos/cifras (em cache por 6 h), em paralelo.
-            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
-                fetch_tls_extras(
-                    target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
-                    expected_leaf=_peer_leaf_der(ssl_obj),
+            (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await _bounded(
+                lambda: asyncio.gather(
+                    fetch_tls_extras(
+                        target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
+                        expected_leaf=_peer_leaf_der(ssl_obj),
+                    ),
+                    _check_port_80(
+                        final_host,
+                        allow_private=allow_private,
+                        timeout=min(timeout, 2.0),
+                        ip=target_ip_for_tls,
+                    ),
+                    enumerate_tls_bounded(
+                        target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
+                    ),
                 ),
-                _check_port_80(
-                    final_host,
-                    allow_private=allow_private,
-                    timeout=min(timeout, 2.0),
-                    ip=target_ip_for_tls,
-                ),
-                enumerate_tls_bounded(
-                    target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
-                ),
+                stage_deadline,
+                (([], None), "Porta 80 não verificada (prazo da sondagem esgotado)", None),
+                skipped_stages,
+                "cadeia TLS/porta 80/enumeração",
             )
 
             legacy_tls_accepted = bool(ssl_obj is not None and ssl_obj.version() in ("TLSv1", "TLSv1.1", "SSLv3"))
@@ -974,11 +1022,14 @@ async def _run_probe_session(
                     for v in ("TLSv1", "TLSv1.1")
                 )
             elif not legacy_tls_accepted and target_ip_for_tls and final_host:
-                legacy_tls_accepted = await check_tls10_11_accepted_async(
-                    ip=target_ip_for_tls,
-                    server_hostname=final_host,
-                    port=final_port,
-                    timeout=min(0.8, timeout * 0.25),
+                legacy_tls_accepted = await _bounded(
+                    lambda: check_tls10_11_accepted_async(
+                        ip=target_ip_for_tls,
+                        server_hostname=final_host,
+                        port=final_port,
+                        timeout=min(0.8, timeout * 0.25),
+                    ),
+                    stage_deadline, False, skipped_stages, "TLS 1.0/1.1 legado",
                 )
 
             if ssl_obj is not None:
@@ -1001,18 +1052,24 @@ async def _run_probe_session(
 
             # Revogação (OCSP ativo, CRL de fallback): só faz sentido se o certificado ainda é válido.
             if tls_info.valid and revocation.enabled():
-                _apply_revocation(
-                    tls_info,
-                    await revocation.check_revocation(
+                rev_result = await _bounded(
+                    lambda: revocation.check_revocation(
                         # OCSP/CRL/AIA vêm do certificado do alvo: nunca herdam o allow_private dele.
                         chain_der, allow_private=revocation.endpoints_allow_private(),
                         timeout=min(timeout, 5.0), deadline=min(timeout, 4.0),
                     ),
+                    stage_deadline, None, skipped_stages, "revogação",
                 )
+                if rev_result is not None:
+                    _apply_revocation(tls_info, rev_result)
 
         # Sonda ativa de CORS enviando Origin hostil
-        cors_result = await audit_cors_active(
-            client=client, target_url=current_url, timeout=min(timeout, 2.0)
+        cors_result = await _bounded(
+            lambda: audit_cors_active(client=client, target_url=current_url, timeout=min(timeout, 2.0)),
+            stage_deadline,
+            CORSInspection(tested=False, status="Não testado (prazo da sondagem esgotado)"),
+            skipped_stages,
+            "CORS",
         )
 
         sec_audit = audit_http_security(
@@ -1025,16 +1082,32 @@ async def _run_probe_session(
 
         # Avaliação de Asserções de Conteúdo
         body_text = final_body_bytes.decode("utf-8", errors="replace")
-        assertions_res = await _evaluate_content_assertions(
-            body_text=body_text,
-            payload_bytes=final_payload_bytes,
-            final_url=str(final_resp.url),
-            fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
-            fail_if_body_matches_regexp=fail_if_body_matches_regexp,
-            min_payload_bytes=min_payload_bytes,
-            max_payload_bytes=max_payload_bytes,
-            assert_final_url=assert_final_url,
+        has_regex = bool(fail_if_body_not_matches_regexp or fail_if_body_matches_regexp)
+        assertions_res = await _bounded(
+            lambda: _evaluate_content_assertions(
+                body_text=body_text,
+                payload_bytes=final_payload_bytes,
+                payload_truncated=final_payload_truncated,
+                final_url=str(final_resp.url),
+                fail_if_body_not_matches_regexp=fail_if_body_not_matches_regexp,
+                fail_if_body_matches_regexp=fail_if_body_matches_regexp,
+                min_payload_bytes=min_payload_bytes,
+                max_payload_bytes=max_payload_bytes,
+                assert_final_url=assert_final_url,
+            ),
+            stage_deadline if has_regex else None,  # só o regex (subprocesso) é lento; o resto é instantâneo
+            ContentAssertionsResult(
+                passed=True,
+                not_evaluated=["asserções de regex não avaliadas: prazo da sondagem esgotado antes da avaliação"],
+            ),
+            skipped_stages,
+            "asserções de regex",
         )
+
+        if skipped_stages:
+            final_timings.timing_notes.append(
+                "Resultado parcial: etapas puladas por falta de prazo da sondagem: " + ", ".join(skipped_stages) + "."
+            )
 
         is_up = (200 <= final_resp.status_code < 400) and assertions_res.passed
 
@@ -1112,6 +1185,13 @@ def _validate_hostname_syntax(host: str) -> str | None:
     name = host.rstrip(".")
     if not name or len(name) > 253:
         return "URL inválida: hostname vazio ou longo demais."
+    if not name.isascii():  # nome internacionalizado (münchen.de): valida a forma Punycode (IDNA)
+        try:
+            name = name.encode("idna").decode("ascii")
+        except UnicodeError:
+            return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
+        if len(name) > 253:
+            return "URL inválida: hostname vazio ou longo demais."
     if not all(_HOST_LABEL_RE.match(label) for label in name.split(".")):
         return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
     return None
@@ -1201,7 +1281,25 @@ def _apply_revocation(tls: TLSInspection, rev: "RevocationInspection") -> None:
         tls.validation_error = f"certificate revoked ({(rev.method or '').upper()}{when})"
 
 
+def _idna_url(url: str) -> str:
+    """Host internacionalizado -> Punycode (httpx, o resolvedor e o pinning de IP usam a forma ASCII)."""
+    parsed = safe_urlparse(url)
+    host = parsed.hostname if parsed else None
+    if not host or host.isascii():
+        return url
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return url  # a validação de sintaxe do host recusa
+    return re.sub(re.escape(host), ascii_host, url, count=1, flags=re.IGNORECASE)
+
+
 def _normalize_and_validate_scheme(raw_url: str) -> tuple[str, str | None]:
+    url, err = _normalize_scheme_only(raw_url)
+    return (url, err) if err else (_idna_url(url), None)
+
+
+def _normalize_scheme_only(raw_url: str) -> tuple[str, str | None]:
     """
     Normaliza a URL garantindo que esquemas proibidos (file://, gopher://, ftp://, etc.)
     sejam bloqueados imediatamente, antes de qualquer resolução ou auto-prefixo https://.
@@ -1296,9 +1394,10 @@ async def _execute_probe_inner(
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
     # Folga para o que roda após a sondagem HTTP (enumeração TLS ≤ 3 s em paralelo com openssl/porta 80,
     # depois revogação ≤ 4 s): cada etapa tem prazo próprio e degrada sozinha, então o prazo global não a corta.
-    overall_timeout = min(60.0, max(timeout * min(samples, 5) + 9.0, timeout + 8.0))
+    overall_timeout = _overall_timeout(timeout, samples)
 
     started = time.monotonic()
+    stage_deadline = started + overall_timeout - STAGE_RESERVE_SECONDS
     try:
         return await asyncio.wait_for(
             _run_probe_session(
@@ -1314,6 +1413,7 @@ async def _execute_probe_inner(
                 min_payload_bytes=min_payload_bytes,
                 max_payload_bytes=max_payload_bytes,
                 assert_final_url=assert_final_url,
+                stage_deadline=stage_deadline,
             ),
             timeout=overall_timeout,
         )
@@ -1366,6 +1466,7 @@ async def _execute_probe_inner(
                         min_payload_bytes=min_payload_bytes,
                         max_payload_bytes=max_payload_bytes,
                         assert_final_url=assert_final_url,
+                        stage_deadline=stage_deadline,
                     ),
                     timeout=remaining,
                 )

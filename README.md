@@ -477,3 +477,23 @@ use o `testssl.sh` ao lado.
   função do monitor), em vez da amostra fria única, inflada em HTTP/2.
 - **SARIF:** a regra vem do prefixo da violação e do código de saída (3 = DNS/SSRF), não de substrings soltas.
 - **CLI:** removido código morto (`--resolve` e flags de asserção de conteúdo que o parser nunca definiu).
+
+## 🔁 Correções da 3ª revisão da `main` (lote E)
+
+- **Alerta de expiração:** se um certificado "expirando" expira (ou é revogado), o alerta escala para `degraded` e o estado
+  de `tls_expiring` é fechado **sem** a mensagem verde "resolvido". Renovação de verdade continua sendo anunciada.
+- **Slack:** o texto do cabeçalho é cortado em 150 caracteres (limite do `plain_text`); antes, uma URL longa fazia o Slack
+  recusar o payload inteiro (HTTP 400) e o alerta se perdia após as tentativas.
+- **Prazo da sondagem:** as etapas depois da resposta HTTP (cadeia TLS/porta 80/enumeração, TLS legado, revogação, CORS,
+  asserções de regex) têm **orçamento combinado**. Se faltar prazo, elas são puladas e o resultado sai parcial (nota em
+  `timings.timing_notes`; regex vira `assertions.not_evaluated`), em vez de descartar uma resposta 200 válida como
+  "Timeout rígido excedido" e gerar falso OFFLINE.
+- **CLI:** textos do alvo, erros e violações são escapados antes de irem ao Rich (um `[/x]` solto quebrava o `check` e um
+  `^[a-z]+$` era engolido). O código de saída 3 vem só do `error_code` estruturado (um padrão com "Erro de DNS" numa
+  asserção não vira erro de DNS).
+- **IDN:** hostnames internacionalizados (`münchen.de`, `açaí.com.br`) são aceitos e normalizados para Punycode.
+- **SQLite:** `incremental_vacuum` passou a ser consumido; o arquivo volta a encolher após a retenção.
+- **Porta 80:** IPv6 literal com colchetes e `303` como redirecionamento.
+- **`max_payload_bytes`:** se a leitura foi truncada no teto (`max_body_bytes`) e o limite está acima dele, a asserção fica
+  "não avaliada" (nunca aprovada em silêncio). Se mesmo o tamanho truncado já excede o limite, ela reprova.
+- **Backup:** `~` é expandido e caminhos com `?`, `#`, `%` funcionam.

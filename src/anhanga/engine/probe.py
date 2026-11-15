@@ -564,7 +564,7 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
     elif not p99_valid:
         sample_size_notice = (
             "P99 requer n ≥ 100; um scan avulso é limitado a 20 amostras (para não sobrecarregar o alvo). "
-            "Consulte o histórico do monitoramento para a cauda extrema."
+            "Para a cauda extrema ao longo do tempo, use o histograma de /metrics (histogram_quantile no Prometheus)."
         )
     else:
         sample_size_notice = None

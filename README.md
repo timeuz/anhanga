@@ -1,172 +1,252 @@
-# Anhangá 🦌🔥
+# Anhangá
 
-> **Spectral Edge, TLS & Latency Auditor for SRE and DevSecOps**
+**Edge, TLS and latency auditor for SRE and DevSecOps teams.**
 
-O **Anhangá** é um motor assíncrono de diagnóstico de rede, auditoria de borda e observabilidade projetado para engenheiros de infraestrutura, SREs e profissionais de DevSecOps que sabem que um `HTTP 200 OK` isolado raramente conta toda a história.
+[Português (Brasil)](README.pt-BR.md)
 
-Inspirado no guardião mitológico de olhos de fogo que vigia o perímetro, o Anhangá inspeciona toda a pilha de conexão — desde a resolução DNS e handshakes TCP/TLS até cadeias de redirecionamento, postura criptográfica, cabeçalhos de segurança e conformidade de SLOs — tanto via **Dashboard Web**, **CLI para CI/CD** quanto via **Métricas Prometheus**.
+Anhangá is a self-hosted, asynchronous diagnostics and monitoring tool for web endpoints. A bare `HTTP 200` rarely tells the whole story, so it inspects the full connection path: DNS, TCP and TLS handshakes, time to first byte, redirect chains, certificate and revocation status, protocol and cipher support, and the security posture of the response headers. It runs as a web dashboard with continuous monitoring, as a CLI for CI/CD quality gates, and as a Prometheus target compatible with `blackbox_exporter` dashboards.
 
----
+**Status:** pre-release (0.2.x). The test suite is extensive, but the project has not yet had a long soak run or broad real-world use. See [Known limitations](#known-limitations).
 
-## 🚀 Principais Recursos
+**Scope:** Anhangá is designed to be run by each operator on their own infrastructure. It is not a multi-tenant or public scanning service: it has one shared API key, no per-user quotas, and no isolation between users. It is also not a penetration test or a replacement for a full TLS assessment tool (see [Validation](#validation)).
 
-### 1. Diagnóstico Tático de Latência e Waterfall Real
-- **Decomposição Não-Cumulativa por Fase:** Mede isoladamente o tempo gasto em **DNS Lookup**, **TCP Handshake**, **TLS Handshake**, **TTFB (tempo até o primeiro byte; inclui 1 RTT de rede)** e **Transferência de Conteúdo**, apresentando offsets exatos de início e fim (`start_ms` → `end_ms`) e identificando automaticamente a **Fase Dominante (Gargalo)** com classificação visual por SLO.
-- **Amostragem Estatística Multi-Sonda:** Permite executar múltiplas amostras por verificação (`--samples N`), calculando **P50 (Mediana)**, **P95**, **P99**, **Média**, **Min/Max** e **Jitter**, além de comparar o tempo de **Conexão Fria (*Cold Start*)** com **Conexão Reaproveitada (*Keep-Alive*)**.
-- **Rastreamento de Cadeia de Redirects:** Mapeia cada salto (`301`, `302`, `303`, `307`, `308`) de `HTTP -> HTTPS` ou `apex -> www` com status, IP resolvido e latência individual por hop.
+## Contents
 
-### 2. Inspeção Profunda de Certificados TLS
-- Verifica validade temporal, dias restantes até a expiração (com alerta preventivo abaixo de 15 dias), Emissor (`Issuer`), Titular (`Subject`), Número de Série e **Fingerprint SHA-256**.
-- Extrai todos os **SANs (`Subject Alternative Names`)** e reconstrói a **Cadeia de Certificação X.509** (`Leaf -> Intermediate -> Root CA`).
-- Inspeciona versão do protocolo negociado, suíte de cifra (`cipher` e `bits`), status de **OCSP Stapling** e detecta se o servidor ainda aceita versões legadas inseguras (**TLS 1.0 / TLS 1.1**).
+- [Features](#features)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Command-line interface](#command-line-interface)
+- [HTTP API](#http-api)
+- [Prometheus integration](#prometheus-integration)
+- [Alerting](#alerting)
+- [Persistence](#persistence)
+- [Security model](#security-model)
+- [How to read the results](#how-to-read-the-results)
+- [Validation](#validation)
+- [Known limitations](#known-limitations)
+- [Development](#development)
+- [License](#license)
 
-### 3. Auditoria DevSecOps de Borda e Runbook Multi-Servidor
-- **Cálculo de Nota de Segurança (`A+` até `F`):** Avalia cabeçalhos essenciais de proteção de borda:
-  - `Strict-Transport-Security` (**HSTS** com recomendações progressivas de rollout: `300s` → `1 semana` → `1 mês+`, tratando `preload` como *opt-in* voluntário).
-  - `Content-Security-Policy` (**CSP**), reconhecendo a diretiva moderna `frame-ancestors` como proteção equivalente ao `X-Frame-Options` contra Clickjacking.
-  - `Permissions-Policy` (incluindo verificação explícita de bloqueio `camera=()`) e `X-Content-Type-Options: nosniff`.
-  - `Referrer-Policy`, flags de segurança em `Set-Cookie` (`Secure`, `HttpOnly`, `SameSite`), políticas de **CORS** permissivas (`Access-Control-Allow-Origin: *`) e vazamento de versão de tecnologia (`Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Generator`).
-- **Runbook de Remediação Interativo:** Gera snippets prontos para copiar e colar em **Nginx**, **Apache**, **Caddy**, **Traefik** e **Kubernetes Ingress**, com **Simulador de Projeção de Nota** em tempo real e botão **Re-escanear** com cálculo de delta de evolução.
+## Features
 
-### 4. Proteção Nativa Anti-SSRF e Anti-DNS Rebinding
-- Bloqueia por padrão tentativas de sondar redes privadas ou internas: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Link-Local e Cloud Metadata (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), IPv6 ULA (`fc00::/7`) e endereços tunelados/mapeados (`::ffff:127.0.0.1`, 6to4, Teredo), além de esquemas não-HTTP (`file://`, `gopher://`, `ftp://`).
-- Prende (*pins*) a conexão TCP diretamente ao IP validado na resolução única de DNS (prevenindo ataques de *DNS Rebinding*) e revalida o IP a cada redirecionamento.
-- Conta com controle de taxa de requisições (*Rate Limiting* por IP), timeouts rígidos e limite máximo de leitura de payload. Para auditorias em laboratórios ou redes internas autorizadas, oferece a flag explícita `--allow-private` / `allow_private: true`.
+**Latency diagnostics**
+- Per-phase (non-cumulative) timings for DNS, TCP, TLS, TTFB and transfer, with start and end offsets and automatic identification of the dominant phase.
+- Multi-sample probing (up to 20 samples): P50, P95, P99, mean, min/max and jitter, plus cold versus reused-connection comparison. P95 is only reported with at least 20 samples and P99 with at least 100 (see [percentiles](#percentiles)).
+- Redirect chain tracing (301, 302, 303, 307, 308) with status, resolved IP and latency per hop.
 
----
+**TLS inspection**
+- Certificate validity, days remaining, issuer, subject, serial number, SHA-256 fingerprint, SANs and the X.509 chain.
+- Negotiated protocol and cipher, and OCSP stapling status.
+- Active revocation checking (OCSP with CRL fallback, signatures verified).
+- Protocol and cipher enumeration (TLS 1.0 to 1.3) with findings for legacy protocols, weak ciphers and missing forward secrecy.
 
-## 📦 Instalação
+**Edge security audit**
+- Security grade from `A+` to `F` based on HSTS, Content-Security-Policy (with a strength analysis), Permissions-Policy, X-Content-Type-Options, Referrer-Policy, cookie flags, CORS policy and technology version leakage.
+- COOP, COEP and CORP are reported as informational and do not affect the grade.
+- Remediation runbook with copy-paste snippets for Nginx, Apache, Caddy, Traefik and Kubernetes Ingress, and a grade projection simulator.
 
-Requer **Python 3.11+**. Recomendado utilizar o gerenciador [`uv`](https://docs.astral.sh/uv/):
+**Monitoring and alerting**
+- Continuous background probing of a configured target list, with sparklines, uptime and incident history in the dashboard.
+- Stateful alerts (anti-flapping, deduplication, reminders, recovery) delivered to Slack, Microsoft Teams or Telegram, with a persistent retry outbox.
+
+**Safety**
+- Built-in SSRF and DNS rebinding protection; the connection is pinned to the validated IP.
+- Fail-closed API authentication and a rate limiter.
+
+## Installation
+
+Requires Python 3.11 or later and the `openssl` binary (used for the certificate chain, OCSP stapling and revocation checks; without it those fields are reported as "not verified").
 
 ```bash
-# Cria o ambiente virtual e instala o Anhangá
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e .
 ```
 
----
+With plain `pip`: `python -m venv .venv && . .venv/bin/activate && pip install -e .`
 
-## 🌐 Executando o Dashboard Web e a API
-
-Para iniciar o servidor web e a API FastAPI na porta `7890`:
+**Docker**
 
 ```bash
-anhanga serve --host 127.0.0.1 --port 7890
-# Ou diretamente via uvicorn:
-uvicorn anhanga.main:app --reload --host 127.0.0.1 --port 7890
+docker build -t anhanga .
+docker run -d -p 7890:7890 --env-file .env -v "$PWD/data:/data" anhanga
 ```
 
-- **Dashboard Web Interativo (PT-BR / EN):** `http://127.0.0.1:7890`
-  - Permite executar inspeções sob demanda, simular correções no Runbook, comparar re-escaneamentos e exportar relatórios em **Link da Análise** (copiável), **JSON** e **Markdown**.
-- **Documentação OpenAPI / Swagger:** `http://127.0.0.1:7890/docs`
-- **Healthcheck (Kubernetes Liveness/Readiness):** `http://127.0.0.1:7890/healthz`
+Put `targets.yaml` in `data/` (the directory must be writable by uid 10001). The container runs as an unprivileged user, has a `HEALTHCHECK`, and refuses to start without `ANHANGA_API_KEY` because it listens on a non-loopback address.
 
----
+## Quick start
 
-## 🎯 Vigilância Contínua com `targets.yaml`
+```bash
+anhanga serve                  # http://127.0.0.1:7890
+```
 
-O arquivo **`targets.yaml`** na raiz do projeto (ou apontado pela variável de ambiente `ANHANGA_CONFIG`) define os endpoints que o Anhangá monitora continuamente em background assim que o servidor é iniciado.
+- Dashboard (Portuguese and English): `http://127.0.0.1:7890`
+- Health check: `GET /healthz`
+- OpenAPI documentation: disabled by default; set `ANHANGA_DOCS=1` to enable `/docs`.
 
-Essa sondagem periódica alimenta automaticamente:
-1. Os cards de **Vigilância Contínua** no Dashboard Web (com gráficos *Sparkline* da evolução de latência);
-2. As métricas exportadas em `/metrics` para coleta pelo Prometheus;
-3. O disparo automático de alertas via **Webhooks** (Slack, Microsoft Teams e Telegram) caso um alvo fique indisponível ou apresente certificado TLS prestes a expirar.
+The dashboard runs on-demand scans, simulates remediation, compares re-scans, and exports a shareable analysis link, JSON and Markdown. It auto-refreshes every 15 seconds, filters and sorts targets by status, and shows 24-hour uptime and recent incidents.
 
-Para começar, copie o arquivo de exemplo:
+`anhanga serve` always runs a single worker. Each worker would run its own monitoring loop and duplicate alerts, so do not use `uvicorn --workers` or `WEB_CONCURRENCY` greater than 1.
+
+## Configuration
+
+### `targets.yaml`
+
+Anhangá looks for `targets.yaml` in the working directory, or at the path in `ANHANGA_CONFIG`. If `ANHANGA_CONFIG` is set and the file does not exist, that is an error and no other file is used. Start from the example:
 
 ```bash
 cp targets.example.yaml targets.yaml
 ```
 
-Estrutura do `targets.yaml`:
-
 ```yaml
-interval_seconds: 30   # Intervalo em segundos entre os ciclos de sondagem em background
-samples: 3             # Quantidade de amostras por ciclo (calcula P50, P95, P99 e Jitter)
-allow_private: false   # Defina como true apenas para monitorar serviços de rede interna/lab
+interval_seconds: 30      # 5 to 86400; counted from the start of each cycle
+samples: 3                # 1 to 20 samples per cycle
+allow_private: false      # true only for internal or lab networks
+
+slo:                      # optional global SLOs; each target may override
+  max_ttfb: 800ms
+  max_total: 2s
+min_grade: C              # alert when the security grade falls below this
 
 targets:
   - https://cloudflare.com
-  - https://github.com
-  - https://news.ycombinator.com
+  - url: https://api.example.com/health
+    samples: 5
+    slo: { max_ttfb: 300ms }
+    min_grade: B
 
-# Opcional: Webhooks para notificações automáticas de incidentes/expiração TLS
+alerting:
+  failure_threshold: 2    # consecutive bad cycles before alerting
+  recovery_threshold: 1
+  cooldown_seconds: 3600  # reminder interval; 0 disables reminders
+  notify_recovery: true
+
+storage:
+  enabled: true
+  path: anhanga.db        # ANHANGA_DB_PATH overrides
+  retention_days: 14
+
 webhooks:
-  - url: "https://hooks.slack.com/services/T000/B000/X000"
-    provider: "slack"
-  - url: "https://outlook.office.com/webhook/..."
-    provider: "teams"
+  - url: "${SLACK_WEBHOOK_URL}"   # ${VAR} expands environment variables
+    provider: slack
   - url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
-    provider: "telegram"
+    provider: telegram
     telegram_chat_id: "-1001234567890"
 ```
 
----
+The file is validated on load: errors are logged and invalid entries are dropped instead of stopping the server. It is hot-reloaded when it changes; if the new file is unreadable or invalid YAML, the reload is rejected and the previous configuration stays in effect. Booleans are strict (`true/false`, `yes/no`, `on/off`, `1/0`); any other value is an error and falls back to the safe default. Targets are deduplicated by normalized URL (`example.com`, `https://example.com` and `HTTPS://EXAMPLE.COM` are the same target). Internationalized hostnames are accepted and converted to Punycode (IDNA 2008).
 
-### Alvos adicionados pelo dashboard
+### Targets added from the dashboard
 
-O campo "Adicionar alvo" do dashboard grava alvos fixos no **SQLite** (até 50), sem editar o `targets.yaml`; o botão "Remover" (com confirmação em dois cliques) aparece só nesses cartões. Regras:
+The "Add target" field in the dashboard stores permanent targets in SQLite (up to 50) without editing `targets.yaml`. A "Remove" button, with a two-click confirmation, appears only on those cards.
 
-- Os alvos do `targets.yaml` continuam só no arquivo (não são removíveis pela UI) e vencem em caso de duplicata.
-- Alvos da UI **nunca** usam `allow_private` (é decisão do operador, só no YAML): loopback/IP privado é recusado (403) e não é gravado.
-- Herdam `slo`/`min_grade` de topo do `targets.yaml`. Endpoints: `GET/POST/DELETE /api/v1/targets/managed` (exigem a chave de API como o resto de `/api/`; o corpo do POST precisa ser JSON).
-- O banco SQLite vira parte do estado: faça backup (`anhanga backup`) e use o volume `/data` no Docker.
+- Targets from `targets.yaml` stay in the file, cannot be removed from the UI, and win on duplicates.
+- Dashboard targets never use `allow_private` (that is an operator decision, in the YAML only). Loopback and private addresses are rejected with 403 and are not stored.
+- They inherit the top-level `slo` and `min_grade`.
+- Endpoints: `GET`, `POST` and `DELETE /api/v1/targets/managed`. They require the API key like the rest of `/api/`, and the POST body must be JSON.
+- The database becomes part of your state: back it up (see [Persistence](#persistence)).
 
-## 🖥️ Modo CLI para Pipelines de CI/CD (`anhanga check`)
+### Environment variables
 
-Use o comando `anhanga check` em esteiras de CI/CD (GitHub Actions, GitLab CI, Jenkins, Azure DevOps) para validar Quality Gates de performance e segurança após o deploy:
+| Variable | Purpose |
+| --- | --- |
+| `ANHANGA_API_KEY` | API key. Required to listen outside loopback or behind a reverse proxy. |
+| `ANHANGA_CONFIG` | Path to `targets.yaml`. |
+| `ANHANGA_DB_PATH` | SQLite database path (overrides `storage.path`). |
+| `ANHANGA_ENV_FILE` | Path of the `.env` file read by the server (default `./.env`). |
+| `ANHANGA_ALLOW_PRIVATE` | `1` allows private addresses on the HTTP scan routes (operator decision). |
+| `ANHANGA_REVOCATION_CHECK` | `0` disables OCSP/CRL checks. |
+| `ANHANGA_REVOCATION_ALLOW_PRIVATE` | `1` lets OCSP/CRL URLs resolve to private addresses (internal PKI). |
+| `ANHANGA_TLS_ENUM` | `0` disables protocol and cipher enumeration. |
+| `ANHANGA_RATE_LIMIT_PER_MIN` | Per-IP rate limit (default 30; `samples=N` costs N). |
+| `ANHANGA_TRUSTED_PROXIES` | Proxy IPs whose `X-Forwarded-For` is honored (empty by default). |
+| `ANHANGA_SENSITIVE_COOKIE_REGEX` | Overrides which cookie names require `HttpOnly`. |
+| `ANHANGA_DOCS` | `1` enables `/docs`, `/redoc` and `/openapi.json`. |
+| `ANHANGA_PROBE_ORIGIN` | Label for the probe's vantage point in results. |
+
+The `.env` file is read only by the server entrypoints (`anhanga serve`, `uvicorn anhanga.main:app`), never by `anhanga check`. Variables already set in the environment take precedence.
+
+## Command-line interface
 
 ```bash
-# Verifica se o endpoint atinge nota mínima B e TTFB abaixo de 500ms (com 3 amostras)
-anhanga check https://seudominio.com --min-grade B --max-ttfb 500ms --samples 3
-
-# Define limite também para a latência total (ex: 1.5s)
-anhanga check https://api.seudominio.com --min-grade A --max-ttfb 300ms --max-total 1.5s
-
-# Exporta o resultado em JSON para consumo por scripts da pipeline
-anhanga check https://seudominio.com --min-grade B --format json --output relatorio.json
-
-# Exporta em formato SARIF v2.1.0 para integração com a aba Security (Code Scanning) do GitHub
-anhanga check https://seudominio.com --min-grade A --max-ttfb 400ms --format sarif --output anhanga.sarif
-
-# Envia alerta para Slack, Teams ou Telegram se os Quality Gates falharem
-anhanga check https://seudominio.com \
-  --min-grade B \
-  --max-ttfb 500ms \
-  --webhook-url "https://hooks.slack.com/services/T000/B000/X000" \
-  --webhook-provider slack
+anhanga serve [--host 127.0.0.1] [--port 7890]
+anhanga check <url> [gates and options]
+anhanga keygen [--force]
+anhanga backup <destination.db> [--force]
 ```
 
-### Exit Codes da CLI
-| Exit Code | Condição |
-| :---: | :--- |
-| `0` | Alvo online e aprovado em todos os critérios (`--min-grade`, `--max-ttfb`, `--max-total`). |
-| `1` | Falha de Quality Gate: alvo indisponível (`HTTP >= 400`), nota de segurança abaixo de `--min-grade` ou latência acima dos limites. |
-| `2` | Erro de execução/configuração, falha de DNS ou bloqueio pelo Guardião Anti-SSRF. |
+### `anhanga check`
 
----
+Use it in CI/CD (GitHub Actions, GitLab CI, Jenkins, Azure DevOps) to gate a deployment on performance and security.
 
-## 📊 Observabilidade Prometheus e Compatibilidade com `blackbox_exporter`
+```bash
+# Minimum grade B, TTFB under 500 ms, 3 samples
+anhanga check https://example.com --min-grade B --max-ttfb 500ms --samples 3
 
-O Anhangá expõe todas as durações em **segundos** e fornece tanto métricas estendidas (`anhanga_probe_*`) quanto as séries nativas do **`blackbox_exporter`** (`probe_success`, `probe_duration_seconds`, `probe_http_duration_seconds{phase="resolve|connect|tls|processing|transfer"}`, `probe_http_status_code`, `probe_http_ssl`, `probe_ssl_earliest_cert_expiry`), permitindo reaproveitar dashboards Grafana existentes sem alterações.
+# Also bound total latency
+anhanga check https://api.example.com --min-grade A --max-ttfb 300ms --max-total 1.5s
 
-- **`GET /metrics`**: Retorna as métricas consolidadas dos alvos monitorados via `targets.yaml`.
-- **`GET /probe?target=<url>&samples=3`**: Executa uma sondagem sob demanda no padrão multi-target do Prometheus `blackbox_exporter`.
+# JSON for scripts, SARIF for GitHub Code Scanning
+anhanga check https://example.com --min-grade B --format json --output report.json
+anhanga check https://example.com --min-grade A --format sarif --output anhanga.sarif
 
-Exemplo de configuração no `prometheus.yml`:
+# Notify a webhook when a gate fails
+anhanga check https://example.com --min-grade B \
+  --webhook-url "https://hooks.slack.com/services/T000/B000/X000" --webhook-provider slack
+```
+
+Options: `--min-grade`, `--max-ttfb`, `--max-total`, `--samples/-n`, `--timeout/-t`, `--allow-private`, `--allow-invalid-cert`, `--format/-f {text,json,sarif}`, `--output/-o`, `--webhook-url`, `--webhook-provider {auto,slack,teams,telegram}`, `--telegram-chat-id`.
+
+`--max-ttfb` uses the median of the samples and `--max-total` the headline latency, the same functions the monitor uses for its SLOs.
+
+| Exit code | Meaning |
+| :---: | --- |
+| `0` | All checks passed. |
+| `1` | Target offline, invalid TLS certificate (unless `--allow-invalid-cert`), TTFB or total latency above the limit, or a content assertion failed. |
+| `2` | Security grade below `--min-grade`. |
+| `3` | DNS error, SSRF block, invalid target, or invalid arguments or configuration. |
+
+On a single-run `check`, the TLS protocol and cipher block may be reported as "not evaluated" because enumeration finishes in the background; it is never reported as "no protocols".
+
+### `keygen` and `backup`
+
+`anhanga keygen` generates 256 random bits and writes `ANHANGA_API_KEY` to `./.env` with mode `0600`. It does not overwrite an existing key without `--force`.
+
+`anhanga backup` takes a consistent copy of the database using the SQLite backup API. It can run while the server is up, writes with mode `0600`, expands `~`, and refuses to overwrite without `--force`. Schedule it from the host's cron.
+
+## HTTP API
+
+All routes under `/api/`, plus `/probe` and `/metrics`, require the API key. `/healthz` and the dashboard HTML are open; cached data is embedded in the page only for authorized clients.
+
+| Route | Description |
+| --- | --- |
+| `GET /api/v1/scan?url=&samples=&timeout=` | On-demand diagnostic of any URL (the dashboard's scan button). Supports content assertions. Not stored. |
+| `GET /api/v1/targets` | Last known state of all monitored targets. |
+| `GET/POST/DELETE /api/v1/targets/managed` | Targets added from the dashboard. |
+| `GET /api/v1/history?target=&hours=24&max_points=300` | Aggregated series: checks, up/degraded/down and mean/min/max latency per bucket. |
+| `GET /api/v1/uptime[?target=]` | `uptime_pct` (health up) and `availability_pct` (HTTP answered) over 24 h, 7 d and 30 d, with real data coverage. |
+| `GET /api/v1/incidents[?target=&open_only=true&limit=]` | Open and closed incidents with duration. |
+| `POST /api/v1/webhooks/notify` | Sends a server-generated alert to a webhook declared in `targets.yaml`. |
+| `GET /probe?target=&samples=` | On-demand probe in `blackbox_exporter` multi-target style. |
+| `GET /metrics` | Prometheus metrics for monitored targets. |
+
+Failures where the target did not answer return structured errors: `400` invalid URL, `403` SSRF block, `502` DNS, connection or TLS failure, `504` timeout, with `{"detail": {"error_code", "message", "target_url"}}`. Findings about a target that did answer (5xx, failed assertion, invalid TLS) remain `200`.
+
+## Prometheus integration
+
+Durations are exported in seconds. Besides the extended `anhanga_probe_*` series, the standard `blackbox_exporter` series are exported (`probe_success`, `probe_duration_seconds`, `probe_http_duration_seconds{phase="resolve|connect|tls|processing|transfer"}`, `probe_http_status_code`, `probe_http_ssl`, `probe_ssl_earliest_cert_expiry`), so existing Grafana dashboards can be reused. `probe_success` is `1` only when health is `up`.
 
 ```yaml
 scrape_configs:
-  - job_name: "anhanga-blackbox"
+  - job_name: anhanga-blackbox
     metrics_path: /probe
     params:
       samples: ["3"]
+    authorization:
+      credentials: "<ANHANGA_API_KEY>"
     static_configs:
-      - targets:
-          - https://cloudflare.com
-          - https://github.com
+      - targets: [https://cloudflare.com, https://github.com]
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -176,362 +256,118 @@ scrape_configs:
         replacement: 127.0.0.1:7890
 ```
 
----
+Targets that did not answer export no latency, grade or TLS series (no false zeros). The `anhanga_assertions_not_evaluated_total{target}` counter increments when the regex evaluator itself fails; alert on `rate(...) > 0`, otherwise a persistent evaluator failure silently disables regex assertions.
 
-## 🔐 Segurança da API (hardening)
+## Alerting
 
-- **Autenticação:** defina `ANHANGA_API_KEY`; as rotas `/api/*`, `/probe` e `/metrics` exigem `Authorization: Bearer <chave>` (ou `X-API-Key`). **Sem a chave, apenas acesso loopback direto é aceito** (requisições com `X-Forwarded-For`/`Forwarded`/`X-Real-IP` são recusadas). Atrás de proxy reverso, a chave é obrigatória.
-- **SSRF:** a política de IPs privados é do operador: `ANHANGA_ALLOW_PRIVATE=1` (rotas HTTP) ou `allow_private` no `targets.yaml`. Não existe mais parâmetro de query para isso.
-- **Webhooks:** `POST /api/v1/webhooks/notify` só envia para URLs declaradas em `webhooks:` do `targets.yaml`; o corpo do alerta é sempre gerado pelo servidor.
-- **Regex de asserção:** executada em subprocesso com timeout de 2 s e padrão limitado a 512 caracteres.
-- **Estado e métricas:** apenas alvos do `targets.yaml` entram no dashboard e no `/metrics`. Scans avulsos e `/probe` não criam séries.
-- **Rate limit:** `samples=N` consome N requisições. `ANHANGA_TRUSTED_PROXIES` vem vazio por padrão (XFF ignorado); liste os IPs dos seus proxies para honrá-lo.
+- **Triggers:** target offline, invalid TLS, certificate expiring, TTFB or total-latency SLO violation (median when `samples >= 2`), and grade below `min_grade`. SLOs and grade can be set per target.
+- **Anti-flapping:** a problem notifies only after `failure_threshold` consecutive cycles (default 2).
+- **Deduplication:** one notification, then a reminder only after `cooldown_seconds` (default 1 hour).
+- **Recovery:** one notification when the problem clears.
+- **Certificate expiry threshold:** the smaller of 15 days and 20% of the certificate's lifetime, so short-lived certificates are not permanently "expiring". An expiring certificate that expires or is revoked escalates to `degraded` without a green "resolved" message.
+- **Delivery:** parallel and in the background, so a slow webhook never delays probing. A delivery counts only on a 2xx response. Failures are retried twice, then queued in a persistent outbox and resent with backoff (30 s, 2 min, 10 min, 30 min, 1 h), dropping after about 1 hour of attempts or 24 hours of age. Metrics: `anhanga_alert_notifications_total{kind,result}` and `anhanga_alert_outbox_pending`.
+- **Providers** are detected by hostname (`api.telegram.org`; `office.com`, `outlook.com`, `logic.azure.com`, `teams.microsoft.com` and subdomains); anything else is treated as Slack-compatible. Message limits are respected on the escaped text (Slack header 150 characters, violations block 3000; Telegram 4096), truncating by line with "(+N omitted)" and always keeping the first violation.
+- **Shutdown:** in-flight deliveries get 5 seconds; the rest go to the outbox.
 
+## Persistence
 
----
+SQLite (standard library, no extra dependency). It is enabled when there are targets, or when the database file already exists. The default file is `anhanga.db` in the working directory.
 
-## ✅ Semântica de saúde e diagnóstico (v0.2.x)
+Stored: probe history (sparklines and uptime survive restarts), alert state (no duplicate alerts after a restart, cooldown respected), incidents, the notification outbox, and the targets added from the dashboard. The file is created with mode `0600`, and the outbox keeps only a hash of each webhook URL (the secret lives only in the configuration). A disk failure never stops monitoring: it is logged and counted in `anhanga_storage_errors_total`.
 
-- **`health`** em todo resultado: `up` (HTTP ok e TLS válido), `degraded` (HTTP ok, **TLS inválido**: expirado, hostname divergente, raiz não confiável…) ou `down`. O motivo exato vem em `tls.validation_error`. `probe_success` (Prometheus) só vale 1 para `up`.
-- **CLI:** `anhanga check` reprova (exit 1) certificado inválido; use `--allow-invalid-cert` para tolerar. Erros de argumento/configuração saem com **exit 3** (nota abaixo do mínimo = 2).
-- **API:** falhas sem resposta do alvo retornam `400` (URL inválida), `403` (Anti-SSRF), `502` (DNS/conexão/TLS) ou `504` (timeout), com `{"detail": {"error_code", "message", "target_url"}}`. Achados da sondagem (5xx do alvo, asserção, TLS inválido) continuam `200`.
-- **OCSP e cadeia X.509:** obtidos via `openssl s_client` (o módulo `ssl` do Python não os expõe). Sem o binário `openssl`, o campo vira "Não verificado" (`ocsp_stapling: null`), nunca "ausente".
-- **Dias de validade** podem ser negativos (expirado há N dias).
-- **Latência:** `server_processing_ms` só é calculado a partir de TTFB confiável (amostras quentes). TTFB frio em HTTP/2 pode incluir ~1 RTT extra; com `samples=1` o campo é `null`. `end_to_end_ms` inclui todos os redirects. Percentis de DNS/TCP/TLS usam só amostras com conexão nova.
-- **Alvos sem resposta** não geram séries de latência/nota/TLS em `/metrics` (nada de zeros falsos); o dashboard mostra "—".
-- **Heurísticas:** `Server:` só é vazamento se expõe versão; `HttpOnly` só é exigido de cookies de sessão/autenticação (`ANHANGA_SENSITIVE_COOKIE_REGEX` ajusta).
+History older than `retention_days` (default 14) is pruned hourly, and the file shrinks through chunked incremental vacuum (databases created with `auto_vacuum=INCREMENTAL`). Rough sizing is about 150 bytes per probe: 10 targets every 30 seconds is about 130 MB over 30 days.
 
+Back up with `anhanga backup`, or `sqlite3 anhanga.db ".backup out.db"`.
 
----
+## Security model
 
-## 🔔 Alertas com estado e configuração validada
+- **Authentication:** with `ANHANGA_API_KEY` set, send `Authorization: Bearer <key>` or `X-API-Key`. Without a key, only direct loopback access is accepted: the `Host` header must be a loopback name and `X-Forwarded-For`, `Forwarded` and `X-Real-IP` must be absent, so a reverse proxy on the same machine is treated as external. `anhanga serve` refuses to start on a non-loopback address without a key.
+- **SSRF:** blocks loopback, RFC 1918, link-local and cloud metadata (`169.254.0.0/16`, `fe80::/10`), CGNAT, IPv6 ULA, and tunneled or mapped forms (`::ffff:127.0.0.1`, 6to4, Teredo), plus non-HTTP schemes. The TCP connection is pinned to the single validated DNS answer, and the address is revalidated on every redirect. `allow_private` and `ANHANGA_ALLOW_PRIVATE` are operator-only; there is no query parameter for it.
+- **Certificate-supplied URLs:** OCSP, CRL and AIA URLs come from the target's certificate, which is third-party input. They go through the same SSRF policy, do not inherit the target's `allow_private`, are size-limited (OCSP 64 KB, CRL 3 MB) and time-limited. Internal PKI needs an explicit `ANHANGA_REVOCATION_ALLOW_PRIVATE=1`.
+- **Webhooks:** `POST /api/v1/webhooks/notify` only sends to URLs declared in `targets.yaml`, the alert body is always built by the server, and a `provider` or `chat_id` different from the configured one is rejected.
+- **Regex assertions** run in an isolated subprocess with a 2 s timeout and a 512-character pattern limit (ReDoS protection).
+- **Process:** the Docker image runs as an unprivileged user. `/healthz` returns only `{"status":"alive"}`. The UI loads no external resources (system fonts, vendored Alpine and Tailwind).
+- **Review:** an automated code reading (subprocesses, SSRF, authentication, SQL, XSS, YAML) found no high-confidence vulnerability. This is not a penetration test.
 
-O `targets.yaml` é **validado na carga** (erros e ajustes vão para o log; entradas inválidas são descartadas, o servidor não cai) e **recarregado a quente** quando o arquivo muda. Veja `targets.example.yaml` para todas as opções.
+Do not expose `/probe` and `/api/v1/scan` without a key: they connect to hosts chosen by the caller.
 
-- **Anti-flapping:** um problema só notifica após `failure_threshold` ciclos consecutivos (padrão 2).
-- **Deduplicação:** notifica **uma vez**; repete como *lembrete* só após `cooldown_seconds` (padrão 1 h; `0` = sem lembretes).
-- **Recuperação:** uma notificação quando o problema some (`recovery_threshold`, `notify_recovery`).
-- **Gatilhos:** alvo offline, TLS inválido, certificado expirando, SLO de TTFB/latência total (`slo:`; usa a mediana quando `samples ≥ 2`) e nota abaixo de `min_grade`. SLO e nota podem ser definidos por alvo.
-- **Entrega:** em paralelo e em background (webhook lento não atrasa as sondagens), com timeout e uma nova tentativa. Se ainda falhar, a notificação vai para a **outbox persistente** e é reenviada com backoff (30 s, 2 min, 10 min, 30 min, 1 h; desiste após ~1 h ou 24 h de idade). Métricas: `anhanga_alert_notifications_total{kind,result=sent|queued|dropped|failed}` e `anhanga_alert_outbox_pending`.
-- **Persistência:** o estado dos alertas sobrevive a reinícios (veja abaixo), então um problema ainda ativo não é notificado de novo.
+## How to read the results
 
-## 🧪 Desenvolvimento
+### Health
+
+`health` is `up` (HTTP ok and valid TLS), `degraded` (HTTP ok but TLS invalid: expired, hostname mismatch, untrusted root, revoked) or `down`. The exact reason is in `tls.validation_error`. Certificate days remaining can be negative (expired N days ago).
+
+### Timings
+
+DNS, TCP, TLS, TTFB and transfer are per-phase durations, not cumulative. `curl -w` reports cumulative times (`time_connect`, `time_appconnect`, `time_starttransfer`); subtract the previous phase to compare. `server_processing_ms` is computed only from reliable (warm) TTFB samples; a cold HTTP/2 TTFB may include about one extra RTT, and with `samples=1` the field is `null`. `end_to_end_ms` includes all redirects. DNS, TCP and TLS percentiles use only samples with a fresh connection. If a warm sample fails, the first sample is kept, later ones are skipped and the fact is noted in `timings.timing_notes`; the target is offline only if the first sample fails.
+
+### Percentiles
+
+P95 requires at least 20 samples and P99 at least 100, because below that they are not statistically meaningful. A scan or monitoring cycle is limited to 20 samples (to avoid loading the target), so the dashboard shows P95 only with the 20x option and never shows P99. For long-term tail latency use the histogram exported on `/metrics` with `histogram_quantile()` in Prometheus. See also [Known limitations](#known-limitations).
+
+### Time budget
+
+Stages after the HTTP response (TLS chain and OCSP stapling, port 80, protocol enumeration, legacy TLS, revocation, CORS, regex) each have their own deadline. If one runs out, the stages already completed are kept and the result is partial (noted in `timings.timing_notes`; regex becomes `assertions.not_evaluated`) instead of discarding a valid 200 as a timeout. Definitive assertions (`assert_final_url`, `max_payload_bytes`) are evaluated before the regex stage so they are never lost. A response that is sent but never terminated by the server (seen on `www.gnu.org`, where `curl` also hangs) exceeds the total deadline and is reported offline; that is the target's behavior.
+
+### TLS protocols and ciphers
+
+Each HTTPS probe enumerates, with handshakes restricted to each version, which protocols (TLS 1.0 to 1.3) and ciphers the server accepts. TLS 1.2 and earlier ciphers are found by iterative exclusion (at most 24 handshakes per version). The enumeration never holds a probe more than 3 seconds; if the target accepts many ciphers it finishes in the background and the result appears from the next cycle, cached per `hostname:port` for 6 hours (15 minutes if any state was inconclusive). At most one new enumeration per `ip:port` every 2 minutes. On a target's first probe the block may be "not evaluated".
+
+States: `accepted`; `rejected` (only a TLS alert from the server counts: a bare `handshake_failure` does not prove a version was refused, only `protocol_version` does); `unknown` (timeout, network failure or client limitation; never treated as rejected and never cached as conclusive); and `untestable` (SSLv2 and SSLv3, which modern OpenSSL removed).
+
+Findings: `SEC-TLS-LEGACY` (TLS 1.0 or 1.1 accepted), `SEC-TLS-WEAK-CIPHER` (NULL, anonymous, RC4, DES, 3DES, EXPORT, MD5) and `SEC-TLS-NO-PFS` (static RSA key exchange). Legacy protocols or weak ciphers cap the transport dimension of the grade at 10/40, and missing PFS deducts 5 points. If the TLS 1.0 and 1.1 check could not be completed, the dashboard shows "Not verified" and the grade does not award the modern-TLS bonus: not verified is not the same as safe. When a handshake fails outright, the error states what the server does accept (for example "accepts only TLSv1").
+
+### Revocation
+
+OCSP is checked actively (the response signature is verified against the issuer), with CRL as fallback (signature and `nextUpdate` checked). `tls.revocation.status` is `good`, `revoked`, `unknown`, `unavailable` or `error`. Revoked implies `tls.valid=false`, `health=degraded`, `probe_success=0`, a failing CLI gate and an alert. "Unavailable" is never reported as "not revoked". Let's Encrypt has ended OCSP, so for it only the CRL catches revocation.
+
+Results are cached (good 30 min, revoked 1 h, failures 5 min, CRLs until `nextUpdate` or 6 h). A revocation check never holds a probe more than 4 seconds and is not cancelled: a slow CRL finishes in the background (25 s ceiling) and the next cycle reads the cache. At most 4 background checks run at once and 32 are queued. The check runs only while the certificate is still valid.
+
+### Content-Security-Policy
+
+`security.csp_analysis` classifies the policy as `strong`, `moderate`, `weak` or `report-only` and lists causes: `'unsafe-inline'` without nonce or hash, `'unsafe-eval'`, wildcards, `http:`, `data:`, bare `https:`, missing `script-src` or `default-src`, `object-src` other than `'none'`, missing `base-uri`, and hosts that allow bypass (JSONP, CDNs). Nonces, hashes and `'strict-dynamic'` are recognized. Multiple policies are conjunctive: a policy without `script-src` or `default-src` does not hide another policy's `'unsafe-inline'`. A Report-Only policy does not count as protection. The CSP score is proportional to quality (strong 100%, moderate 80%, weak 50%) and a weak policy produces `SEC-CSP-WEAK` with a stricter snippet.
+
+### Cross-origin isolation headers
+
+COOP, COEP and CORP are read from the HTTPS response. Missing COOP or COEP yields informational `SEC-COOP` and `SEC-COEP` findings with weight 0 (optional hardening; COEP breaks third-party embeds without CORP or CORS). An invalid value, which browsers ignore, is `low`. `unsafe-none` counts as absent. Missing CORP is not reported, since it only applies to resources.
+
+### Heuristics
+
+`Server:` is a leak only if it exposes a version. `HttpOnly` is required only for session and authentication cookies; the double-submit token names (`csrftoken`, `XSRF-TOKEN`, `X-CSRF-TOKEN`, `csrf_token`, with `__Host-`, `__Secure-` and leading `_` accepted) do not need it because JavaScript must read them, while `_csrf` (the csurf secret) stays sensitive. `error_code` is `tls_error` only for real TLS markers, never because a hostname happens to contain one.
+
+## Validation
+
+Protocol support (SSLv2 to TLS 1.3) was compared with `testssl.sh` 3.2.5 on 14 public hosts (`example.com`, `github.com`, `wikipedia.org`, `cloudflare.com`, `python.org`, `mozilla.org`, and the `badssl.com` hosts for TLS 1.0, 1.1, 1.2, RC4, 3DES, NULL, RC4-MD5 and DH1024) on 2026-11-14.
+
+- The two tools agree on TLS 1.0 to 1.3 on 9 of the 14 hosts.
+- `null.badssl.com`: Anhangá reports TLS 1.0 and 1.1 accepted (confirmed with `openssl s_client`, cipher `ECDHE-RSA-NULL-SHA`); `testssl.sh` says "not offered" because its socket test does not offer NULL ciphers by default.
+- `rc4.badssl.com`, `3des.badssl.com`, `rc4-md5.badssl.com`: `testssl.sh` finds them accepted, while Anhangá reports `unknown` rather than "rejected", because the local OpenSSL cannot offer RC4 or 3DES and a bare `handshake_failure` does not prove refusal.
+- SSLv2 and SSLv3 are reported as `untestable`; `testssl.sh` is the reference for those.
+- Only protocols were compared in this run, not the grade.
+
+Cipher coverage was checked using `testssl.sh` with its bundled OpenSSL: the TLS 1.2 cipher list was identical on `example.com` (20 ciphers), `github.com` (14) and `tls-v1-2.badssl.com` (22). Two known differences are flagged in the UI and CLI. TLS 1.3 lists only the negotiated suite (`ciphers_complete=false`), because TLS 1.3 suites cannot be selected by exclusion from Python. RC4, 3DES and SEED cannot be offered by the local OpenSSL, so a target that accepts them does not show them and does not trigger the weak-cipher finding; `legacy_ciphers_untested=true` warns that their absence proves nothing. For a definitive answer on those, use `testssl.sh` alongside.
+
+## Known limitations
+
+- **Not validated against live services:** webhook payloads are tested against mocks and size limits; real delivery to Slack, Microsoft Teams and Telegram has not been exercised end to end.
+- **No long soak yet:** a 14-minute run against 12 targets showed stable memory (about 125 MB) and no orphaned `openssl` processes. Multi-day behavior is unverified.
+- **No P99 in the dashboard:** see [Percentiles](#percentiles). Separately, `/metrics` exports the per-cycle `anhanga_probe_latency_quantile_seconds{quantile="0.95"|"0.99"}` computed from that cycle's samples without applying the minimum-sample rule above, so with few samples they are not statistically meaningful. Prefer the histogram.
+- **TLS enumeration:** the local OpenSSL cannot test RC4, 3DES, EXPORT or SSLv3 (see [Validation](#validation)). "Rejected" means "refused every cipher this client offers".
+- **Certificate chain behind load balancers:** if the chain's leaf differs from the connection's certificate (renewal mid-probe, or different certificates per backend), the chain is discarded as "not verified", so revocation can be intermittently unavailable behind such balancers. When the `s_client` queue is full the result is indistinguishable from an `openssl` failure, so under load the chain can intermittently appear "not verified".
+- **Shutdown:** a caller awaiting a cancelled revocation check receives `CancelledError`; this only happens while shutting down.
+- **Minor, unfixed:** the manual merge of `ContentAssertionsResult` in `probe.py` is fragile to new fields; the IDNA helper drops port `0` and empty `?` or `#` markers; the 50 ms margin that distinguishes "deadline exhausted" from "stage timeout" is a heuristic.
+- **Single instance:** one worker and one process; there is no clustering.
+- **Not planned for the first release:** DNS and email auditing (CAA, SPF, DMARC, DNSSEC), a dashboard layout refactor, and SSL Labs integration. See `BACKLOG.md`.
+
+## Development
 
 ```bash
 uv pip install -e ".[dev]"
-pytest          # sem rede; ~3 s
+pytest
 ```
 
+The suite (about 500 tests) is offline except for local PKI fixtures (a real CA, CRL and OCSP responder, `s_server`) and takes roughly one minute. CI runs it on Python 3.11, 3.12 and 3.13. Regression tests are written to fail without their fix and are checked with mutation testing.
 
-## 💾 Persistência (SQLite)
+## License
 
-Ativa automaticamente quando há alvos no `targets.yaml` (stdlib `sqlite3`, sem dependência extra). Arquivo padrão `anhanga.db` no diretório de execução; ajuste com `ANHANGA_DB_PATH` ou:
-
-```yaml
-storage:
-  enabled: true        # false desliga (o monitor segue funcionando, só sem histórico)
-  path: /var/lib/anhanga/anhanga.db
-  retention_days: 14   # histórico e incidentes encerrados mais antigos são podados a cada hora
-```
-
-O que fica salvo: **histórico de sondagens** (sparkline e uptime sobrevivem a reinício), **estado dos alertas** (sem alerta duplicado após reiniciar; cooldown respeitado), **incidentes** (início no 1º ciclo com falha, fim na recuperação) e a **outbox** de notificações. O arquivo é criado com permissão `0600` e a outbox guarda só um hash da URL do webhook (o segredo fica apenas na configuração). Falha de disco nunca derruba o monitor: é logada e contada em `anhanga_storage_errors_total`.
-
-| Endpoint (exigem a API key, como os demais `/api/*`) | Retorna |
-|---|---|
-| `GET /api/v1/history?target=&hours=24&max_points=300` | série agregada: checks, up/degraded/down e latência média/mín/máx por bucket |
-| `GET /api/v1/uptime[?target=]` | `uptime_pct` (health=up) e `availability_pct` (HTTP respondeu) em 24h/7d/30d, com `covered_seconds` (cobertura real dos dados) |
-| `GET /api/v1/incidents[?target=&open_only=true&limit=]` | incidentes abertos e encerrados, com duração |
-
-Estimativa de espaço: ~150 B por sondagem (10 alvos a cada 30 s ≈ 130 MB com 30 dias de retenção). Backup: copie o `.db` com o servidor parado, ou use `sqlite3 anhanga.db ".backup out.db"`.
-
-
-## 🖥️ Dashboard operacional
-
-- **Auto-atualização** a cada 15 s (pausa com a aba oculta; liga/desliga e a preferência fica no navegador) com indicador "Atualizado há Ns".
-- **Resumo no topo** (Todos / Online / Degradado / Offline) que também filtra os cards, e **ordenação** por pior status, nome, maior latência ou pior nota.
-- **Uptime 24h por card**, com a cobertura real dos dados ("dados de 28 s" quando o banco é novo) em vez de fingir uma janela cheia.
-- **Incidentes recentes**: abertos e resolvidos, com início, duração e motivo.
-- Sem persistência (desativada ou sem alvos), o dashboard esconde uptime e incidentes e avisa por quê. Com `ANHANGA_API_KEY`, a chave é pedida uma única vez por carga de página.
-
-
-## 🔎 Revogação de certificado
-
-Além de validade, cadeia e hostname, o Anhangá verifica se o certificado **foi revogado**: **OCSP ativo** (resposta com assinatura verificada contra o emissor) e **CRL como fallback** (assinatura verificada, `nextUpdate` conferido). O Let's Encrypt encerrou o OCSP, então para ele só o CRL pega a revogação (testado contra `revoked.badssl.com`).
-
-- Resultado em `tls.revocation` (`status`: `good` | `revoked` | `unknown` | `unavailable` | `error`, `method`, `revoked_at`, `responder`). **Revogado ⇒ `tls.valid=false`**, `health=degraded`, `probe_success=0`, gate do CLI reprova e o alerta dispara. "Não verificável" nunca é reportado como "não revogado".
-- **Segurança:** as URLs de OCSP/CRL vêm do certificado (terceiros). Toda requisição passa pela política Anti-SSRF (IP validado e fixado, redirects revalidados), com limites de tamanho (OCSP 64 KB, CRL 3 MB) e timeout.
-- **Cache** (bom 30 min, revogado 1 h, falhas 5 min; CRL até `nextUpdate`/6 h) para não martelar os respondedores a cada ciclo. Desligue com `ANHANGA_REVOCATION_CHECK=0`.
-- Requer o binário `openssl` (sem ele: "não verificável"). Só roda se o certificado ainda é válido.
-
-## 🛡️ Qualidade da Content-Security-Policy
-
-Ter CSP não basta. `security.csp_analysis` classifica a política (`strong` / `moderate` / `weak` / `report-only`) e lista as causas: `'unsafe-inline'` sem nonce/hash, `'unsafe-eval'`, `*`, `http:`, `data:`, `https:` genérico, `script-src`/`default-src` ausentes, `object-src` diferente de `'none'`, `base-uri` ausente e hosts que permitem bypass (JSONP/CDNs). Nonce/hash e `'strict-dynamic'` são reconhecidos. Várias políticas são conjuntivas (uma fraqueza só vale se todas a tiverem).
-
-- **Report-Only não conta como proteção** (não bloqueia nada); antes uma CSP só em Report-Only ganhava a nota cheia.
-- A pontuação da CSP é proporcional à qualidade (forte 100%, moderada 80%, fraca 50%) e gera o finding `SEC-CSP-WEAK` com snippet de política mais rígida.
-
-## 🔒 Protocolos e cifras TLS
-
-Cada sondagem HTTPS enumera, com handshakes restritos a cada versão, quais protocolos (TLS 1.0–1.3) e
-cifras o servidor aceita. As cifras de TLS ≤ 1.2 são descobertas por exclusão iterativa (máx. 24
-handshakes por versão). O resultado fica em cache por 6 h por `ip:porta:host`, então o custo extra no
-alvo é de ~10–40 handshakes a cada 6 h, e não a cada ciclo. `ANHANGA_TLS_ENUM=0` desliga.
-
-- **Findings:** `SEC-TLS-LEGACY` (TLS 1.0/1.1 aceito), `SEC-TLS-WEAK-CIPHER` (NULL, anônimas,
-  RC4/DES/3DES, EXPORT, MD5) e `SEC-TLS-NO-PFS` (RSA estática, sem forward secrecy). Legado ou cifra fraca
-  limitam a dimensão de transporte a 10/40; falta de PFS desconta 5 pontos.
-- **Handshake que falha:** em vez de só "offline", o erro diz o que o servidor aceita (ex.: "aceita apenas:
-  TLSv1") e o resultado traz a enumeração.
-- **Estados:** `accepted`, `rejected` (só um alerta TLS do servidor conta), `unknown` (timeout, falha de
-  rede ou limitação do cliente; nunca vira "recusado" nem entra no cache) e `untestable` (SSLv2/SSLv3).
-
-**Prazos:** a enumeração nunca segura a sondagem por mais de 3 s. Se o alvo aceita muitas cifras (ex.: ~20 em TLS 1.2),
-ela termina em segundo plano e o resultado aparece a partir do ciclo seguinte (cache por `hostname:porta`). No máximo uma
-enumeração nova por `ip:porta` a cada 2 min. A checagem de revogação tem orçamento próprio de 4 s; se estourar, vira
-`error` em cache por 5 min, nunca derruba a sondagem.
-
-**Limites:** o teste usa o OpenSSL do sistema, que não oferece RC4/3DES/EXPORT nem SSLv3. Um servidor que só
-aceita essas cifras aparece como "nenhum protocolo testável aceito", não como "usa RC4". "Recusado" significa
-"recusou todas as cifras que este cliente oferece".
-
-## 🧱 Isolamento de origem cruzada (COOP / COEP / CORP)
-
-Os três headers são lidos da resposta HTTPS e aparecem em `present_headers`. A ausência de COOP/COEP gera
-findings `SEC-COOP`/`SEC-COEP` com severidade `info` e **peso 0**: são endurecimentos opcionais (o COEP quebra
-embeds de terceiros sem CORP/CORS), então não alteram a nota. Valor inválido (que o navegador ignora) vira `low`.
-`unsafe-none` conta como ausente. A ausência de CORP não é apontada, já que só faz sentido para recursos
-(imagens, scripts) e não para páginas HTML.
-
-## ⚙️ Configuração: regras de validação
-
-- **Booleanos estritos:** `allow_private`, `alerting.notify_recovery` e `storage.enabled` aceitam `true/false`,
-  `yes/no`, `on/off`, `1/0` (inclusive como string vinda de `${VAR}`). Qualquer outro valor (ex.: variável vazia) é
-  um erro registrado e cai no padrão **seguro** (`allow_private=false`). Nunca é interpretado como "verdadeiro".
-- **Recarga a quente:** se o `targets.yaml` salvo estiver ilegível ou com YAML inválido, a recarga é rejeitada e a
-  configuração anterior continua valendo (alvos, estado de alertas e incidentes abertos ficam intactos).
-- **Alvos duplicados** são detectados pela URL normalizada (`example.com` = `https://example.com` = `HTTPS://EXAMPLE.COM`).
-- **Dashboard:** o HTML é público, mas os dados em cache só vão embutidos para quem está autorizado.
-- **Desligamento:** entregas de alerta em voo ganham 5 s para concluir; as que não concluírem vão para a outbox.
-
-## 🔔 Entrega de alertas e revogação: detalhes de segurança
-
-- **Webhook só conta como entregue com resposta 2xx.** 4xx/5xx/429 são falha: 2 tentativas imediatas, depois a
-  outbox reenvia com backoff (e só remove o item quando o destino responde 2xx).
-- **URLs de OCSP/CRL/AIA vêm do certificado do alvo (terceiro) e NÃO herdam o `allow_private` dele.** Sem isso, um
-  certificado hostil faria o monitor requisitar `169.254.169.254` ou a rede interna. Para PKI interna com
-  respondedor em IP privado, o operador libera explicitamente com `ANHANGA_REVOCATION_ALLOW_PRIVATE=1`.
-- **A revogação nunca segura a sondagem por mais de 4 s e não é cancelada.** Se o CRL for grande e demorar mais, o
-  campo sai como `unavailable` ("verificação em andamento") e o trabalho termina em segundo plano (teto de 25 s); o
-  ciclo seguinte lê o resultado do cache. Processos `openssl` são sempre encerrados, inclusive em cancelamento.
-
-## 🧩 Asserções de conteúdo (regex) e execução sem instalar o pacote
-
-O avaliador de regex (anti-ReDoS, subprocesso com timeout de 2 s) roda por **caminho de arquivo** e só usa a
-biblioteca padrão, então funciona também com `PYTHONPATH=src` (sem `pip install`). Se o próprio avaliador falhar,
-a asserção reporta "Avaliador de regex indisponível" (falha do Anhangá), nunca "Regexp inválida" (reservado a
-padrões realmente inválidos). O diagnóstico de handshake TLS acompanha o `timeout` pedido (no máximo 2× e 10 s).
-
-## 🧹 Refinamentos de payload, cookies e erros
-
-- **Webhooks:** as mensagens do AlertManager são a fonte de verdade. O estado do resultado só completa o que elas
-  não cobrem (por tópico, não por igualdade de texto), e em lembrete/recuperação nada é acrescentado.
-- **Cadeia/OCSP grampeado:** `openssl s_client` tem cache de 5 min por `host:porta` (invalidado se o certificado da
-  conexão mudou, ou seja, após uma renovação) e no máximo 8 execuções simultâneas.
-- **Cookies:** só os *nomes* de token de double-submit (`csrftoken`, `XSRF-TOKEN`, `X-CSRF-TOKEN`, `csrf_token`) não
-  exigem `HttpOnly` (precisam ser legíveis por JS). `_csrf` (segredo do csurf), `csrf_session`, `auth_xsrf_sid` etc.
-  continuam sensíveis. `ANHANGA_SENSITIVE_COOKIE_REGEX` inválida é registrada e ignorada (usa o padrão, com as
-  exceções do padrão), em vez de derrubar a aplicação; válida, vale como escrita.
-- **Erros:** `tls_error` só para marcadores reais de TLS (nunca por um hostname como `classless.example`). O retry
-  após certificado inválido usa só o prazo que sobrou, e timeout/SSRF nele recebem o mesmo tratamento do 1º passe.
-
-## ⚖️ Concorrência, prazos e contratos (revisão 3)
-
-- **Cadeia/OCSP grampeado (`openssl s_client`):** no máx. 8 simultâneos, com a espera pela vaga dentro do prazo da
-  etapa (se não houver vaga, a etapa degrada para "não verificado" naquele ciclo, nunca derruba a sondagem),
-  *single-flight* por `host:porta` e cache que só vale quando o certificado da conexão atual é conhecido e igual.
-- **Revogação em segundo plano:** no máx. 4 checagens simultâneas; no desligamento as pendentes são canceladas
-  (e os `openssl` mortos). Tarefas herdadas de outro event loop são ignoradas.
-- **Asserções de regex:** se o *avaliador* falhar (fork/arquivo), a asserção fica em `assertions.not_evaluated`
-  (visível no dashboard), sem reprovar o alvo nem disparar alerta: é falha do Anhangá, não do alvo.
-- **`error_code`:** `tls_error` cobre também `EOF occurred in violation of protocol (_ssl.c:...)` e alertas
-  `tlsv1x/sslv3 alert ...`; um hostname parecido (`tlsv13-alert.example`) não conta.
-- **Retry após certificado inválido:** só tenta com ≥ 1 s de prazo total restante; a mensagem de timeout cita o
-  prazo realmente usado.
-- **Webhooks:** o motivo do OFFLINE é completado em qualquer evento (alerta, lembrete, reenvio).
-
-## 🔧 Refinamentos da revisão 4 e limites conhecidos
-
-- **Asserção não avaliada:** além da linha no dashboard, cada ocorrência incrementa
-  `anhanga_assertions_not_evaluated_total{target}` e gera um log `WARNING`. **Alerte em `rate(...) > 0`**: sem isso,
-  uma falha persistente do avaliador deixa as asserções de regex sem efeito em silêncio.
-- **Fila de revogação:** no máx. 32 checagens pendentes (acima disso, "fila cheia" na hora) e no máx. 60 s de espera
-  por vaga; quem desiste não é cacheado e tenta no ciclo seguinte.
-- **Cadeia `s_client`:** se a folha da cadeia obtida não for a da conexão atual (renovação no meio, ou balanceador
-  servindo certificados diferentes por backend), a cadeia é descartada ("não verificado"). Atrás de um balanceador com
-  certificados distintos por backend, a checagem de revogação pode ficar indisponível de forma intermitente.
-- **Cookies:** a exceção de double-submit aceita `__Host-`/`__Secure-` e `_` inicial (`__Host-csrf-token`, `_csrf_token`).
-- **`error_code`:** `_ssl.c` só conta no formato `(_ssl.c:NNNN)`; a mensagem de timeout cita sempre o prazo total.
-- **Limites conhecidos (não corrigidos):** no desligamento, quem aguarda uma checagem cancelada recebe
-  `CancelledError` (só ocorre ao encerrar); a fila cheia do `s_client` devolve o mesmo `([], None)` de uma falha do
-  `openssl`, então sob carga a cadeia aparece como "não verificada" de forma intermitente.
-
-## 📏 Como ler os números e limites de uso
-
-- **Tempos por fase, não acumulados:** DNS, TCP, TLS, TTFB e transferência são durações de cada fase. O `curl -w`
-  reporta tempos *acumulados* (`time_connect`, `time_appconnect`, `time_starttransfer`): para comparar, subtraia a fase anterior.
-- **Protocolos/cifras TLS aparecem a partir do 2º ciclo:** a enumeração roda em segundo plano (orçamento de poucos
-  segundos por sondagem) e fica em cache por 6 h. Na 1ª sondagem de um alvo, e no `anhanga check` de execução única,
-  o bloco pode vir vazio ("não avaliado"), nunca "sem protocolos".
-- **Transferência que não termina:** se o servidor envia a resposta mas não a encerra (visto em `www.gnu.org`, onde o
-  `curl` também trava), a sondagem estoura o prazo total e o alvo é dado como OFFLINE. É o comportamento do alvo, não do monitor.
-- **Autenticação sem `ANHANGA_API_KEY`:** só é aceito acesso direto por loopback **com** `Host` de loopback
-  (`localhost`, `127.0.0.1`, `::1`) e sem `X-Forwarded-For`/`Forwarded`/`X-Real-IP`. Um proxy reverso na mesma máquina
-  encaminha o `Host` público e é tratado como externo. `anhanga serve` em endereço fora do loopback **recusa iniciar**
-  sem chave. Gere uma com `anhanga keygen` (veja abaixo) e não publique `/probe` e `/api/v1/scan` sem ela
-  (eles conectam a hosts escolhidos pelo chamador).
-- **Revisão de segurança:** uma leitura automatizada do código (subprocessos, SSRF, autenticação, SQL, XSS, YAML) não
-  encontrou vulnerabilidade de alta confiança. Não é um teste de intrusão.
-
-## 🔑 Chave da API, `.env`, backup e Docker
-
-- **Chave:** `anhanga keygen` gera 256 bits aleatórios e grava `ANHANGA_API_KEY` em `./.env` (permissão `0600`,
-  já no `.gitignore`); não sobrescreve sem `--force`. O servidor lê o `.env` ao iniciar (variáveis já definidas no
-  ambiente têm precedência). A interface pede a chave uma vez por aba; nas chamadas use `Authorization: Bearer <chave>`.
-  A chave só é obrigatória para escutar fora do loopback ou atrás de proxy.
-- **`/docs`, `/redoc`, `/openapi.json`:** desligados por padrão; `ANHANGA_DOCS=1` os liga. **`/healthz`** só responde
-  `{"status":"alive"}`. **`/metrics`** exige a chave; o botão da interface busca com ela.
-- **Sem recursos externos:** a interface não carrega fontes do Google (usa as fontes do sistema).
-- **Backup:** `anhanga backup destino.db` copia o banco de forma consistente (API de backup do SQLite; pode rodar com o
-  servidor ativo), grava com `0600` e não sobrescreve sem `--force`. A retenção (`storage.retention_days`, padrão 14
-  dias) já limita o tamanho. Agende o backup no cron do host.
-- **Docker:** `docker build -t anhanga .` e
-  `docker run -d -p 7890:7890 --env-file .env -v "$PWD/data:/data" anhanga` (coloque `targets.yaml` em `data/`; o diretório
-  precisa ser gravável pelo uid 10001). Roda sem privilégios, tem `HEALTHCHECK` e **não inicia sem `ANHANGA_API_KEY`**.
-
-## ✅ Validação cruzada com o testssl.sh
-
-Protocolos (SSLv2 a TLS 1.3) comparados com o `testssl.sh` 3.2.5 em 14 hosts públicos (`example.com`, `github.com`,
-`wikipedia.org`, `cloudflare.com`, `python.org`, `mozilla.org` e os `badssl.com` de TLS 1.0/1.1/1.2, RC4, 3DES, NULL,
-RC4-MD5 e DH1024), em 2026-11-14:
-
-- **Concordam** em TLS 1.0–1.3 em 9 dos 14 hosts.
-- **`null.badssl.com`:** o Anhangá aceita TLS 1.0/1.1 (confirmado com `openssl s_client`, cifra `ECDHE-RSA-NULL-SHA`); o
-  `testssl.sh` diz "not offered" porque seu teste por sockets não oferece cifras NULL por padrão.
-- **`rc4.badssl.com`, `3des.badssl.com`, `rc4-md5.badssl.com`:** o `testssl.sh` as aceita; o Anhangá reporta
-  `unknown` ("não foi possível determinar"), não "rejeitado": o OpenSSL local não oferece RC4 nem 3DES, e um
-  `handshake_failure` sozinho não prova que o servidor recusou a versão (só `protocol_version` prova).
-  Um OpenSSL com RC4/3DES (`local_ciphers_complete()`) volta a tratar `handshake_failure` como recusa.
-- **SSLv2/SSLv3:** o Anhangá os reporta como `untestable` (o OpenSSL moderno os removeu); o `testssl.sh` os testa por
-  sockets próprios. Hoje o `testssl.sh` é a referência para esses dois.
-- **Fora desta comparação:** nota de segurança e lista de cifras (só protocolos foram comparados).
-
-**Cobertura de cifras (validação com `testssl.sh`, com o OpenSSL embutido dele):** a lista de cifras TLS 1.2 do Anhangá
-foi **idêntica** à do `testssl.sh` em `example.com` (20), `github.com` (14) e `tls-v1-2.badssl.com` (22). Diferenças
-conhecidas, agora sinalizadas na interface e no CLI: (1) **TLS 1.3** lista só a suíte negociada (`ciphers_complete=false`),
-porque suítes 1.3 não são selecionáveis por exclusão em Python; (2) **RC4/3DES/SEED** não são ofertáveis pelo OpenSSL
-local, então um alvo que as aceite (ex.: `example.com` aceita 3DES em TLS 1.0) não as mostra e não dispara o achado de
-cifra fraca. `legacy_ciphers_untested=true` avisa que a ausência delas não prova nada. Para testá-las de verdade,
-use o `testssl.sh` ao lado.
-
-## 🔁 Correções da revisão da `main` (lote A)
-
-- **CSP com várias políticas:** são conjuntivas. Uma política **sem** `script-src`/`default-src` não restringe scripts,
-  então não esconde o `'unsafe-inline'` de outra (antes, o par virava "strong" com nota cheia). `object-src` e `base-uri`
-  continuam neutralizados por qualquer política que os restrinja.
-- **Amostras 2..N:** se uma amostra quente falhar (conexão keep-alive resetada, timeout), a 1ª amostra já obtida é
-  mantida, as seguintes são interrompidas e o fato fica em `timings.timing_notes`. O alvo só é OFFLINE se a 1ª falhar.
-- **Enumeração TLS:** só alerta de versão (`protocol_version`...) e alerta de "sem cifra em comum" provam recusa; SNI
-  não reconhecido, certificado de cliente exigido, erro interno etc. deixam a versão como `unknown`.
-- **`.env`:** é carregado quando o pacote `anhanga` é importado, antes de qualquer módulo que leia variáveis na
-  importação (`ANHANGA_SENSITIVE_COOKIE_REGEX` no `.env` era ignorada).
-- **`anhanga serve` sem `--workers`:** instância única. Cada worker rodaria o loop de monitoramento, e uma queda geraria
-  um alerta por worker. Também não use `uvicorn anhanga.main:app --workers N` nem `WEB_CONCURRENCY` > 1.
-
-## 🔁 Correções da revisão da `main` (lote B)
-
-- **`ANHANGA_CONFIG`:** se for definido e o arquivo não existir (typo, volume não montado), o erro "Falha ao ler ..." é
-  logado e nenhum outro `targets.yaml` é usado. Sem a variável, o `targets.yaml` do diretório atual segue valendo. A
-  imagem Docker não fixa mais `ANHANGA_CONFIG`: ela acha `/data/targets.yaml` pelo diretório de trabalho.
-- **Sonda CORS:** lê só os cabeçalhos (`stream`); antes baixava o corpo inteiro, sem teto, a cada ciclo de cada alvo.
-- **YAML:** `.inf`/`.nan` em `interval_seconds`, `samples`, `slo`, `alerting.*` viram erro de configuração com o valor
-  padrão (antes levantavam exceção e podiam derrubar o laço de monitoramento ou desativar um SLO em silêncio).
-- **Provedor do webhook:** detectado pelo **hostname** (`api.telegram.org`; `office.com`, `outlook.com`,
-  `logic.azure.com`, `teams.microsoft.com` e subdomínios). `alerts.myteams.example` e `telegram-relay.internal` são
-  tratados como Slack-compatíveis; o `telegram_chat_id` só é exigido para o Telegram de verdade.
-- **Métrica `probe_ssl_earliest_cert_expiry`:** é removida quando o ciclo não observa certificado (último salto http,
-  TLS não inspecionado), em vez de exportar o valor do ciclo anterior.
-
-## 🔁 Correções da 2ª revisão da `main` (lote C)
-
-- **URL malformada** (`https://[bad`, colchete IPv6 sem fechar): vira erro de configuração/resultado `invalid_url` (HTTP 400 na API),
-  nunca exceção. Antes, um typo no `targets.yaml` matava o laço de monitoramento no startup e o app seguia no ar sem monitorar
-  nada. `load_config` também passou a converter qualquer exceção inesperada do validador em `load_failed`.
-- **Ciclo de monitoramento:** o pós-processamento de cada alvo (estado, métricas, alertas) é isolado. Uma exceção num alvo
-  é logada e só ele é ignorado naquele ciclo; os demais e a persistência do lote seguem.
-- **Alerta de expiração do certificado:** limiar = o menor entre **15 dias** e **20% da vida do certificado**. Certificados de
-  6 ou 47 dias não ficam mais "expirando" o tempo todo; de 90 dias ou mais, o limiar continua 15 dias.
-- **`POST /api/v1/webhooks/notify`:** `provider` e `chat_id` vêm do `targets.yaml`. Um `chat_id` ou `provider` diferente
-  no corpo é recusado (400): quem tem a chave da API não escolhe o chat de destino do bot.
-
-## 🔁 Correções da 2ª revisão da `main` (lote D)
-
-- **Cache da enumeração TLS:** resultado com algum `unknown` (alvo que descarta o ClientHello, alerta de SNI/mTLS) fica em
-  cache por **15 min** (conclusivo: 6 h). Antes, nunca era cacheado e um scan de dezenas de handshakes se repetia a cada 2 min.
-- **Falha em modo comum:** só conectividade conta (DNS, timeout, conexão); 5xx ou asserção reprovada (a aplicação respondeu)
-  não acusa mais "resolvedor da sonda", e uma queda real de DNS/rede agora dispara o aviso (antes era o contrário).
-- **`.env` só no servidor:** `import anhanga` e `anhanga check` não leem mais o `.env` do diretório (um `.env` de outra
-  aplicação injetaria `HTTP_PROXY` etc.). O servidor (`anhanga serve`/`uvicorn anhanga.main:app`) o carrega, e a regex de
-  cookies sensíveis passou a ser lida sob demanda, então o `.env` vale mesmo com o motor já importado.
-- **Gates do CLI = SLO do monitor:** `--max-ttfb` usa a mediana das amostras e `--max-total` a latência "manchete" (mesma
-  função do monitor), em vez da amostra fria única, inflada em HTTP/2.
-- **SARIF:** a regra vem do prefixo da violação e do código de saída (3 = DNS/SSRF), não de substrings soltas.
-- **CLI:** removido código morto (`--resolve` e flags de asserção de conteúdo que o parser nunca definiu).
-
-## 🔁 Correções da 3ª revisão da `main` (lote E)
-
-- **Alerta de expiração:** se um certificado "expirando" expira (ou é revogado), o alerta escala para `degraded` e o estado
-  de `tls_expiring` é fechado **sem** a mensagem verde "resolvido". Renovação de verdade continua sendo anunciada.
-- **Slack:** o texto do cabeçalho é cortado em 150 caracteres (limite do `plain_text`); antes, uma URL longa fazia o Slack
-  recusar o payload inteiro (HTTP 400) e o alerta se perdia após as tentativas.
-- **Prazo da sondagem:** as etapas depois da resposta HTTP (cadeia TLS/porta 80/enumeração, TLS legado, revogação, CORS,
-  asserções de regex) têm **orçamento combinado**. Se faltar prazo, elas são puladas e o resultado sai parcial (nota em
-  `timings.timing_notes`; regex vira `assertions.not_evaluated`), em vez de descartar uma resposta 200 válida como
-  "Timeout rígido excedido" e gerar falso OFFLINE.
-- **CLI:** textos do alvo, erros e violações são escapados antes de irem ao Rich (um `[/x]` solto quebrava o `check` e um
-  `^[a-z]+$` era engolido). O código de saída 3 vem só do `error_code` estruturado (um padrão com "Erro de DNS" numa
-  asserção não vira erro de DNS).
-- **IDN:** hostnames internacionalizados (`münchen.de`, `açaí.com.br`) são aceitos e normalizados para Punycode.
-- **SQLite:** `incremental_vacuum` passou a ser consumido; o arquivo volta a encolher após a retenção.
-- **Porta 80:** IPv6 literal com colchetes e `303` como redirecionamento.
-- **`max_payload_bytes`:** se a leitura foi truncada no teto (`max_body_bytes`) e o limite está acima dele, a asserção fica
-  "não avaliada" (nunca aprovada em silêncio). Se mesmo o tamanho truncado já excede o limite, ela reprova.
-- **Backup:** `~` é expandido e caminhos com `?`, `#`, `%` funcionam.
-
-## 🔁 Correções da 4ª revisão da `main` (lote F)
-
-- **Orçamento das etapas pós-HTTP (refino):** cada etapa tem o **seu** prazo (cadeia TLS/OCSP, porta 80, enumeração, TLS legado,
-  revogação, CORS, regex); se uma estourar, as que já terminaram são mantidas. URL final e tamanho do payload são calculados
-  **antes** do regex, então uma falha definitiva (`assert_final_url`, `max_payload_bytes`) nunca se perde se o regex estourar.
-  Um `TimeoutError` próprio da etapa (socket, OCSP) é distinguido de "prazo da sondagem esgotado" em `timing_notes`.
-- **TLS legado não verificado:** se a verificação de TLS 1.0/1.1 foi pulada por falta de prazo, `tls.legacy_check_incomplete`
-  fica `true` e a nota **não concede o bônus de TLS moderno** (não verificado ≠ seguro).
-- **Webhooks:** o bloco de violações do Slack (≤ 3000 caracteres) e a mensagem do Telegram (≤ 4096, contando o HTML escapado)
-  são cortados por linha, com "… (+N omitidas)"; antes, muitas violações geravam 400 e o alerta se perdia.
-- **Recuperação de `tls_expiring`:** só é calada quando o certificado **expirou ou foi revogado** (a causa); renovar com
-  outro defeito (hostname, cadeia) continua anunciando "expirando: resolvido".
-- **IDN:** normalização IDNA 2008 do `httpx` (`faß.de` ≠ `fass.de`), trocando só o host (userinfo e porta intactos).
-- **SQLite:** `incremental_vacuum` em blocos de 256 páginas (até 20 por poda), sem segurar o lock por segundos.
-- **CLI:** `backup` trata `sqlite3.Error` (erro claro, sem traceback) e limpa o `.tmp`.
-
-## 🔁 Revisão do diff do lote F (lote G)
-
-- **Telegram/Slack:** o limite de caracteres é medido no texto **já escapado** (aspas, `<` e `&` multiplicam o texto por 4 a 6) e a
-  **1ª violação sempre entra**, encolhida até caber, mesmo com URL enorme. Entidades HTML nunca são cortadas no meio.
-- **"Expirando: resolvido":** só é anunciado quando o certificado deixou de estar prestes a expirar (renovação de verdade). O mesmo
-  certificado, ainda quase expirando mas falhando por cadeia/hostname, não gera mensagem de resolvido.
-- **TLS 1.0/1.1 "não verificado":** além de etapa pulada por prazo, vale quando a enumeração termina com TLS 1.0 ou 1.1 em
-  `unknown` (timeout, erro de rede). A interface mostra **"Não verificado"** (âmbar) em vez de "Bloqueado (Seguro)", e a nota
-  não concede o bônus de TLS moderno.
-- **SQLite:** o `incremental_vacuum` só roda em bancos criados com `auto_vacuum=INCREMENTAL`; bancos antigos não pagam 20 PRAGMAs vazios por poda.
-- **Baixos conhecidos (sem correção):** a mesclagem manual de `ContentAssertionsResult` no `probe.py` é frágil a campos novos; `_idna_url`
-  descarta a porta `0` e marcadores `?`/`#` vazios; a folga de 50 ms que distingue "prazo esgotado" de "timeout da etapa" é uma heurística.
+MIT, as declared in `pyproject.toml`.

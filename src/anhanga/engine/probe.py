@@ -557,11 +557,17 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
     n_samples = len(raw_samples)
     p95_valid = n_samples >= 20
     p99_valid = n_samples >= 100
-    sample_size_notice = (
-        None
-        if p95_valid
-        else "Amostragem com n < 20: P95 e P99 requerem amostragem maior (n ≥ 20 para P95, n ≥ 100 para P99) para validade estatística."
-    )
+    if not p95_valid:
+        sample_size_notice = (
+            "Amostragem com n < 20: P95 e P99 requerem amostragem maior (n ≥ 20 para P95, n ≥ 100 para P99) para validade estatística."
+        )
+    elif not p99_valid:
+        sample_size_notice = (
+            "P99 requer n ≥ 100; um scan avulso é limitado a 20 amostras (para não sobrecarregar o alvo). "
+            "Consulte o histórico do monitoramento para a cauda extrema."
+        )
+    else:
+        sample_size_notice = None
 
     return SamplingStats(
         samples_count=n_samples,

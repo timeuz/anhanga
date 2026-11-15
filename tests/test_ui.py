@@ -53,3 +53,9 @@ def test_filter_chips_have_room_for_their_focus_ring_inside_the_paint_contained_
 def test_ui_shows_the_untested_legacy_ciphers_note_in_both_languages():
     assert "result.tls.enumeration.legacy_ciphers_untested" in HTML
     assert HTML.count("tlsLegacyUntested:") == 2
+
+
+def test_permalink_button_label_is_copy_analysis_link():
+    assert "permalinkBtn: 'Copiar Link da Análise'" in HTML
+    assert "permalinkBtn: 'Copy Analysis Link'" in HTML
+    assert "Link Permanente" not in HTML.replace("<!-- Barra de Ferramentas: Re-escanear & Exportação (Link Permanente, JSON, Markdown) -->", "")

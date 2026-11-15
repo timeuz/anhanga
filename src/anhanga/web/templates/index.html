@@ -2046,7 +2046,7 @@
                         `- **IP Resolvido**: \`${r.resolved_ip || 'N/D'}\``,
                         `- **Protocolo HTTP**: \`${r.http_version || 'N/D'}\``,
                         `- **Nota de Segurança**: **${r.security?.grade || 'F'}** (\`${r.security?.score || 0}/100\`)`,
-                        `- **Latência Total**: \`${r.timings?.total_ms || 0} ms\` (P50: \`${r.sampling?.p50_ms || 0} ms\`, P95: \`${r.sampling?.p95_ms || 0} ms\`, P99: \`${r.sampling?.p99_ms || 0} ms\`, Jitter: \`${r.sampling?.jitter_ms || 0} ms\`)`,
+                        `- **Latência Total**: \`${r.timings?.total_ms || 0} ms\` (P50: \`${r.sampling?.p50_ms || 0} ms\`, P95: \`${r.sampling?.p95_valid ? r.sampling.p95_ms + ' ms' : 'N/D (n<20)'}\`, P99: \`${r.sampling?.p99_valid ? r.sampling.p99_ms + ' ms' : 'N/D (n<100)'}\`, Jitter: \`${r.sampling?.jitter_ms || 0} ms\`)`,
                         ``,
                         `## Waterfall de Latência (Offsets Reais)`,
                         `| Fase | Início (ms) | Fim (ms) | Duração (ms) | Status SLO | Gargalo |`,

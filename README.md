@@ -370,4 +370,4 @@ The suite (about 500 tests) is offline except for local PKI fixtures (a real CA,
 
 ## License
 
-MIT, as declared in `pyproject.toml`.
+MIT. See [LICENSE](LICENSE).

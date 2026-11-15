@@ -26,7 +26,7 @@ def test_api_accepts_exactly_the_ui_maximum():
 def test_20_samples_make_p95_valid_but_p99_stays_with_an_explanatory_notice():
     st = _build_sampling_stats(_samples(20))
     assert st.p95_valid and not st.p99_valid
-    assert st.sample_size_notice and "P99" in st.sample_size_notice and "histórico" in st.sample_size_notice
+    assert st.sample_size_notice and "P99" in st.sample_size_notice and "histogram_quantile" in st.sample_size_notice
 
 
 def test_10_samples_keep_both_invalid_with_the_generic_notice():

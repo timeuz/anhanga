@@ -256,6 +256,8 @@ scrape_configs:
         replacement: 127.0.0.1:7890
 ```
 
+`anhanga_probe_latency_quantile_seconds` always carries the median (`quantile="0.5"`); the `0.95` and `0.99` series are exported only when the cycle has enough samples (at least 20 and 100 respectively), the same rule as the dashboard and the CLI, and are removed otherwise. Alert messages and the Markdown export follow the same rule. For tail latency over time, use `anhanga_probe_duration_seconds_histogram` with `histogram_quantile()`.
+
 Targets that did not answer export no latency, grade or TLS series (no false zeros). The `anhanga_assertions_not_evaluated_total{target}` counter increments when the regex evaluator itself fails; alert on `rate(...) > 0`, otherwise a persistent evaluator failure silently disables regex assertions.
 
 ## Alerting
@@ -351,7 +353,7 @@ Cipher coverage was checked using `testssl.sh` with its bundled OpenSSL: the TLS
 
 - **Not validated against live services:** webhook payloads are tested against mocks and size limits; real delivery to Slack, Microsoft Teams and Telegram has not been exercised end to end.
 - **No long soak yet:** a 14-minute run against 12 targets showed stable memory (about 125 MB) and no orphaned `openssl` processes. Multi-day behavior is unverified.
-- **No P99 in the dashboard:** see [Percentiles](#percentiles). Separately, `/metrics` exports the per-cycle `anhanga_probe_latency_quantile_seconds{quantile="0.95"|"0.99"}` computed from that cycle's samples without applying the minimum-sample rule above, so with few samples they are not statistically meaningful. Prefer the histogram.
+- **No P99 in the dashboard or per-cycle metrics:** see [Percentiles](#percentiles). Use the histogram for tail latency.
 - **TLS enumeration:** the local OpenSSL cannot test RC4, 3DES, EXPORT or SSLv3 (see [Validation](#validation)). "Rejected" means "refused every cipher this client offers".
 - **Certificate chain behind load balancers:** if the chain's leaf differs from the connection's certificate (renewal mid-probe, or different certificates per backend), the chain is discarded as "not verified", so revocation can be intermittently unavailable behind such balancers. When the `s_client` queue is full the result is indistinguishable from an `openssl` failure, so under load the chain can intermittently appear "not verified".
 - **Shutdown:** a caller awaiting a cancelled revocation check receives `CancelledError`; this only happens while shutting down.

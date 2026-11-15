@@ -141,10 +141,9 @@ def build_slack_payload(
         status_label += " — LEMBRETE (problema persiste)"
 
     tls_status = _format_tls_status(result)
-    p95_ms = (
-        result.sampling.p95_ms
-        if (result.sampling and result.sampling.p95_ms > 0)
-        else result.timings.total_ms
+    # P95 só com amostras suficientes (n >= 20); antes, sem amostragem, a latência total saía rotulada como "P95".
+    p95_suffix = (
+        f" (P95: {_ms(result, result.sampling.p95_ms)})" if (result.sampling and result.sampling.p95_valid) else ""
     )
     summary_text = (
         f"[Anhangá] {status_label} — {result.target_url} | "
@@ -177,7 +176,7 @@ def build_slack_payload(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Latência Total:*\n{_ms(result, result.timings.total_ms)} (P95: {_ms(result, p95_ms)})",
+                    "text": f"*Latência Total:*\n{_ms(result, result.timings.total_ms)}{p95_suffix}",
                 },
                 {
                     "type": "mrkdwn",

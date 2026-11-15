@@ -361,6 +361,11 @@ Cipher coverage was checked using `testssl.sh` with its bundled OpenSSL: the TLS
 - **Single instance:** one worker and one process; there is no clustering.
 - **Not planned for the first release:** DNS and email auditing (CAA, SPF, DMARC, DNSSEC), a dashboard layout refactor, and SSL Labs integration. See `BACKLOG.md`.
 
+## To do
+
+- **Validate real webhook delivery.** Payloads for Slack, Microsoft Teams and Telegram are covered by tests against mocks and size limits, but a real message has not yet been delivered to each service end to end.
+- Longer-term items (DNS and email auditing, dashboard layout refactor, SSL Labs integration) are tracked in `BACKLOG.md`.
+
 ## Development
 
 ```bash

@@ -35,14 +35,14 @@ _inconclusive: dict[tuple[str, int], tuple[float, TLSEnumeration]] = {}
 _inflight: dict[tuple[str, int], "asyncio.Future[TLSEnumeration | None]"] = {}
 _last_scan: dict[tuple[str, int], float] = {}
 
-# Alertas que dizem "não falo esta VERSÃO". Os demais (handshake_failure, sem cifra em comum...) são ambíguos:
+# alertas que dizem 'não falo esta VERSÃO'. os outros (handshake_failure, sem cifra em comum...) são ambíguos:
 # o servidor pode falar a versão e só não ter cifra em comum com o que ESTE OpenSSL oferece (ex.: servidor só-RC4).
 _VERSION_REJECT_MARKERS = (
     "ALERT_PROTOCOL_VERSION", "WRONG_VERSION_NUMBER", "UNSUPPORTED_PROTOCOL", "NO_PROTOCOLS_AVAILABLE_SERVER",
     "UNKNOWN_PROTOCOL",
 )
-# Só estes alertas significam "sem cifra em comum" (a versão pode estar ativa). Qualquer outro alerta
-# (certificado de cliente exigido, SNI não reconhecido, erro interno, acesso negado...) NÃO prova recusa da versão.
+# só estes alertas significam 'sem cifra em comum' (a versão pode estar ativa). qualquer outro (certificado de
+# cliente exigido, SNI não reconhecido, erro interno, acesso negado...) NÃO prova que a versão foi recusada.
 _CIPHER_ALERT_MARKERS = ("ALERT_HANDSHAKE_FAILURE", "NO_SHARED_CIPHER", "ALERT_INSUFFICIENT_SECURITY")
 _CLIENT_SIDE_MARKERS = ("NO_PROTOCOLS_AVAILABLE", "NO_CIPHERS_AVAILABLE", "INVALID_SESSION_ID")
 
@@ -114,7 +114,7 @@ async def _handshake(
         if any(m in text for m in _VERSION_REJECT_MARKERS):
             return "rejected", None, None
         if any(m in text for m in _CIPHER_ALERT_MARKERS):
-            # "Sem cifra em comum": só é recusa se não houver cifra que este cliente deixe de oferecer.
+            # 'sem cifra em comum' só é recusa se não houver cifra que este cliente deixe de oferecer.
             if version == ssl.TLSVersion.TLSv1_3 or exclude or local_ciphers_complete():
                 return "rejected", None, None
         return "unknown", None, None  # outros alertas (SNI, mTLS, erro interno...): a versão pode estar ativa
@@ -154,7 +154,7 @@ async def _scan_version(
             ciphers.append(c)
             excluded.append(c)
     res.ciphers = ciphers
-    # TLS 1.3: as suítes não são selecionáveis por exclusão (Python não expõe set_ciphersuites): só a negociada é listada.
+    # TLS 1.3: as suítes não dá pra selecionar por exclusão (o Python não expõe set_ciphersuites), então só a negociada é listada.
     res.ciphers_complete = complete and version != ssl.TLSVersion.TLSv1_3
     res.weak_ciphers = [c for c in ciphers if classify_cipher(c)[0]]
     res.no_forward_secrecy = [c for c in ciphers if classify_cipher(c)[1] and not classify_cipher(c)[0]]
@@ -185,8 +185,8 @@ async def enumerate_tls(
     out = TLSEnumeration(
         protocols=protocols, tested_at=time.time(), legacy_ciphers_untested=not local_ciphers_complete()
     )
-    # Conclusivo (nenhum `unknown`): 6 h. Inconclusivo (alvo que descarta o ClientHello, alerta de SNI/mTLS...): só 15 min,
-    # em cache à parte, para dar nova chance sem refazer o scan inteiro (até dezenas de handshakes) a cada ciclo.
+    # conclusivo (nenhum `unknown`): 6 h. inconclusivo (alvo que descarta o ClientHello, alerta de SNI/mTLS...): só 15 min,
+    # em cache à parte, pra dar outra chance sem refazer o scan inteiro (dezenas de handshakes) a cada ciclo.
     store, ttl_cache = (_cache, 512) if all(p.status != "unknown" for p in results) else (_inconclusive, 512)
     if len(store) > ttl_cache:
         store.pop(next(iter(store)))

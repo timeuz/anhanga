@@ -30,21 +30,21 @@ from anhanga.engine.models import (
 )
 
 FORBIDDEN_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
-    # Loopback
+    # loopback
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
-    # RFC 1918 (Redes Privadas IPv4)
+    # redes privadas IPv4 (RFC 1918)
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
-    # Link-Local & Cloud Metadata (AWS/GCP/Azure/OpenStack 169.254.169.254)
+    # link-local e metadados de nuvem (AWS, GCP, Azure e OpenStack usam 169.254.169.254)
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("fe80::/10"),
-    # CGNAT / Shared Address Space (RFC 6598 - Alibaba Cloud / Tailscale / ISP)
+    # CGNAT / espaço compartilhado (RFC 6598), usado por Alibaba Cloud, Tailscale e provedores
     ipaddress.ip_network("100.64.0.0/10"),
-    # IPv6 Unique Local Addresses - ULA (RFC 4193)
+    # IPv6 ULA (RFC 4193)
     ipaddress.ip_network("fc00::/7"),
-    # Redes especiais, IETF protocol assignments, benchmarking (RFC 2544), documentação e multicast
+    # faixas especiais: atribuições da IETF, benchmarking (RFC 2544), documentação e multicast
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("192.0.0.0/24"),
     ipaddress.ip_network("192.0.2.0/24"),
@@ -662,7 +662,7 @@ async def fetch_tls_extras(
     except Exception:  # noqa: BLE001
         return [], None
     if expected_leaf is not None and chain and chain[0] != expected_leaf:
-        # Entrou numa execução iniciada antes de uma renovação: a cadeia é do certificado antigo.
+        # entrou numa execução iniciada antes de uma renovação: a cadeia é do certificado antigo.
         return [], None
     return chain, stapled
 
@@ -823,7 +823,7 @@ def parse_tls_certificate(
         delta = expires_at - now
         if delta.total_seconds() < 0:
             is_time_valid = False
-        # Negativo = expirado há N dias (floor mantém a ordem: -0.5d => -1)
+        # negativo = expirou há N dias (o floor mantém a ordem: -0.5d vira -1)
         days_remaining = delta.days
     if not_before is not None and not_before > datetime.now(timezone.utc):
         is_time_valid = False
@@ -834,16 +834,16 @@ def parse_tls_certificate(
             relative_validity_percent_remaining = round(
                 max(0.0, (days_remaining / total_validity_days) * 100.0), 1
             )
-            # Alerta se restar menos de 15% do ciclo total de vida do certificado
+            # alerta se sobrar menos de 15% do tempo de vida total do certificado
             alert_relative_expiring = bool(relative_validity_percent_remaining < 15.0)
 
-    # Extração de SANs (Subject Alternative Names)
+    # SANs (nomes alternativos do certificado)
     sans: list[str] = []
     for san_type, san_val in cert.get("subjectAltName", []):
         if san_type in ("DNS", "IP Address") and san_val not in sans:
             sans.append(san_val)
 
-    # Extração da cadeia de certificação (Certificate Chain)
+    # cadeia de certificação
     cert_chain: list[str] = []
     cert_chain_details: list[X509ChainLink] = []
     inner_ssl = getattr(ssl_obj, "_sslobj", ssl_obj)
@@ -863,7 +863,7 @@ def parse_tls_certificate(
             except Exception:
                 pass
     if not raw_chain and chain_der:
-        # Python < 3.13 não expõe a cadeia: usa a obtida via `openssl s_client -showcerts`
+        # no Python < 3.13 o ssl não expõe a cadeia: usa a que veio do `openssl s_client -showcerts`
         raw_chain = list(chain_der)
         chain_source = "enviada pelo servidor"
 
@@ -905,8 +905,8 @@ def parse_tls_certificate(
     if last_issuer and (not cert_chain or cert_chain[-1] != last_issuer):
         cert_chain.append(last_issuer)
 
-    # OCSP: o módulo `ssl` NÃO expõe a resposta grampeada; `ocsp_stapled` vem de `openssl s_client -status`
-    # (None = não verificado). Jamais afirmar "sem stapling" sem ter verificado.
+    # OCSP: o módulo `ssl` NÃO expõe a resposta grampeada; `ocsp_stapled` vem do `openssl s_client -status`
+    # (None = não verificado). nunca afirmar 'sem stapling' sem ter verificado.
     cert_ocsp = cert.get("OCSP")
     if ocsp_stapled is True:
         ocsp_stapling: bool | None = True
@@ -962,9 +962,9 @@ def parse_tls_certificate(
     )
 
 
-# csrf/xsrf ficam FORA de propósito: cookies de double-submit (csrftoken do Django, XSRF-TOKEN do Angular)
-# precisam ser legíveis por JS; exigir HttpOnly neles seria um falso positivo que penaliza o design correto.
-# `_csrf` (segredo do csurf/Express) é o contrário do double-submit: deve ser HttpOnly, então entra.
+# csrf/xsrf ficam de fora de propósito: cookie de double-submit (csrftoken do Django, XSRF-TOKEN do Angular)
+# precisa ser lido por JS, então exigir HttpOnly neles seria falso positivo e puniria o design certo. já o
+# `_csrf` (segredo do csurf/Express) é o contrário do double-submit: deve ser HttpOnly, por isso entra.
 _DEFAULT_SENSITIVE_COOKIE_PATTERN = (
     r"(sess|sid$|^sid|auth|token|jwt|login|passw|remember|sso|identity|account|^_csrf$)"
 )
@@ -992,8 +992,8 @@ def _sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str], bool]
     return _compile_sensitive_cookie_regex(custom)
 
 
-# Só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). Não basta conter
-# "csrf": `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
+# só os NOMES de token de double-submit (csrftoken, XSRF-TOKEN, X-CSRF-TOKEN, csrf_token). não basta conter
+# 'csrf': `auth_xsrf_sid` ou `csrf_session` são cookies de sessão de verdade.
 _CSRF_TOKEN_COOKIE_RE = re.compile(r"^(?:__(?:host|secure)-)?_?(?:x-)?(?:csrf|xsrf)[-_]?token$", re.I)
 
 
@@ -1030,8 +1030,8 @@ def _audit_cookies(headers: httpx.Headers, is_https: bool) -> list[CookieAuditIt
         issues: list[str] = []
         if is_https and not secure:
             issues.append("Ausência da flag Secure")
-        # HttpOnly só é exigido de cookies de sessão/autenticação; analytics/preferências
-        # (ex.: _octo, _ga) precisam ser legíveis por JS e não são falha.
+        # HttpOnly só é exigido de cookie de sessão/autenticação. analytics e preferências (ex.: _octo, _ga)
+        # precisam ser lidos por JS e não são falha.
         sensitive = _is_sensitive_cookie(cookie_name)
         if sensitive and not httponly:
             issues.append("Ausência da flag HttpOnly (cookie de sessão/autenticação)")
@@ -1069,7 +1069,7 @@ async def audit_cors_active(
     """
     test_origin = "https://evil.anhanga.test"
     try:
-        # stream: só os cabeçalhos importam; `client.get` baixaria o corpo inteiro (sem teto) a cada ciclo.
+        # stream: só os cabeçalhos interessam, e `client.get` baixaria o corpo inteiro (sem teto) a cada ciclo.
         async with client.stream(
             "GET",
             target_url,
@@ -1267,7 +1267,7 @@ def audit_http_security(
 
     cookies_audited = _audit_cookies(headers, is_https)
 
-    # Avaliação de CORS
+    # CORS
     cors_val = headers.get("access-control-allow-origin", "").strip()
     cors_wildcard = cors_val == "*" or bool(cors_audit and cors_audit.wildcard)
     cors_credentials = (
@@ -1276,7 +1276,7 @@ def audit_http_security(
     )
     cors_vulnerable = bool(cors_audit and cors_audit.vulnerable) or (cors_wildcard and cors_credentials)
 
-    # Identifica subdomínios do certificado que seriam afetados por HSTS includeSubDomains
+    # acha os subdomínios do certificado que o HSTS includeSubDomains afetaria
     hsts_affected_sans: list[str] = []
     if tls and tls.sans:
         for s in tls.sans:
@@ -1284,10 +1284,10 @@ def audit_http_security(
                 if s not in hsts_affected_sans:
                     hsts_affected_sans.append(s)
 
-    # 1. Dimensão: Transporte & TLS (até 40 pontos)
+    # dimensão 1: transporte e TLS (até 40 pontos)
     transport_score = 0
     if is_https and tls and tls.valid:
-        transport_score += 20  # Base HTTPS com certificado válido
+        transport_score += 20  # base: HTTPS com certificado válido
         is_modern_tls = (
             tls.protocol in ("TLSv1.2", "TLSv1.3")
             and not tls.deprecated_protocol
@@ -1302,13 +1302,13 @@ def audit_http_security(
         else:
             transport_score += 5
 
-    # 2. Dimensão: Cabeçalhos de Proteção (até 40 pontos)
+    # dimensão 2: cabeçalhos de proteção (até 40 pontos)
     headers_score = 0
     hsts_max_age: int | None = None
     hsts_include_subdomains = False
     hsts_preload_opt_in = False
 
-    # 2.1 HSTS (até 15 pontos)
+    # HSTS (até 15 pontos)
     hsts_info = SECURITY_HEADERS_DETAILS["Strict-Transport-Security"]
     hsts_default_snippets = _build_header_snippets("Strict-Transport-Security", hsts_info["value"])
     if "Strict-Transport-Security" in headers:
@@ -1321,7 +1321,7 @@ def audit_http_security(
         hsts_preload_opt_in = "preload" in val.lower()
 
         if hsts_max_age is not None and hsts_max_age >= 2592000:
-            headers_score += 15  # Produção (30 dias+)
+            headers_score += 15  # produção (30 dias ou mais)
         elif hsts_max_age is not None and hsts_max_age >= 604800:
             headers_score += 10  # 1 semana
             missing_findings.append(
@@ -1342,7 +1342,7 @@ def audit_http_security(
                 )
             )
         elif hsts_max_age is not None and hsts_max_age >= 300:
-            headers_score += 5   # Teste inicial (5 min)
+            headers_score += 5  # teste inicial (5 min)
             missing_findings.append(
                 SecurityFinding(
                     id=hsts_info["id"],
@@ -1393,10 +1393,10 @@ def audit_http_security(
             )
         )
 
-    # 2.2 Content-Security-Policy & Clickjacking (até 15 pontos)
+    # CSP e clickjacking (até 15 pontos)
     csp_info = SECURITY_HEADERS_DETAILS["Content-Security-Policy"]
     csp_default_snippets = _build_header_snippets("Content-Security-Policy-Report-Only", csp_info["value"])
-    # Report-Only NÃO bloqueia nada: só a política aplicada conta como proteção (e sua qualidade pesa na nota).
+    # Report-Only não bloqueia nada: só a política aplicada conta como proteção (e a qualidade dela pesa na nota).
     csp_raw = headers.get("Content-Security-Policy", "")
     csp_report_only = headers.get("Content-Security-Policy-Report-Only", "")
     csp_analysis = analyze_csp(csp_raw, csp_report_only)
@@ -1464,7 +1464,7 @@ def audit_http_security(
                 )
             )
 
-    # 2.3 X-Content-Type-Options (5 pontos)
+    # X-Content-Type-Options (5 pontos)
     xcto_info = SECURITY_HEADERS_DETAILS["X-Content-Type-Options"]
     if "X-Content-Type-Options" in headers:
         present["X-Content-Type-Options"] = headers["X-Content-Type-Options"]
@@ -1484,7 +1484,7 @@ def audit_http_security(
             )
         )
 
-    # 2.4 Permissions-Policy (5 pontos)
+    # Permissions-Policy (5 pontos)
     perm_info = SECURITY_HEADERS_DETAILS["Permissions-Policy"]
     permissions_camera_restricted = False
     if "Permissions-Policy" in headers:
@@ -1523,26 +1523,26 @@ def audit_http_security(
             )
         )
 
-    # Referrer-Policy informativo
+    # Referrer-Policy, só informativo
     if "Referrer-Policy" in headers:
         present["Referrer-Policy"] = headers["Referrer-Policy"]
 
-    # Isolamento de origem cruzada (COOP/COEP/CORP): informativo, não altera a nota.
+    # isolamento de origem cruzada (COOP/COEP/CORP): só informativo, não muda a nota.
     for iso_name in ("Cross-Origin-Opener-Policy", "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy"):
         if iso_name in headers:
             present[iso_name] = headers[iso_name]
     if is_https:
         missing_findings.extend(_isolation_findings(headers))
 
-    # 3. Dimensão: Higiene de Aplicação (até 20 pontos)
+    # dimensão 3: higiene da aplicação (até 20 pontos)
     hygiene_score = 20
 
-    # 3.1 Vazamentos de Servidor / Versão (até 10 pontos)
+    # vazamento de servidor/versão (até 10 pontos)
     for leak_h in LEAK_HEADERS:
         if leak_h in headers:
             leak_val = headers[leak_h]
-            # `Server: cloudflare` / `Server: github.com` não revelam versão: não é vazamento acionável.
-            # Os demais (X-Powered-By, X-AspNet-Version, X-Generator) existem para divulgar tecnologia.
+            # `Server: cloudflare` ou `Server: github.com` não revelam versão, então não é vazamento que dê pra agir.
+            # os outros (X-Powered-By, X-AspNet-Version, X-Generator) existem justamente pra divulgar tecnologia.
             if leak_h == "Server" and not _VERSION_IN_HEADER_RE.search(leak_val):
                 continue
             leaks.append(f"{leak_h}: {leak_val}")
@@ -1565,7 +1565,7 @@ def audit_http_security(
     if leaks:
         hygiene_score -= min(10, 5 * len(leaks))  # coerente com o peso (5) declarado por finding
 
-    # 3.2 Cookies (até 5 pontos)
+    # cookies (até 5 pontos)
     insecure_cookies = [c for c in cookies_audited if c.issues]
     if insecure_cookies:
         hygiene_score -= 5
@@ -1584,7 +1584,7 @@ def audit_http_security(
             )
         )
 
-    # 3.3 CORS (até 5 pontos)
+    # CORS (até 5 pontos)
     if cors_vulnerable or cors_wildcard:
         hygiene_score -= 5
         cors_desc = (
@@ -1605,7 +1605,7 @@ def audit_http_security(
             )
         )
 
-    # Garante limites e soma total
+    # garante os limites e soma o total
     tls_findings, tls_cap, tls_penalty = _tls_enum_findings(tls)
     missing_findings.extend(tls_findings)
     transport_score -= tls_penalty

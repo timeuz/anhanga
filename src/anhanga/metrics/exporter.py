@@ -12,12 +12,10 @@ from prometheus_client import (
 
 from anhanga.engine.models import ProbeResult
 
-# Registry dedicado para manter as métricas limpas e previsíveis
+# registry próprio, pra manter as métricas limpas e previsíveis
 REGISTRY = CollectorRegistry(auto_describe=True)
 
-# ==============================================================================
-# 1. Série padrão compatível com Prometheus Blackbox Exporter (em segundos)
-# ==============================================================================
+# série padrão compatível com o Prometheus blackbox exporter (em segundos)
 BLACKBOX_PROBE_SUCCESS = Gauge(
     "probe_success",
     "Displays whether or not the probe was a success (1 = UP, 0 = DOWN)",
@@ -74,9 +72,7 @@ BLACKBOX_PROBE_HTTP_VERSION = Gauge(
     registry=REGISTRY,
 )
 
-# ==============================================================================
-# 2. Série estendida do Anhangá (em segundos)
-# ==============================================================================
+# série estendida do Anhangá (em segundos)
 PROBE_UP = Gauge(
     "anhanga_probe_up",
     "Indica se o alvo respondeu com sucesso (1 = UP, 0 = DOWN)",
@@ -277,7 +273,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     inst = _resolve_instance_label(result, instance)
     status_label = "success" if result.is_up else "failure"
     up_val = 1 if result.is_up else 0
-    # probe_success segue a semântica do blackbox: certificado inválido = falha.
+    # probe_success segue o blackbox: certificado inválido conta como falha.
     success_val = 1 if result.health == "up" else 0
 
     if result.status_code is None:
@@ -297,7 +293,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     transfer_s = round(result.timings.transfer_ms / 1000.0, 6)
     total_s = round(result.timings.total_ms / 1000.0, 6)
 
-    # 1. Série compatível com blackbox_exporter
+    # série compatível com o blackbox_exporter
     BLACKBOX_PROBE_SUCCESS.labels(target=target, instance=inst).set(success_val)
     BLACKBOX_PROBE_DURATION_SECONDS.labels(target=target, instance=inst).set(total_s)
 
@@ -323,8 +319,8 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     is_ssl = 1 if (result.tls is not None and result.tls.valid) else 0
     BLACKBOX_PROBE_HTTP_SSL.labels(target=target, instance=inst).set(is_ssl)
 
-    # Sem certificado observado neste ciclo (último salto http, TLS não inspecionado), a série antiga não pode ficar:
-    # alertas sobre `probe_ssl_earliest_cert_expiry - time()` usariam um certificado que não é mais visto.
+    # sem certificado visto neste ciclo (último salto foi http, TLS não inspecionado), a série antiga tem que sair:
+    # alerta em `probe_ssl_earliest_cert_expiry - time()` usaria um certificado que ninguém mais está vendo.
     _remove_series(BLACKBOX_PROBE_SSL_EARLIEST_CERT_EXPIRY, target)
     if result.tls and result.tls.expires_at is not None:
         expiry_ts = result.tls.expires_at.timestamp()
@@ -343,7 +339,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         _parse_http_version_number(result.http_version)
     )
 
-    # 2. Série estendida do Anhangá
+    # série estendida do Anhangá
     PROBE_EXECUTIONS_TOTAL.labels(target=target, result=status_label).inc()
     PROBE_UP.labels(target=target).set(up_val)
     PROBE_REDIRECTS.labels(target=target).set(result.redirect_hops)
@@ -355,7 +351,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
             result.status_code
         )
 
-    # Conversão de ms para segundos (Padrão OpenMetrics) com fases canônicas e aliases blackbox
+    # converte ms em segundos (padrão OpenMetrics), com as fases canônicas e os apelidos do blackbox
     anhanga_phases = {
         "dns": dns_s,
         "tcp": tcp_s,
@@ -370,7 +366,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     for phase, seconds in anhanga_phases.items():
         PROBE_DURATION_SECONDS.labels(target=target, phase=phase).set(seconds)
 
-    # Quantis P50 / P95 / P99, Jitter e Conexão Fria vs Quente em segundos
+    # quantis P50/P95/P99, jitter e conexão fria x quente, em segundos
     has_samples = bool(result.sampling and result.sampling.raw_samples)
     p50_ms = (
         result.sampling.p50_ms
@@ -392,9 +388,9 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_LATENCY_QUANTILE_SECONDS.labels(target=target, quantile="0.5").set(
         round(p50_ms / 1000.0, 6)
     )
-    # P95/P99 só existem com amostras suficientes (n >= 20 / n >= 100, a mesma regra da UI e do CLI). Abaixo disso o
-    # "percentil" seria só o máximo do ciclo; a série é removida em vez de exportar um número sem significado.
-    # Para a cauda ao longo do tempo, use anhanga_probe_duration_seconds_histogram com histogram_quantile().
+    # P95/P99 só existem com amostras suficientes (n >= 20 / n >= 100, mesma regra da UI e do CLI). abaixo disso o
+    # 'percentil' seria só o máximo do ciclo, então a série é removida em vez de exportar um número sem sentido.
+    # pra ver a cauda ao longo do tempo, use anhanga_probe_duration_seconds_histogram com histogram_quantile().
     for quantile, valid, value_ms in (
         ("0.95", bool(result.sampling and result.sampling.p95_valid), result.sampling.p95_ms if result.sampling else 0.0),
         ("0.99", bool(result.sampling and result.sampling.p99_valid), result.sampling.p99_ms if result.sampling else 0.0),
@@ -409,12 +405,12 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
     PROBE_CONNECTION_COLD_SECONDS.labels(target=target).set(round(cold_ms / 1000.0, 6))
     PROBE_CONNECTION_WARM_SECONDS.labels(target=target).set(round(warm_ms / 1000.0, 6))
 
-    # Métricas de Certificado TLS
+    # métricas do certificado TLS
     _remove_series(PROBE_TLS_EXPIRY_DAYS, target)
     _remove_series(PROBE_TLS_VALID, target)
     if result.tls is not None:
         PROBE_TLS_VALID.labels(target=target).set(1 if result.tls.valid else 0)
-    # Dias restantes são exportados mesmo com certificado inválido (negativo = expirado) para permitir alertas
+    # os dias restantes saem mesmo com certificado inválido (negativo = expirado), pra dar pra alertar
     if result.tls and result.tls.days_remaining is not None:
         PROBE_TLS_EXPIRY_DAYS.labels(
             target=target,
@@ -422,13 +418,13 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
             protocol=result.tls.protocol or "Unknown",
         ).set(result.tls.days_remaining)
 
-    # Métricas de Auditoria de Segurança
+    # métricas da auditoria de segurança
     _remove_series(PROBE_SECURITY_SCORE, target)  # o label grade muda entre ciclos
     PROBE_SECURITY_SCORE.labels(target=target, grade=result.security.grade).set(
         result.security.score
     )
 
-    # Física de Rede e Processamento de Servidor (TTFB - RTT)
+    # rede e processamento do servidor (TTFB - RTT)
     if result.timings.server_processing_ms is None:
         _remove_series(PROBE_SERVER_PROCESSING_SECONDS, target)
     else:
@@ -439,7 +435,7 @@ def record_probe_metrics(result: ProbeResult, instance: str | None = None) -> No
         round(result.timings.estimated_rtt_ms / 1000.0, 6)
     )
 
-    # Histograma em segundos para histogram_quantile() no Grafana
+    # histograma em segundos, pro histogram_quantile() do Grafana
     if result.sampling and result.sampling.raw_samples:
         for s in result.sampling.raw_samples:
             PROBE_DURATION_HISTOGRAM_SECONDS.labels(target=target).observe(

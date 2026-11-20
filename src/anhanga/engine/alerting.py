@@ -124,7 +124,7 @@ def detect_problems(result: ProbeResult, rules: SLORules) -> dict[str, str]:
 
 class AlertManager:
     def __init__(self, policy: AlertPolicy, clock: Callable[[], float] = time.time) -> None:
-        # Relógio de parede: os timestamps são persistidos e precisam fazer sentido após reinício.
+        # relógio de parede: os timestamps são gravados e precisam fazer sentido depois de um reinício.
         self.policy = policy
         self._clock = clock
         self._targets: dict[str, _TargetState] = {}
@@ -163,7 +163,7 @@ class AlertManager:
         for key in list(state.problems):
             if key in problems:
                 continue
-            # Sem resposta do alvo só `down` é avaliável: não declarar "recuperado" por falta de dado.
+            # sem resposta do alvo só `down` dá pra avaliar: não declarar 'recuperado' por falta de dado.
             if no_response and key != "down":
                 continue
             st = state.problems[key]
@@ -173,8 +173,8 @@ class AlertManager:
                 if st.clear_streak >= self.policy.recovery_threshold:
                     closed.append(key)
                     del state.problems[key]
-                    # "Expirando" que some porque o certificado EXPIROU (ou foi revogado) não é recuperação: o problema
-                    # escalou para `degraded`. Fecha o estado, mas sem a mensagem verde de "resolvido".
+                    # um 'expirando' que some porque o certificado EXPIROU (ou foi revogado) não é recuperação: o problema escalou pra
+                    # `degraded`. fecha o estado, mas sem a mensagem verde de 'resolvido'.
                     if not (key == "tls_expiring" and _cert_escalated(result)):
                         recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
             else:
@@ -189,7 +189,7 @@ class AlertManager:
             events.append(AlertEvent("recovery", result.target_url, recovered))
         return Evaluation(events=events, opened=opened, closed=closed)
 
-    # -------------------------------------------------------------- persistência do estado
+    # --- persistência do estado ---
     def snapshot(self, target: str) -> list[dict]:
         st = self._targets.get(target)
         if not st:

@@ -56,7 +56,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("anhanga")
 
-# Cache em memória dos últimos resultados e série histórica de latências para alimentar a UI
+# cache em memória dos últimos resultados e da série histórica de latência, pra alimentar a UI
 STATE_CACHE: dict[str, ProbeResult] = {}
 HISTORY_CACHE: dict[str, list[float]] = {}
 MAX_HISTORY_POINTS = 30
@@ -119,14 +119,14 @@ def _is_loopback_direct(request: Request) -> bool:
 def _is_authorized(request: Request) -> bool:
     api_key = os.getenv("ANHANGA_API_KEY", "")
     if not api_key:
-        # Fail-closed: sem chave configurada, apenas acesso loopback direto.
+        # falha fechada: sem chave configurada, só aceita acesso direto por loopback.
         return _is_loopback_direct(request)
     auth = request.headers.get("authorization", "")
     supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "")
     return hmac.compare_digest(supplied.encode(), api_key.encode())
 
 
-# error_code -> status HTTP. O que é achado da sondagem (5xx do alvo, asserção, TLS inválido) segue como 200.
+# mapa de error_code para status HTTP. o que é achado da sondagem (5xx do alvo, asserção, TLS inválido) continua 200.
 _ERROR_STATUS: dict[str, int] = {
     "invalid_url": 400,
     "ssrf_blocked": 403,
@@ -172,13 +172,13 @@ def _update_state_and_history(result: ProbeResult, is_continuous: bool = False) 
     """Atualiza o cache de estado e a série histórica de latências (sparkline) do alvo."""
     key = result.target_url
     if not is_continuous:
-        # Scans avulsos (alvos arbitrários) não persistem estado: memória e cardinalidade limitadas aos alvos configurados.
+        # scan avulso (alvo qualquer) não guarda estado: memória e cardinalidade ficam limitadas aos alvos configurados.
         result.history_ms = [result.timings.total_ms] if result.timings.total_ms > 0 else []
         return result
     history = HISTORY_CACHE.setdefault(key, [])
 
-    # Apenas observações da vigilância contínua ou o primeiro ponto mediano de um novo scan entram na série histórica,
-    # prevenindo que rajadas manuais (ex: 10 amostras instantâneas) poluam a linha de tendência temporal (sparkline).
+    # só entra na série histórica o que vem do monitor contínuo ou o primeiro ponto mediano de um scan novo.
+    # senão uma rajada manual (ex.: 10 amostras seguidas) bagunçaria a linha de tendência (sparkline).
     headline_ms = (
         result.sampling.headline_total_ms
         if result.sampling and result.sampling.headline_total_ms > 0
@@ -460,7 +460,7 @@ async def background_guardian_loop():
     while True:
         cycle_start = time.monotonic()
         try:
-            # Recarga a quente: só quando o arquivo mudou (stat é barato).
+            # recarga a quente: só quando o arquivo mudou (stat é barato).
             new_path = _config_path()
             new_mtime = _mtime(new_path)
             if new_path is not None and (new_path, new_mtime) != (path, mtime):
@@ -468,8 +468,8 @@ async def background_guardian_loop():
                 new_cfg = load_config(path)
                 _log_config_issues(new_cfg, path)
                 if new_cfg.load_failed:
-                    # YAML quebrado/meio salvo não é "zero alvos": manter a config anterior, senão o ciclo
-                    # seguinte apagaria alvos, estado de alertas e fecharia incidentes como recuperados.
+                    # YAML quebrado ou salvo pela metade não significa 'zero alvos': mantém a config anterior. senão o ciclo
+                    # seguinte apagaria alvos e estado de alertas e fecharia incidentes como se tivessem se recuperado.
                     logger.error("Recarga rejeitada: configuração inválida; mantendo a configuração anterior.")
                 else:
                     logger.info(
@@ -505,12 +505,12 @@ async def background_guardian_loop():
                         _dispatch_events(ev.events, res, cfg.webhooks)
                         batch.append((res, ev, manager.snapshot(res.target_url)))
                     except Exception:  # noqa: BLE001
-                        # Um alvo com resultado inesperado não pode cegar os demais nem pular a persistência do lote.
+                        # um alvo com resultado inesperado não pode deixar os outros sem leitura nem pular a gravação do lote.
                         logger.exception(f"Falha ao processar o resultado de {spec.url}; alvo ignorado neste ciclo.")
                 if batch and _STORE is not None:
                     await _store_call(_persist_batch, _STORE, batch, time.time())
 
-            # Alvos removidos da config somem do dashboard, das métricas, do estado de alertas e dos incidentes abertos.
+            # alvos que saíram da config somem do dashboard, das métricas, do estado de alertas e dos incidentes abertos.
             expected = {_normalize_and_validate_scheme(t.url)[0] for t in targets}
             for stale in [k for k in STATE_CACHE if k not in expected]:
                 STATE_CACHE.pop(stale, None)
@@ -533,7 +533,7 @@ async def background_guardian_loop():
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Erro no loop de background: {exc}")
 
-        # Taxa fixa: o intervalo conta do início do ciclo (não acumula a duração das sondas).
+        # taxa fixa: o intervalo conta do início do ciclo, não soma o tempo das sondas.
         elapsed = time.monotonic() - cycle_start
         await asyncio.sleep(max(1.0, cfg.interval_seconds - elapsed))
 
@@ -549,8 +549,8 @@ async def lifespan(app: FastAPI):
     revocation.cancel_background()
     tlsenum.cancel_background()
     cancel_extras_background()
-    # Entregas em voo: dá uma janela para concluir; as que não acabarem são canceladas e se salvam na
-    # outbox (ver `_deliver_event`) ANTES de o banco fechar.
+    # entregas em andamento: dá um tempo pra terminarem. as que não acabarem são canceladas e vão pra outbox
+    # (veja `_deliver_event`) ANTES de o banco fechar.
     pending = [t for t in _BACKGROUND_TASKS if not t.done()]
     if pending:
         _, still = await asyncio.wait(pending, timeout=SHUTDOWN_DRAIN_SECONDS)
@@ -656,8 +656,8 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
             detail="webhook_url não consta na allowlist ('webhooks' do targets.yaml).",
         )
     spec = entries[body.webhook_url]
-    # Destino, provedor e chat_id são do OPERADOR (targets.yaml): a requisição não os escolhe. Quem tem a chave da
-    # API não pode redirecionar o bot do Telegram para outro chat, e um webhook `provider: teams` não cai em Slack.
+    # destino, provedor e chat_id são do OPERADOR (targets.yaml), a requisição não escolhe. quem tem a chave da API
+    # não pode mandar o bot do Telegram pra outro chat, e um webhook `provider: teams` não cai no Slack.
     if body.chat_id not in (None, "") and body.chat_id != spec.chat_id:
         raise HTTPException(status_code=400, detail="chat_id é definido no targets.yaml e não pode ser alterado pela requisição.")
     if spec.provider != "auto" and body.provider not in ("auto", spec.provider):
@@ -850,8 +850,8 @@ async def web_dashboard(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        # O HTML é público (a UI pede a chave e busca os dados via /api/), mas o estado em cache não pode
-        # vazar sem autorização: alvos, IPs, notas e latências só vão no render para quem está autorizado.
+        # o HTML é público (a UI pede a chave e busca os dados via /api/), mas o estado em cache não pode vazar:
+        # alvos, IPs, notas e latências só vão no render pra quem está autorizado.
         context={
             "cached_results": list(STATE_CACHE.values()) if _is_authorized(request) else [],
             "app_version": __version__,

@@ -35,8 +35,8 @@ class _NonExitingArgumentParser(argparse.ArgumentParser):
 
 def _is_execution_or_ssrf_error(error_msg: str | None, error_code: str | None = None) -> bool:
     """Identifica se o erro foi bloqueio Anti-SSRF, falha de DNS ou URL inválida (exit code 2)."""
-    # Só o `error_code` estruturado decide (a mensagem só indica que houve erro): o texto pode embutir o padrão de uma
-    # asserção do usuário (ex.: "Erro de DNS") e não pode virar "erro de execução" (exit 3).
+    # só o `error_code` estruturado decide (a mensagem só diz que houve erro): o texto pode conter o padrão de uma
+    # asserção do usuário (ex.: 'Erro de DNS') e não pode virar 'erro de execução' (exit 3).
     return bool(error_msg) and error_code in ("ssrf_blocked", "dns_error", "invalid_url")
 
 
@@ -151,10 +151,10 @@ def build_sarif_report(
                 "defaultConfiguration": {"level": level},
             }
 
-    # 1. Violações de Quality Gates (SLO, Grade, Disponibilidade, Anti-SSRF)
+    # violações dos quality gates (SLO, nota, disponibilidade, anti-SSRF)
     for idx, violation in enumerate(violations, start=1):
-        # Classificação pelo PREFIXO que `evaluate_probe_gates` gera (e pelo código de saída 3 = DNS/SSRF/argumento),
-        # nunca por substring solta: um padrão `total` ou um host `cdns.exemplo.com` não podem mudar a regra.
+        # classifica pelo PREFIXO que o `evaluate_probe_gates` gera (e pelo exit 3 = DNS/SSRF/argumento), nunca por
+        # substring solta: um padrão `total` ou um host `cdns.exemplo.com` não podem mudar a regra.
         if violation.startswith("Certificado TLS inválido:"):
             rule_id = "ANHANGA-TLS-INVALID"
             rule_name = "InvalidTLSCertificate"
@@ -211,7 +211,7 @@ def build_sarif_report(
             }
         )
 
-    # 2. Achados de Segurança DevSecOps (missing_findings)
+    # achados de segurança (missing_findings)
     for finding in result.security.missing_findings:
         rule_id = finding.id or f"SEC-{re.sub(r'[^A-Z0-9]+', '-', finding.header.upper()).strip('-')}"
         level = _severity_to_sarif_level(finding.severity)
@@ -255,8 +255,8 @@ def build_sarif_report(
                 },
                 "invocations": [
                     {
-                        # A ferramenta executou com sucesso mesmo quando um gate reprova;
-                        # só o exit 3 (erro de execução/argumento) é falha de execução.
+                        # a ferramenta rodou com sucesso mesmo quando um gate reprova; só o exit 3 (erro de execução ou de argumento)
+                        # conta como falha de execução.
                         "executionSuccessful": exit_code != 3,
                         "exitCode": exit_code,
                     }
@@ -345,7 +345,7 @@ def render_rich_report(
     )
     console.print(Panel(header_text, border_style="orange1"))
 
-    # Tabela Waterfall de Decomposição de Latência
+    # tabela do waterfall de latência
     wf_table = Table(
         title="Waterfall de Latência Não-Cumulativa (ms)",
         show_header=True,
@@ -379,7 +379,7 @@ def render_rich_report(
     )
     console.print(wf_table)
 
-    # Decomposição Física: RTT de Rede vs Processamento Servidor
+    # rede x servidor: RTT de rede e processamento do servidor
     rtt_text = (
         f"🌐 [bold cyan]Decomposição Física:[/bold cyan] "
         f"RTT de Rede Estimado: [bold]{result.timings.estimated_rtt_ms:.2f} ms[/bold]  |  "
@@ -391,7 +391,7 @@ def render_rich_report(
         rtt_text += f"\nℹ️ {note}"
     console.print(Panel(rtt_text, border_style="blue"))
 
-    # Estatísticas de Amostragem (P50 / P95 / P99 / Jitter / Fria vs Keep-Alive)
+    # estatísticas da amostragem (P50 / P95 / P99 / jitter / conexão fria x keep-alive)
     samp = result.sampling
     warm_str = (
         f"{samp.warm_avg_total_ms:.2f} ms"
@@ -419,7 +419,7 @@ def render_rich_report(
         )
     )
 
-    # Alerta de Falha de Modo Comum (se detectado)
+    # alerta de falha em modo comum (se detectado)
     if result.common_mode_failure_warning:
         console.print(
             Panel(
@@ -428,7 +428,7 @@ def render_rich_report(
             )
         )
 
-    # Resumo TLS e HTTP Port 80
+    # resumo de TLS e da porta 80
     if result.tls:
         tls_valid_str = (
             "[bold green]VÁLIDO[/bold green]"
@@ -456,7 +456,7 @@ def render_rich_report(
             )
         )
 
-    # Resultado dos Quality Gates
+    # resultado dos quality gates
     if exit_code == 0:
         console.print(
             Panel(

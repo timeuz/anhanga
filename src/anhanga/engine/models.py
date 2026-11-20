@@ -40,9 +40,9 @@ class TimingBreakdown(BaseModel):
     total_ms: float = 0.0
     dominant_phase: str | None = None
     phases: list[PhaseOffset] = Field(default_factory=list)
-    # Bônus físico da rede (Seção 1.2 do MELHORIAS.txt)
+    # rede x servidor: RTT estimado e tempo de processamento
     estimated_rtt_ms: float = 0.0
-    # None = indisponível (ex.: TTFB frio em HTTP/2, que embute ~1 RTT de handshake e não mede o servidor)
+    # None = indisponível (ex.: o TTFB frio em HTTP/2 embute ~1 RTT de handshake e não mede o servidor)
     server_processing_ms: float | None = 0.0
     reference_sample: str = "Amostra 1 (Conexão Fria)"
     timing_notes: list[str] = Field(default_factory=list)
@@ -155,7 +155,7 @@ class SamplingStats(BaseModel):
     mean_ms: float = 0.0
     stdev_ms: float = 0.0
     jitter_ms: float = 0.0
-    # Regra de n do MELHORIAS.txt: P95 só com n >= 20, P99 só com n >= 100
+    # regra do n: P95 só com n >= 20, P99 só com n >= 100
     p95_valid: bool = False
     p99_valid: bool = False
     sample_size_notice: str | None = None
@@ -192,7 +192,7 @@ class RevocationInspection(BaseModel):
     """Resultado da checagem de revogação do certificado folha (OCSP ativo, com CRL de fallback)."""
 
     # good = não revogado; revoked = revogado; unknown = o respondedor não conhece o serial;
-    # unavailable = não foi possível checar (sem endpoint/emissor/openssl); error = endpoints falharam.
+    # unavailable = não deu pra checar (sem endpoint, emissor ou openssl); error = os endpoints falharam.
     status: Literal["good", "revoked", "unknown", "unavailable", "error"] = "unavailable"
     method: Literal["ocsp", "crl"] | None = None
     detail: str | None = None
@@ -213,8 +213,8 @@ class TLSProtocolResult(BaseModel):
 class TLSEnumeration(BaseModel):
     protocols: list[TLSProtocolResult] = Field(default_factory=list)
     tested_at: float | None = None
-    # True: o OpenSSL local não oferece RC4/3DES (e afins). Um servidor que os aceite NÃO aparece na lista:
-    # a ausência de cifras fracas, aqui, não prova que o alvo não as aceite.
+    # True: o OpenSSL local não oferece RC4/3DES (e afins), então um servidor que os aceite NÃO aparece na lista.
+    # a ausência de cifras fracas aqui não prova que o alvo não as aceite.
     legacy_ciphers_untested: bool = False
 
     def get(self, name: str) -> TLSProtocolResult | None:
@@ -227,8 +227,8 @@ class TLSInspection(BaseModel):
     protocol: str | None = None
     deprecated_protocol: bool = False
     tls10_11_accepted: bool = False
-    # True: a verificação de TLS 1.0/1.1 não foi concluída (etapa pulada por falta de prazo). "Não aceito" não está provado:
-    # a nota não concede o bônus de TLS moderno.
+    # True: a checagem de TLS 1.0/1.1 não terminou (etapa pulada por falta de prazo). 'não aceito' não está
+    # provado, então a nota não dá o bônus de TLS moderno.
     legacy_check_incomplete: bool = False
     enumeration: TLSEnumeration | None = None
     cipher: str | None = None
@@ -308,7 +308,7 @@ class SecurityAudit(BaseModel):
     grade: Literal["A+", "A", "B", "C", "D", "F"] = "F"
     score: int = Field(default=0, ge=0, le=100)
     ruleset: str = "v3"
-    # Pontuações separadas por dimensão (Seção 1.4 do MELHORIAS.txt)
+    # pontuação separada por dimensão
     transport_score: int = Field(default=0, ge=0, le=40)
     headers_score: int = Field(default=0, ge=0, le=40)
     hygiene_score: int = Field(default=0, ge=0, le=20)
@@ -331,8 +331,8 @@ class SecurityAudit(BaseModel):
 class ContentAssertionsResult(BaseModel):
     passed: bool = True
     failures: list[str] = Field(default_factory=list)
-    # Asserções que NÃO puderam ser avaliadas por falha do próprio Anhangá (ex.: o subprocesso do avaliador de
-    # regex não subiu). Não são falha do alvo: não reprovam `passed` nem disparam alerta, mas ficam visíveis.
+    # asserções que NÃO deu pra avaliar por falha do próprio Anhangá (ex.: o subprocesso do regex não subiu).
+    # não é culpa do alvo: não reprovam `passed` nem disparam alerta, mas ficam visíveis.
     not_evaluated: list[str] = Field(default_factory=list)
 
 
@@ -364,9 +364,9 @@ class ProbeResult(BaseModel):
     history_ms: list[float] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
-    # up = HTTP ok e TLS válido; degraded = HTTP ok mas TLS inválido; down = falha
+    # up = HTTP ok e TLS válido; degraded = HTTP ok mas TLS inválido; down = falhou
     health: Literal["up", "degraded", "down"] = "down"
-    # Tempo total decorrido incluindo todos os hops de redirect (o waterfall mostra só a resposta final)
+    # tempo total decorrido, somando todos os saltos de redirect (o waterfall mostra só a resposta final)
     end_to_end_ms: float | None = None
 
     @model_validator(mode="after")
@@ -413,8 +413,8 @@ def classify_error_message(message: str) -> str:
         return "assertion_failed"
     if m.startswith("limite máximo de redirecionamentos"):
         return "redirect_loop"
-    # Marcadores específicos de erro de TLS, não substring solta: um hostname "classless.example" ou
-    # "tls-proxy.example" numa falha de conexão não pode virar `tls_error`.
+    # marcadores específicos de erro de TLS, não substring solta: um hostname 'classless.example' ou
+    # 'tls-proxy.example' numa falha de conexão não pode virar `tls_error`.
     if any(k in m for k in _TLS_ERROR_MARKERS) or _TLS_ALERT_RE.search(m):
         return "tls_error"
     if m.startswith("erro http/conexão"):

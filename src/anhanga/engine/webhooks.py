@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import httpx
 
 from anhanga.engine.config import webhook_provider_from_url
+from anhanga.i18n import tr
 from anhanga.engine.models import ProbeResult
 from anhanga.engine.probe import (
     ALLOWED_SCHEMES,
@@ -31,27 +32,31 @@ def detect_webhook_provider(
 
 def _ms(result: ProbeResult, value: float) -> str:
     """Latência formatada; sem resposta do alvo não há medição (0 ms seria mentira)."""
-    return "N/D" if result.status_code is None else f"{value:.2f} ms"
+    return tr("N/D", "N/A") if result.status_code is None else f"{value:.2f} ms"
 
 
 def _grade_text(result: ProbeResult) -> str:
-    return "N/D" if result.status_code is None else f"{result.security.grade} ({result.security.score}/100)"
+    return tr("N/D", "N/A") if result.status_code is None else f"{result.security.grade} ({result.security.score}/100)"
 
 
 def _format_tls_status(result: ProbeResult) -> str:
     if result.tls is None:
-        return "N/A (HTTP sem TLS)"
+        return tr("N/A (HTTP sem TLS)", "N/A (HTTP without TLS)")
     if not result.tls.valid:
         reason = result.tls.validation_error
-        return f"INVÁLIDO ({reason})" if reason else "INVÁLIDO"
+        return (
+            tr(f"INVÁLIDO ({reason})", f"INVALID ({reason})")
+            if reason
+            else tr("INVÁLIDO", "INVALID")
+        )
     days = (
-        f"{result.tls.days_remaining}d restantes"
+        tr(f"{result.tls.days_remaining}d restantes", f"{result.tls.days_remaining}d left")
         if result.tls.days_remaining is not None
-        else "válido"
+        else tr("válido", "valid")
     )
     proto = result.tls.protocol or "TLS"
-    warn = " [EXPIRANDO]" if result.tls.alert_expiring else ""
-    return f"Válido ({proto}, {days}){warn}"
+    warn = tr(" [EXPIRANDO]", " [EXPIRING]") if result.tls.alert_expiring else ""
+    return tr(f"Válido ({proto}, {days}){warn}", f"Valid ({proto}, {days}){warn}")
 
 
 def _collect_violations(
@@ -70,20 +75,23 @@ def _collect_violations(
     # lembrete ou reenvio com mensagens vazias ou genéricas não pode mostrar o selo vermelho sem motivo.
     if event != "recovery" and not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
-        items.insert(0, f"Alvo OFFLINE: {reason}")
+        items.insert(0, tr(f"Alvo OFFLINE: {reason}", f"Target OFFLINE: {reason}"))
     if event in ("recovery", "reminder"):
         return items  # TLS: as mensagens do evento já descrevem o que persiste/foi resolvido
-    if result.health == "degraded" and not covered("certificado tls", "inválid"):
-        reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
-        items.append(f"Certificado TLS inválido: {reason}")
+    if result.health == "degraded" and not (covered("certificado tls", "inválid") or covered("tls certificate", "invalid")):
+        reason = (result.tls.validation_error if result.tls else None) or tr("validação falhou", "validation failed")
+        items.append(tr(f"Certificado TLS inválido: {reason}", f"Invalid TLS certificate: {reason}"))
     if result.tls and result.tls.alert_expiring and result.tls.days_remaining is not None:
         if not any(
-            "certificado tls" in v.lower() and any(f in v.lower() for f in ("expira em", "expirando", "expirado há"))
+            ("certificado tls" in v.lower() and any(f in v.lower() for f in ("expira em", "expirando", "expirado há")))
+            or ("tls certificate" in v.lower() and any(f in v.lower() for f in ("expires in", "expiring", "expired")))
             for v in items
         ):
             days = result.tls.days_remaining
             items.append(
-                f"Certificado TLS expirado há {-days} dias" if days < 0 else f"Certificado TLS expira em {days} dias"
+                tr(f"Certificado TLS expirado há {-days} dias", f"TLS certificate expired {-days} days ago")
+                if days < 0
+                else tr(f"Certificado TLS expira em {days} dias", f"TLS certificate expires in {days} days")
             )
     return items
 
@@ -113,7 +121,7 @@ def _fit_violations(
                 raw = _clip(raw, max(40, len(raw) // 2))
                 line = render(raw)
         elif used + len(line) + 1 > limit - reserve:
-            out.append(render(f"… (+{len(violations) - i} omitidas)"))
+            out.append(render(tr(f"… (+{len(violations) - i} omitidas)", f"… (+{len(violations) - i} omitted)")))
             break
         out.append(line)
         used += len(line) + 1
@@ -130,15 +138,15 @@ def build_slack_payload(
         status_label = f"🔴 OFFLINE ({result.status_code or 'ERR'})"
     elif all_violations:
         color = "#f59e0b"
-        status_label = f"🟡 ALERTA SLO/SEC (HTTP {result.status_code})"
+        status_label = tr(f"🟡 ALERTA SLO/SEC (HTTP {result.status_code})", f"🟡 SLO/SEC ALERT (HTTP {result.status_code})")
     else:
         color = "#10b981"
         status_label = f"🟢 ONLINE (HTTP {result.status_code})"
     if event == "recovery":
         color = "#10b981"
-        status_label = f"🟢 RECUPERADO (HTTP {result.status_code})"
+        status_label = tr(f"🟢 RECUPERADO (HTTP {result.status_code})", f"🟢 RECOVERED (HTTP {result.status_code})")
     elif event == "reminder":
-        status_label += " — LEMBRETE (problema persiste)"
+        status_label += tr(" — LEMBRETE (problema persiste)", " — REMINDER (problem persists)")
 
     tls_status = _format_tls_status(result)
     # P95 só com amostras suficientes (n >= 20); antes, sem amostragem, a latência total saía com o rótulo 'P95'.
@@ -148,13 +156,13 @@ def build_slack_payload(
     summary_text = (
         f"[Anhangá] {status_label} — {result.target_url} | "
         f"Total: {_ms(result, result.timings.total_ms)} | TTFB: {_ms(result, result.timings.ttfb_ms)} | "
-        f"Nota: {_grade_text(result)}"
+        f"{tr('Nota', 'Grade')}: {_grade_text(result)}"
     )
 
     violations_text = (
         "\n".join(_fit_violations(all_violations, 2800, render=lambda v: f"• {v}"))
         if all_violations
-        else "Nenhuma violação detectada."
+        else tr("Nenhuma violação detectada.", "No violations detected.")
     )
 
     blocks: list[dict[str, Any]] = [
@@ -172,20 +180,20 @@ def build_slack_payload(
                 {"type": "mrkdwn", "text": f"*Status:*\n{status_label}"},
                 {
                     "type": "mrkdwn",
-                    "text": f"*Nota de Segurança:*\n{_grade_text(result)}",
+                    "text": f"*{tr('Nota de Segurança', 'Security Grade')}:*\n{_grade_text(result)}",
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Latência Total:*\n{_ms(result, result.timings.total_ms)}{p95_suffix}",
+                    "text": f"*{tr('Latência Total', 'Total Latency')}:*\n{_ms(result, result.timings.total_ms)}{p95_suffix}",
                 },
                 {
                     "type": "mrkdwn",
                     "text": f"*TTFB:*\n{_ms(result, result.timings.ttfb_ms)}",
                 },
-                {"type": "mrkdwn", "text": f"*Status TLS:*\n{tls_status}"},
+                {"type": "mrkdwn", "text": f"*{tr('Status TLS', 'TLS Status')}:*\n{tls_status}"},
                 {
                     "type": "mrkdwn",
-                    "text": f"*IP Resolvido:*\n{result.resolved_ip or 'N/A'}",
+                    "text": f"*{tr('IP Resolvido', 'Resolved IP')}:*\n{result.resolved_ip or 'N/A'}",
                 },
             ],
         },
@@ -197,7 +205,7 @@ def build_slack_payload(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Violações / Alertas:*\n{violations_text}",
+                    "text": f"*{tr('Violações / Alertas', 'Violations / Alerts')}:*\n{violations_text}",
                 },
             }
         )
@@ -208,7 +216,7 @@ def build_slack_payload(
             "fallback": summary_text,
             "fields": [
                 {
-                    "title": "Latência Total",
+                    "title": tr("Latência Total", "Total Latency"),
                     "value": f"{_ms(result, result.timings.total_ms)}",
                     "short": True,
                 },
@@ -218,17 +226,17 @@ def build_slack_payload(
                     "short": True,
                 },
                 {
-                    "title": "Nota de Segurança",
+                    "title": tr("Nota de Segurança", "Security Grade"),
                     "value": f"{_grade_text(result)}",
                     "short": True,
                 },
                 {
-                    "title": "Status TLS",
+                    "title": tr("Status TLS", "TLS Status"),
                     "value": tls_status,
                     "short": True,
                 },
                 {
-                    "title": "Violações",
+                    "title": tr("Violações", "Violations"),
                     "value": violations_text,
                     "short": False,
                 },
@@ -253,30 +261,30 @@ def build_teams_payload(
         status_label = f"OFFLINE ({result.status_code or 'ERR'})"
     elif all_violations:
         theme_color = "F59E0B"
-        status_label = f"ALERTA SLO/SEC (HTTP {result.status_code})"
+        status_label = tr(f"ALERTA SLO/SEC (HTTP {result.status_code})", f"SLO/SEC ALERT (HTTP {result.status_code})")
     else:
         theme_color = "10B981"
         status_label = f"ONLINE (HTTP {result.status_code})"
     if event == "recovery":
         theme_color = "10B981"
-        status_label = f"RECUPERADO (HTTP {result.status_code})"
+        status_label = tr(f"RECUPERADO (HTTP {result.status_code})", f"RECOVERED (HTTP {result.status_code})")
     elif event == "reminder":
-        status_label += " — LEMBRETE (problema persiste)"
+        status_label += tr(" — LEMBRETE (problema persiste)", " — REMINDER (problem persists)")
 
     tls_status = _format_tls_status(result)
-    violations_str = "; ".join(all_violations) if all_violations else "Nenhuma"
+    violations_str = "; ".join(all_violations) if all_violations else tr("Nenhuma", "None")
 
     facts = [
-        {"name": "Alvo", "value": result.target_url},
+        {"name": tr("Alvo", "Target"), "value": result.target_url},
         {"name": "Status", "value": status_label},
-        {"name": "Latência Total", "value": f"{_ms(result, result.timings.total_ms)}"},
+        {"name": tr("Latência Total", "Total Latency"), "value": f"{_ms(result, result.timings.total_ms)}"},
         {"name": "TTFB", "value": f"{_ms(result, result.timings.ttfb_ms)}"},
         {
-            "name": "Nota de Segurança",
+            "name": tr("Nota de Segurança", "Security Grade"),
             "value": f"{_grade_text(result)}",
         },
-        {"name": "Status TLS", "value": tls_status},
-        {"name": "Violações", "value": violations_str},
+        {"name": tr("Status TLS", "TLS Status"), "value": tls_status},
+        {"name": tr("Violações", "Violations"), "value": violations_str},
     ]
 
     return {
@@ -284,10 +292,10 @@ def build_teams_payload(
         "@context": "http://schema.org/extensions",
         "themeColor": theme_color,
         "summary": f"Anhangá Alert: {result.target_url} ({status_label})",
-        "title": f"Anhangá Auditoria de Borda & SRE — {result.target_url}",
+        "title": tr(f"Anhangá Auditoria de Borda & SRE — {result.target_url}", f"Anhangá Edge Audit & SRE — {result.target_url}"),
         "sections": [
             {
-                "activityTitle": f"Diagnóstico: {result.target_url}",
+                "activityTitle": tr(f"Diagnóstico: {result.target_url}", f"Diagnosis: {result.target_url}"),
                 "activitySubtitle": f"Status: {status_label}",
                 "facts": facts,
                 "markdown": True,
@@ -307,13 +315,13 @@ def build_telegram_payload(
     if not result.is_up:
         badge = "🔴 OFFLINE"
     elif all_violations:
-        badge = "🟡 ALERTA"
+        badge = tr("🟡 ALERTA", "🟡 ALERT")
     else:
         badge = "🟢 ONLINE"
     if event == "recovery":
-        badge = "🟢 RECUPERADO"
+        badge = tr("🟢 RECUPERADO", "🟢 RECOVERED")
     elif event == "reminder":
-        badge += " — LEMBRETE"
+        badge += tr(" — LEMBRETE", " — REMINDER")
 
     tls_str = html.escape(_clip(_format_tls_status(result), 300))
     target_url_escaped = html.escape(_clip(str(result.target_url), 400))
@@ -322,15 +330,15 @@ def build_telegram_payload(
 
     lines = [
         f"<b>🔥 Anhangá SRE Alert — {badge}</b>",
-        f"<b>Alvo:</b> <code>{target_url_escaped}</code>",
+        f"<b>{tr('Alvo', 'Target')}:</b> <code>{target_url_escaped}</code>",
         f"<b>HTTP Status:</b> {result.status_code or 'ERR'} ({http_ver_escaped})",
-        f"<b>Latência Total:</b> {_ms(result, result.timings.total_ms)}",
+        f"<b>{tr('Latência Total', 'Total Latency')}:</b> {_ms(result, result.timings.total_ms)}",
         f"<b>TTFB:</b> {_ms(result, result.timings.ttfb_ms)}",
-        f"<b>Nota de Segurança:</b> {grade_escaped}",
-        f"<b>Status TLS:</b> {tls_str}",
+        f"<b>{tr('Nota de Segurança', 'Security Grade')}:</b> {grade_escaped}",
+        f"<b>{tr('Status TLS', 'TLS Status')}:</b> {tls_str}",
     ]
     if all_violations:
-        lines.append("<b>Violações:</b>")
+        lines.append(f"<b>{tr('Violações', 'Violations')}:</b>")
         # orçamento = 4096 menos o que já foi usado; cada violação é medida DEPOIS de escapada (aspas, < e & expandem de 4 a 6 vezes)
         budget = 4000 - len("\n".join(lines))
         lines.extend(_fit_violations(all_violations, budget, per_item=300, render=lambda v: f"• {html.escape(v)}"))
@@ -375,22 +383,25 @@ async def send_webhook_alert(
     """
     raw_url = (webhook_url or "").strip()
     if not raw_url:
-        raise ValueError("URL de webhook vazia.")
+        raise ValueError(tr("URL de webhook vazia.", "Webhook URL is empty."))
 
     try:
         parsed = urlparse(raw_url)
     except ValueError as exc:
-        raise ValueError(f"URL de webhook malformada: {exc}") from exc
+        raise ValueError(tr(f"URL de webhook malformada: {exc}", f"Malformed webhook URL: {exc}")) from exc
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
         raise SSRFBlockedError(
             raw_url,
-            f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido no webhook.",
+            tr(
+                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido no webhook.",
+                f"Blocked by the Anti-SSRF guard: scheme '{scheme}' not allowed for the webhook.",
+            ),
         )
 
     host = parsed.hostname
     if not host:
-        raise ValueError("URL de webhook inválida: hostname ausente.")
+        raise ValueError(tr("URL de webhook inválida: hostname ausente.", "Invalid webhook URL: hostname missing."))
     port = parsed.port or (443 if scheme == "https" else 80)
 
     resolved_ip, _ = await resolve_and_validate_host(

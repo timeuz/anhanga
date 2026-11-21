@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from anhanga import __version__
+from anhanga.i18n import get_lang, reset_lang, set_lang, tr
 from anhanga.engine.alerting import AlertEvent, AlertManager, Evaluation
 from anhanga.engine.config import (
     MAX_SAMPLES,
@@ -75,6 +76,8 @@ class WebhookNotifyRequest(BaseModel):
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+# o HTML inicial já sai no idioma do pedido (Accept-Language); depois o Alpine assume pela escolha salva
+templates.env.globals.update(tr=tr, current_lang=get_lang)
 
 
 def _extract_client_ip(request: Request | None) -> str:
@@ -160,9 +163,11 @@ def _enforce_rate_limit(request: Request | None, cost: int = 1) -> None:
     if not allowed:
         raise HTTPException(
             status_code=429,
-            detail=(
+            detail=tr(
                 f"Rate limit excedido para o IP '{client_ip}' "
-                f"(máximo {RATE_LIMITER.max_requests} req/min). Aguarde {retry_after}s."
+                f"(máximo {RATE_LIMITER.max_requests} req/min). Aguarde {retry_after}s.",
+                f"Rate limit exceeded for IP '{client_ip}' "
+                f"(maximum {RATE_LIMITER.max_requests} req/min). Wait {retry_after}s.",
             ),
             headers={"Retry-After": str(retry_after)},
         )
@@ -588,12 +593,25 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), na
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
+    # o idioma dos textos vem de `?lang=` ou do Accept-Language; sem nenhum dos dois, pt-BR
+    lang_token = set_lang(request.query_params.get("lang") or request.headers.get("accept-language"))
+    try:
+        return await _guarded(request, call_next)
+    finally:
+        reset_lang(lang_token)
+
+
+async def _guarded(request: Request, call_next):
     if request.url.path.startswith(PROTECTED_PREFIXES) and not _is_authorized(request):
         return JSONResponse(
             status_code=401,
             content={
-                "detail": "Não autorizado. Envie 'Authorization: Bearer <ANHANGA_API_KEY>' "
-                "(sem chave configurada, apenas acesso loopback direto é aceito)."
+                "detail": tr(
+                    "Não autorizado. Envie 'Authorization: Bearer <ANHANGA_API_KEY>' "
+                    "(sem chave configurada, apenas acesso loopback direto é aceito).",
+                    "Unauthorized. Send 'Authorization: Bearer <ANHANGA_API_KEY>' "
+                    "(with no key configured, only direct loopback access is accepted).",
+                )
             },
             headers={"WWW-Authenticate": "Bearer"},
         )
@@ -627,11 +645,14 @@ async def api_scan_url(
     min_payload_bytes: int | None = Query(None, description="Tamanho mínimo de payload em bytes"),
     max_payload_bytes: int | None = Query(None, description="Tamanho máximo de payload em bytes"),
     assert_final_url: str | None = Query(None, description="URL final esperada após redirects"),
+    lang: str = Query(
+        "pt-BR", description="Idioma dos textos devolvidos: pt-BR ou en-US (vale para toda a API; também lê Accept-Language)"
+    ),
 ):
     """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects, Asserções e Security Headers."""
     _enforce_rate_limit(request, cost=samples)
     if not url.strip():
-        raise HTTPException(status_code=400, detail="O parâmetro 'url' é obrigatório.")
+        raise HTTPException(status_code=400, detail=tr("O parâmetro 'url' é obrigatório.", "The 'url' parameter is required."))
 
     result = await execute_probe(
         url,
@@ -657,15 +678,24 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
     if body.webhook_url not in entries:
         raise HTTPException(
             status_code=403,
-            detail="webhook_url não consta na allowlist ('webhooks' do targets.yaml).",
+            detail=tr(
+                "webhook_url não consta na allowlist ('webhooks' do targets.yaml).",
+                "webhook_url is not in the allowlist ('webhooks' in targets.yaml).",
+            ),
         )
     spec = entries[body.webhook_url]
     # destino, provedor e chat_id são do OPERADOR (targets.yaml), a requisição não escolhe. quem tem a chave da API
     # não pode mandar o bot do Telegram pra outro chat, e um webhook `provider: teams` não cai no Slack.
     if body.chat_id not in (None, "") and body.chat_id != spec.chat_id:
-        raise HTTPException(status_code=400, detail="chat_id é definido no targets.yaml e não pode ser alterado pela requisição.")
+        raise HTTPException(status_code=400, detail=tr(
+            "chat_id é definido no targets.yaml e não pode ser alterado pela requisição.",
+            "chat_id is set in targets.yaml and cannot be changed by the request.",
+        ))
     if spec.provider != "auto" and body.provider not in ("auto", spec.provider):
-        raise HTTPException(status_code=400, detail=f"provider deste webhook é '{spec.provider}' (targets.yaml).")
+        raise HTTPException(status_code=400, detail=tr(
+            f"provider deste webhook é '{spec.provider}' (targets.yaml).",
+            f"this webhook's provider is '{spec.provider}' (targets.yaml).",
+        ))
     provider = spec.provider if spec.provider != "auto" else body.provider
     probe_res = STATE_CACHE.get(body.url) or await execute_probe(
         body.url, timeout=body.timeout, allow_private=_allow_private_api()
@@ -688,7 +718,7 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
         raise HTTPException(status_code=400, detail=str(val_err)) from val_err
     except Exception as exc:
         raise HTTPException(
-            status_code=502, detail=f"Erro ao enviar webhook: {exc}"
+            status_code=502, detail=tr(f"Erro ao enviar webhook: {exc}", f"Error sending webhook: {exc}")
         ) from exc
 
 
@@ -702,7 +732,10 @@ def _require_store() -> Store:
     if _STORE is None:
         raise HTTPException(
             status_code=503,
-            detail="Persistência indisponível (desabilitada, sem alvos configurados ou falha ao abrir o banco).",
+            detail=tr(
+                "Persistência indisponível (desabilitada, sem alvos configurados ou falha ao abrir o banco).",
+                "Persistence unavailable (disabled, no targets configured, or the database failed to open).",
+            ),
         )
     return _STORE
 
@@ -720,14 +753,20 @@ async def _store_for_managed_targets() -> Store:
         return _STORE
     cfg = _current_config()
     if not cfg.storage.enabled:
-        raise HTTPException(status_code=503, detail="Persistência desabilitada: alvos pela UI exigem 'storage.enabled'.")
+        raise HTTPException(status_code=503, detail=tr(
+                "Persistência desabilitada: alvos pela UI exigem 'storage.enabled'.",
+                "Persistence disabled: UI targets require 'storage.enabled'.",
+            ))
     if _db_exists(cfg.storage.path):
-        raise HTTPException(status_code=503, detail="Persistência ainda inicializando; tente novamente em instantes.")
+        raise HTTPException(status_code=503, detail=tr(
+                "Persistência ainda inicializando; tente novamente em instantes.",
+                "Persistence is still starting; try again in a moment.",
+            ))
     try:
         _STORE = await asyncio.to_thread(Store, cfg.storage.path, cfg.storage.retention_days)
     except Exception as exc:  # noqa: BLE001
         STORAGE_ERRORS_TOTAL.inc()
-        raise HTTPException(status_code=503, detail=f"Não foi possível abrir o banco: {exc}") from exc
+        raise HTTPException(status_code=503, detail=tr(f"Não foi possível abrir o banco: {exc}", f"Could not open the database: {exc}")) from exc
     return _STORE
 
 
@@ -747,9 +786,9 @@ async def add_managed_target(request: Request, body: ManagedTargetIn):
         raise HTTPException(status_code=400, detail=err)
     key = target_key(raw)
     if key in _yaml_keys(_current_config()):
-        raise HTTPException(status_code=409, detail="Alvo já definido no targets.yaml.")
+        raise HTTPException(status_code=409, detail=tr("Alvo já definido no targets.yaml.", "Target already defined in targets.yaml."))
     if any(target_key(t.url) == key for t in _MANAGED):
-        raise HTTPException(status_code=409, detail="Alvo já monitorado.")
+        raise HTTPException(status_code=409, detail=tr("Alvo já monitorado.", "Target already monitored."))
     store = await _store_for_managed_targets()
     url = _normalize_and_validate_scheme(raw)[0]
     result = await _monitored_probe(url, allow_private=False, samples=body.samples)
@@ -757,11 +796,14 @@ async def add_managed_target(request: Request, body: ManagedTargetIn):
         _raise_for_unreachable(result)  # alvo proibido nunca é gravado
     status = await _store_call(store.add_managed_target, url, body.samples, MAX_MANAGED_TARGETS)
     if status is None:
-        raise HTTPException(status_code=503, detail="Falha ao gravar o alvo.")
+        raise HTTPException(status_code=503, detail=tr("Falha ao gravar o alvo.", "Failed to save the target."))
     if status == "exists":
-        raise HTTPException(status_code=409, detail="Alvo já monitorado.")
+        raise HTTPException(status_code=409, detail=tr("Alvo já monitorado.", "Target already monitored."))
     if status == "limit":
-        raise HTTPException(status_code=409, detail=f"Limite de {MAX_MANAGED_TARGETS} alvos adicionados pela UI atingido.")
+        raise HTTPException(status_code=409, detail=tr(
+                f"Limite de {MAX_MANAGED_TARGETS} alvos adicionados pela UI atingido.",
+                f"Limit of {MAX_MANAGED_TARGETS} UI-added targets reached.",
+            ))
     _MANAGED.append(TargetSpec(url=url, samples=body.samples, allow_private=False, rules=_current_config().default_rules))
     _update_state_and_history(result, is_continuous=True)
     record_probe_metrics(result)
@@ -777,11 +819,14 @@ async def remove_managed_target(request: Request, url: str = Query(..., min_leng
         raise HTTPException(status_code=400, detail=err)
     key = target_key(url.strip())
     if key in _yaml_keys(_current_config()):
-        raise HTTPException(status_code=409, detail="Alvo definido no targets.yaml: remova-o editando o arquivo.")
+        raise HTTPException(status_code=409, detail=tr(
+            "Alvo definido no targets.yaml: remova-o editando o arquivo.",
+            "Target defined in targets.yaml: remove it by editing the file.",
+        ))
     store = _require_store()
     stored = next((u for u, _ in (await _store_call(store.list_managed_targets) or []) if target_key(u) == key), None)
     if stored is None or not await _store_call(store.remove_managed_target, stored):
-        raise HTTPException(status_code=404, detail="Alvo não encontrado entre os adicionados pela UI.")
+        raise HTTPException(status_code=404, detail=tr("Alvo não encontrado entre os adicionados pela UI.", "Target not found among those added through the UI."))
     _MANAGED[:] = [t for t in _MANAGED if target_key(t.url) != key]
     STATE_CACHE.pop(stored, None)
     HISTORY_CACHE.pop(stored, None)
@@ -849,7 +894,10 @@ async def web_dashboard(request: Request):
     index_file = BASE_DIR / "web" / "templates" / "index.html"
     if not index_file.exists():
         return HTMLResponse(
-            "<h1>Anhangá Engine Online</h1><p>Interface indisponível; use <code>/api/v1/</code> e <code>/metrics</code> com a chave da API.</p>"
+            tr(
+                "<h1>Anhangá Engine Online</h1><p>Interface indisponível; use <code>/api/v1/</code> e <code>/metrics</code> com a chave da API.</p>",
+                "<h1>Anhangá Engine Online</h1><p>Interface unavailable; use <code>/api/v1/</code> and <code>/metrics</code> with the API key.</p>",
+            )
         )
     return templates.TemplateResponse(
         request=request,

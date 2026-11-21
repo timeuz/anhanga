@@ -205,6 +205,7 @@ O campo "Adicionar alvo" do dashboard grava alvos permanentes no SQLite (até 50
 | `ANHANGA_SENSITIVE_COOKIE_REGEX` | Sobrescreve quais nomes de cookie exigem `HttpOnly`. |
 | `ANHANGA_DOCS` | `1` habilita `/docs`, `/redoc` e `/openapi.json`. |
 | `ANHANGA_PROBE_ORIGIN` | Rótulo do ponto de observação da sonda nos resultados. |
+| `ANHANGA_LANG` | Idioma do CLI, dos alertas e das descrições das métricas: `pt-BR` (padrão) ou `en-US`. O painel e a API seguem o idioma da tela sozinhos (`?lang=en-US` ou `Accept-Language`). |
 
 O `.env` é lido apenas pelas entradas do servidor (`anhanga serve`, `uvicorn anhanga.main:app`), nunca pelo `anhanga check`. Variáveis já definidas no ambiente têm precedência.
 

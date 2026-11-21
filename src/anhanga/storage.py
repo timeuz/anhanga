@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from anhanga.engine.models import ProbeResult
+from anhanga.i18n import tr
 
 SCHEMA_VERSION = 2
 OUTBOX_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 600, 1800, 3600)  # após a n-ésima falha
@@ -138,7 +139,10 @@ class Store:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise RuntimeError(
-                f"Banco criado por versão mais nova do Anhangá (schema {version} > {SCHEMA_VERSION})."
+                tr(
+                    f"Banco criado por versão mais nova do Anhangá (schema {version} > {SCHEMA_VERSION}).",
+                    f"Database created by a newer Anhangá version (schema {version} > {SCHEMA_VERSION}).",
+                )
             )
         for target_version in range(version + 1, SCHEMA_VERSION + 1):
             self._conn.execute("BEGIN")
@@ -405,11 +409,11 @@ def backup_database(src: str, dest: str, force: bool = False) -> Path:
     O destino é gravado num arquivo temporário (0600) e só então renomeado; nunca sobrescreve sem `force`."""
     src_path, dest_path = Path(src).expanduser(), Path(dest).expanduser()
     if not src_path.is_file():
-        raise FileNotFoundError(f"banco não encontrado: {src_path}")
+        raise FileNotFoundError(tr(f"banco não encontrado: {src_path}", f"database not found: {src_path}"))
     if dest_path.exists() and not force:
-        raise FileExistsError(f"{dest_path} já existe; use --force para sobrescrever")
+        raise FileExistsError(tr(f"{dest_path} já existe; use --force para sobrescrever", f"{dest_path} already exists; use --force to overwrite"))
     if dest_path.resolve() == src_path.resolve():
-        raise ValueError("o destino não pode ser o próprio banco")
+        raise ValueError(tr("o destino não pode ser o próprio banco", "the destination cannot be the database itself"))
     tmp = dest_path.with_name(dest_path.name + ".tmp")
     tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

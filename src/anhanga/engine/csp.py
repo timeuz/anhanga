@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 
 from anhanga.engine.models import CSPAnalysis, CSPIssue
+from anhanga.i18n import tr
 
 # hosts que servem JSONP ou bibliotecas com gadgets de execução: liberar eles no script-src derruba a proteção.
 BYPASS_HOSTS = (
@@ -58,22 +59,33 @@ def _analyze_policy(policy: str) -> tuple[list[CSPIssue], bool, bool]:
 
     if script_name is None:
         add("csp-no-script-src", "high", "script-src",
-            "Sem script-src nem default-src: scripts de qualquer origem podem executar.")
+            tr("Sem script-src nem default-src: scripts de qualquer origem podem executar.",
+               "No script-src or default-src: scripts from any origin can run."))
     elif "'none'" not in low:
         if "'unsafe-inline'" in low and not has_nonce_hash:
             add("csp-unsafe-inline", "high", script_name,
-                "'unsafe-inline' sem nonce/hash permite scripts inline: anula a proteção contra XSS.")
+                tr("'unsafe-inline' sem nonce/hash permite scripts inline: anula a proteção contra XSS.",
+                   "'unsafe-inline' without a nonce/hash allows inline scripts: it defeats XSS protection."))
         if "'unsafe-eval'" in low:
-            add("csp-unsafe-eval", "medium", script_name, "'unsafe-eval' permite eval()/new Function() (vetor de XSS).")
+            add("csp-unsafe-eval", "medium", script_name,
+                tr("'unsafe-eval' permite eval()/new Function() (vetor de XSS).",
+                   "'unsafe-eval' allows eval()/new Function() (an XSS vector)."))
         if "*" in low:
-            add("csp-wildcard", "high", script_name, "O curinga '*' permite carregar scripts de qualquer host.")
+            add("csp-wildcard", "high", script_name,
+                tr("O curinga '*' permite carregar scripts de qualquer host.",
+                   "The '*' wildcard allows loading scripts from any host."))
         if "http:" in low:
-            add("csp-http-scheme", "high", script_name, "'http:' permite scripts em texto claro (interceptáveis).")
+            add("csp-http-scheme", "high", script_name,
+                tr("'http:' permite scripts em texto claro (interceptáveis).",
+                   "'http:' allows scripts over cleartext (interceptable)."))
         if "data:" in low:
-            add("csp-data-scheme", "high", script_name, "'data:' em script-src permite executar scripts embutidos em URL.")
+            add("csp-data-scheme", "high", script_name,
+                tr("'data:' em script-src permite executar scripts embutidos em URL.",
+                   "'data:' in script-src allows running scripts embedded in a URL."))
         if "https:" in low and not strict_dynamic:
             add("csp-https-scheme", "medium", script_name,
-                "'https:' genérico permite scripts de qualquer host HTTPS; liste hosts explícitos.")
+                tr("'https:' genérico permite scripts de qualquer host HTTPS; liste hosts explícitos.",
+                   "A bare 'https:' allows scripts from any HTTPS host; list explicit hosts."))
         if not strict_dynamic:
             for token in sources:
                 host = _host_of(token)
@@ -81,15 +93,19 @@ def _analyze_policy(policy: str) -> tuple[list[CSPIssue], bool, bool]:
                     b.startswith("*.") and host.endswith(b[1:]) and host != b[2:] for b in BYPASS_HOSTS
                 ):
                     add("csp-bypass-host", "medium", script_name,
-                        f"'{token}' hospeda JSONP/bibliotecas que permitem contornar a CSP.")
+                        tr(f"'{token}' hospeda JSONP/bibliotecas que permitem contornar a CSP.",
+                           f"'{token}' hosts JSONP/libraries that allow bypassing the CSP."))
                     break
 
     obj = d.get("object-src", d.get("default-src"))
     if obj is None or [t.lower() for t in obj] != ["'none'"]:
         add("csp-object-src", "medium", "object-src",
-            "object-src deveria ser 'none' (plugins/<object> são um vetor clássico de bypass).")
+            tr("object-src deveria ser 'none' (plugins/<object> são um vetor clássico de bypass).",
+               "object-src should be 'none' (plugins/<object> are a classic bypass vector)."))
     if "base-uri" not in d:
-        add("csp-base-uri", "low", "base-uri", "Sem base-uri: uma tag <base> injetada pode redirecionar URLs relativas.")
+        add("csp-base-uri", "low", "base-uri",
+            tr("Sem base-uri: uma tag <base> injetada pode redirecionar URLs relativas.",
+               "No base-uri: an injected <base> tag can redirect relative URLs."))
     return issues, has_nonce_hash, strict_dynamic
 
 
@@ -136,7 +152,8 @@ def analyze_csp(enforced: str | None, report_only: str | None) -> CSPAnalysis:
     if not enforced_policies:
         issues.insert(0, CSPIssue(
             id="csp-report-only", severity="medium", directive="Content-Security-Policy-Report-Only",
-            message="A política está apenas em modo Report-Only: reporta violações, mas não bloqueia nada.",
+            message=tr("A política está apenas em modo Report-Only: reporta violações, mas não bloqueia nada.",
+                       "The policy is Report-Only: it reports violations but blocks nothing."),
         ))
         strength = "report-only"
     elif any(i.severity == "high" for i in issues):

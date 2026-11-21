@@ -125,7 +125,7 @@ The dashboard runs on-demand scans, simulates remediation, compares re-scans, an
   }
   ```
 
-  Then set `ANHANGA_TRUSTED_PROXIES` to the address Anhangá sees the proxy connecting from, so the per-IP rate limit uses the real client address. With Docker's default bridge that is usually the bridge gateway (for example `172.17.0.1`; check with `docker network inspect bridge`).
+  Only needed if you put a reverse proxy (Caddy, nginx...) in front of Anhangá. The proxy forwards every request, so Anhangá would see all visitors as the proxy's own address and the per-IP rate limit would treat everyone as one client. `ANHANGA_TRUSTED_PROXIES` lists the proxy addresses Anhangá should believe when they send the real client IP in `X-Forwarded-For`. If the proxy runs on the same Docker network, use the address the container sees the proxy connecting from (often the network gateway, e.g. `172.17.0.1`; check with `docker network inspect bridge`). Without a proxy, leave it empty.
 - **State:** everything Anhangá keeps (database, `targets.yaml`) is in one directory. Mount it as a volume and schedule `anhanga backup` (see [Persistence](#persistence)).
 - **Updating:** take a backup, `git pull`, rebuild the image (or reinstall with `pip install -e .`) and restart the service.
 - **One instance per state:** run a single instance per database. A second one would duplicate monitoring and alerts.

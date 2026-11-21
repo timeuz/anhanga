@@ -232,11 +232,7 @@ svg { display: block; }
 select.field { width: auto; padding-right: 6px; cursor: pointer; }
 
 .input-addon { position: relative; flex: 1 1 280px; min-width: 0; }
-.input-addon > span {
-    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-    color: var(--muted); font-family: var(--font-mono); font-size: 13px; pointer-events: none;
-}
-.input-addon > .field { padding-left: 68px; font-family: var(--font-mono); }
+.input-addon > .field { font-family: var(--font-mono); }
 
 .segmented {
     display: inline-flex; padding: 2px; gap: 2px;

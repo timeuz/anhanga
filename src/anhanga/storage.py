@@ -156,7 +156,7 @@ class Store:
         with self._lock:
             self._conn.close()
 
-    # ------------------------------------------------------------------ histórico
+    # --- histórico ---
     def record_probe(self, result: ProbeResult) -> None:
         total = headline_ms(result)
         has_resp = result.status_code is not None
@@ -232,12 +232,12 @@ class Store:
                 "checks": n,
                 "uptime_pct": round(100.0 * (row["up"] or 0) / n, 3) if n else None,
                 "availability_pct": round(100.0 * (row["avail"] or 0) / n, 3) if n else None,
-                # janela só parcialmente coberta pelos dados (ex.: banco novo): não vender 30d com 2h de dados
+                # janela só parcialmente coberta pelos dados (ex.: banco novo): não dá pra vender 30d com 2h de dados
                 "covered_seconds": round(now - row["first"], 0) if n else 0,
             }
         return out
 
-    # ------------------------------------------------------------------ estado dos alertas
+    # --- estado dos alertas ---
     def save_alert_state(self, target: str, rows: list[dict[str, Any]]) -> None:
         with self._lock:
             self._conn.execute("BEGIN")
@@ -272,7 +272,7 @@ class Store:
                     "UPDATE incidents SET ended_ts = ? WHERE target = ? AND ended_ts IS NULL", (now, t)
                 )
 
-    # ------------------------------------------------------------------ incidentes
+    # --- incidentes ---
     def open_incident(self, target: str, problem: str, started_ts: float, message: str) -> None:
         with self._lock:
             self._conn.execute(
@@ -307,7 +307,7 @@ class Store:
             out.append(d)
         return out
 
-    # ------------------------------------------------------------------ outbox
+    # --- outbox ---
     def enqueue(self, wh_key: str, target: str, kind: str, messages: list[str], result_json: str,
                 now: float | None = None) -> None:
         now = now if now is not None else time.time()
@@ -349,7 +349,7 @@ class Store:
             )
             return False
 
-    # ------------------------------------------------------------------ alvos gerenciados pela UI
+    # --- alvos gerenciados pela UI ---
     def add_managed_target(self, url: str, samples: int, limit: int, now: float | None = None) -> str:
         """'added' | 'exists' | 'limit'. O limite é checado na mesma instrução do INSERT (sem corrida)."""
         with self._lock:
@@ -375,7 +375,7 @@ class Store:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
 
-    # ------------------------------------------------------------------ manutenção
+    # --- manutenção ---
     def prune(self, now: float | None = None) -> int:
         """Remove histórico e incidentes encerrados fora da retenção, e outbox envelhecida."""
         now = now if now is not None else time.time()
@@ -385,10 +385,11 @@ class Store:
             self._conn.execute("DELETE FROM incidents WHERE ended_ts IS NOT NULL AND ended_ts < ?", (cutoff,))
             self._conn.execute("DELETE FROM outbox WHERE created_ts < ?", (now - OUTBOX_MAX_AGE_SECONDS,))
             if self.path != ":memory:":
-                # Em blocos de 256 páginas (~1 MiB) e no máx. 20 por poda: não segura o lock do banco por segundos. O resto
-                # é liberado nas podas seguintes (a cada hora). `executescript`: no Python 3.11 `execute().fetchall()` libera só
-                # 1 página por chamada; executescript esgota o statement em qualquer versão (conexão em autocommit).
-                # `auto_vacuum` só é definido ao criar o banco: bancos antigos (NONE) nunca devolvem páginas por aqui.
+                # em blocos de 256 páginas (~1 MiB) e no máximo 20 por poda: não segura o lock do banco por segundos. o resto é
+                # liberado nas podas seguintes (a cada hora).
+                # `executescript`: no Python 3.11 o `execute().fetchall()` libera só 1 página por chamada; o executescript esgota o
+                # statement em qualquer versão (conexão em autocommit).
+                # `auto_vacuum` só é definido ao criar o banco: banco antigo (NONE) nunca devolve páginas por aqui.
                 incremental = self._conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
                 for _ in range(VACUUM_MAX_CHUNKS if incremental else 0):
                     if self._conn.execute("PRAGMA freelist_count").fetchone()[0] == 0:

@@ -315,7 +315,7 @@ def parse_config(raw: Any) -> MonitorConfig:
         if err:
             cfg.errors.append(f"{where} ('{url}'): {err} Descartado.")
             continue
-        # Duplicata é decidida pela URL normalizada (é a chave de métricas, alertas e histórico).
+        # duplicata é decidida pela URL normalizada (é a chave das métricas, dos alertas e do histórico).
         from anhanga.engine.probe import _normalize_and_validate_scheme
 
         key = target_key(url)
@@ -386,8 +386,8 @@ def parse_config(raw: Any) -> MonitorConfig:
 def find_config_path(extra_candidates: list[Path] | None = None) -> Path | None:
     explicit = os.getenv("ANHANGA_CONFIG", "").strip()
     if explicit:
-        # Caminho explícito do operador: se não existir (typo, volume não montado) é erro, nunca um fallback silencioso
-        # para outro targets.yaml. `load_config` reporta "Falha ao ler ..." e a recarga a quente o pega se aparecer.
+        # caminho explícito do operador: se não existir (typo, volume não montado) é erro, nunca um fallback silencioso
+        # pra outro targets.yaml. o `load_config` avisa 'Falha ao ler ...' e a recarga a quente pega se o arquivo aparecer.
         return Path(explicit)
     candidates = [Path("targets.yaml")]
     candidates += list(extra_candidates or [])

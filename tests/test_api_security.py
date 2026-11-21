@@ -119,4 +119,4 @@ def test_dashboard_renders_version_and_local_assets():
     assert "cdn.tailwindcss.com" not in html and "cdn.jsdelivr.net" not in html
     assert f"v{app_main.__version__}" in html
     assert local_client().get("/static/alpine.min.js").status_code == 200
-    assert local_client().get("/static/tailwind.css").status_code == 200
+    assert local_client().get("/static/app.css").status_code == 200

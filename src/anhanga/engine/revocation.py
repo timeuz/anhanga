@@ -211,7 +211,7 @@ async def _ocsp_check(leaf_pem: str, issuer_pem: str, url: str, *, allow_private
 
 async def _crl_revoked_map(url: str, issuer_pem: str, *, allow_private: bool, timeout: float,
                            now: float) -> dict[str, datetime | None]:
-    # A chave inclui o emissor: a assinatura foi verificada contra ELE; um hit só vale para o mesmo emissor.
+    # a chave inclui o emissor: a assinatura foi verificada contra ELE, então um hit só vale pro mesmo emissor.
     cache_key = f"{hashlib.sha256(issuer_pem.encode('ascii', 'ignore')).hexdigest()}|{url}"
     cached = _CRL_CACHE.get(cache_key)
     if cached and cached[0] > now:
@@ -280,9 +280,9 @@ async def check_revocation(
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
     except asyncio.TimeoutError:
-        # O orçamento da sondagem acabou, mas o trabalho NÃO é cancelado: segue em segundo plano e o
-        # próximo ciclo acha o resultado em cache. (Cancelar descartava o CRL baixado pela metade e
-        # refazia o mesmo download a cada 5 min, então um CRL grande nunca produzia resultado.)
+        # o orçamento da sondagem acabou, mas o trabalho NÃO é cancelado: segue em segundo plano e o próximo ciclo acha o
+        # resultado em cache. (cancelar jogava fora o CRL baixado pela metade e refazia o mesmo download a cada 5 min,
+        # então um CRL grande nunca chegava a dar resultado.)
         return RevocationInspection(
             status="unavailable",
             detail=f"verificação em andamento (>{deadline:.0f}s); conclui em segundo plano",
@@ -294,13 +294,13 @@ async def check_revocation(
 async def _compute_and_cache(
     key: str, chain_der: list[bytes], allow_private: bool, timeout: float
 ) -> RevocationInspection:
-    # A vaga é disputada FORA do prazo: o relógio de 25 s só começa quando a checagem de fato roda
-    # (esperar na fila não pode virar "tempo esgotado" em cache por 5 min). Isto roda destacado da sondagem.
+    # a vaga é disputada FORA do prazo: o relógio de 25 s só começa quando a checagem de fato roda (esperar na fila
+    # não pode virar 'tempo esgotado' em cache por 5 min). isto roda separado da sondagem.
     sem = _semaphore()
     try:
         await asyncio.wait_for(sem.acquire(), timeout=QUEUE_WAIT_SECONDS)
     except asyncio.TimeoutError:
-        # Sem vaga a tempo: o resultado seria velho. Não cacheia, para o próximo ciclo tentar de novo.
+        # sem vaga a tempo: o resultado já estaria velho. não cacheia, pro próximo ciclo tentar de novo.
         return RevocationInspection(status="unavailable", detail="fila de verificação saturada; tenta no próximo ciclo")
     try:
         result = await asyncio.wait_for(

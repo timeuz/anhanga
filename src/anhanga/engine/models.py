@@ -179,7 +179,8 @@ class RedirectHop(BaseModel):
 
 
 class X509ChainLink(BaseModel):
-    """Informações detalhadas de cada certificado na cadeia X.509."""
+    model_config = {"json_schema_extra": {"description": tr('Informações detalhadas de cada certificado na cadeia X.509.', 'Detailed information about each certificate in the X.509 chain.')}}
+
     common_name: str | None = None
     organization: str | None = None
     issuer: str | None = None
@@ -191,7 +192,8 @@ class X509ChainLink(BaseModel):
 
 
 class RevocationInspection(BaseModel):
-    """Resultado da checagem de revogação do certificado folha (OCSP ativo, com CRL de fallback)."""
+    model_config = {"json_schema_extra": {"description": tr('Resultado da checagem de revogação do certificado folha (OCSP ativo, com CRL de fallback).', 'Result of the leaf certificate revocation check (active OCSP, with CRL as a fallback).')}}
+
 
     # good = não revogado; revoked = revogado; unknown = o respondedor não conhece o serial;
     # unavailable = não deu pra checar (sem endpoint, emissor ou openssl); error = os endpoints falharam.
@@ -295,7 +297,8 @@ class CSPIssue(BaseModel):
 
 
 class CSPAnalysis(BaseModel):
-    """Qualidade da Content-Security-Policy (não basta existir: 'unsafe-inline' e '*' anulam a proteção)."""
+    model_config = {"json_schema_extra": {"description": tr("Qualidade da Content-Security-Policy (não basta existir: 'unsafe-inline' e '*' anulam a proteção).", "Content-Security-Policy quality (having one is not enough: 'unsafe-inline' and '*' defeat the protection).")}}
+
 
     present: bool = False
     enforced: bool = False  # False = só Report-Only (não bloqueia nada) ou ausente

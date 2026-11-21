@@ -35,22 +35,40 @@ def parse_duration_ms(val: str | int | float) -> float:
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         fval = float(val)
         if not math.isfinite(fval):
-            raise ValueError(f"Duração deve ser um número finito: {val}")
+            raise ValueError(tr(
+            f"Duração deve ser um número finito: {val}",
+            f"Duration must be a finite number: {val}",
+        ))
         if fval <= 0:
-            raise ValueError(f"Duração deve ser maior que zero: {val}")
+            raise ValueError(tr(
+            f"Duração deve ser maior que zero: {val}",
+            f"Duration must be greater than zero: {val}",
+        ))
         return round(fval, 2)
     if not isinstance(val, str):
-        raise ValueError(f"Formato de duração inválido: {val!r}")
+        raise ValueError(tr(
+            f"Formato de duração inválido: {val!r}",
+            f"Invalid duration format: {val!r}",
+        ))
     raw = val.strip().lower()
     if not raw:
-        raise ValueError("Formato de duração vazio.")
+        raise ValueError(tr(
+            "Formato de duração vazio.",
+            "Empty duration format.",
+        ))
     m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*(ms|s|m)?$", raw)
     if not m:
-        raise ValueError(f"Formato de duração inválido: '{val}'. Use ex: '500ms', '0.5s' ou '500'.")
+        raise ValueError(tr(
+            f"Formato de duração inválido: '{val}'. Use ex: '500ms', '0.5s' ou '500'.",
+            f"Invalid duration format: '{val}'. Use e.g. '500ms', '0.5s' or '500'.",
+        ))
     number = float(m.group(1))
     unit = m.group(2) or "ms"
     if number <= 0:
-        raise ValueError(f"Duração deve ser positiva: '{val}'.")
+        raise ValueError(tr(
+            f"Duração deve ser positiva: '{val}'.",
+            f"Duration must be positive: '{val}'.",
+        ))
     return round(number * {"ms": 1.0, "s": 1000.0, "m": 60_000.0}[unit], 2)
 
 
@@ -144,7 +162,10 @@ def _as_bool(value: Any, name: str, default: bool, cfg: MonitorConfig) -> bool:
         return bool(value)
     if isinstance(value, str) and value.strip().lower() in _TRUE | _FALSE:
         return value.strip().lower() in _TRUE
-    cfg.errors.append(f"{name}: valor booleano inválido {value!r} (use true/false); usando {str(default).lower()}.")
+    cfg.errors.append(tr(
+            f"{name}: valor booleano inválido {value!r} (use true/false); usando {str(default).lower()}.",
+            f"{name}: invalid boolean value {value!r} (use true/false); using {str(default).lower()}.",
+        ))
     return default
 
 
@@ -162,7 +183,10 @@ def _interpolate_env_vars(obj: Any) -> Any:
 def _as_int(value: Any, name: str, default: int, lo: int, hi: int, cfg: MonitorConfig) -> int:
     # `.inf`/`.nan` do YAML são floats: int() deles levanta OverflowError/ValueError (a config nunca pode lançar)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        cfg.errors.append(f"{name}: valor inválido {value!r}; usando {default}.")
+        cfg.errors.append(tr(
+            f"{name}: valor inválido {value!r}; usando {default}.",
+            f"{name}: invalid value {value!r}; using {default}.",
+        ))
         return default
     ivalue = int(value)
     if ivalue < lo or ivalue > hi:
@@ -199,7 +223,10 @@ def _parse_rules(raw: Any, base: SLORules, where: str, cfg: MonitorConfig) -> SL
             grade = candidate
         else:
             cfg.errors.append(
-                f"{where}: min_grade inválido '{raw['min_grade']}' (aceitos: {', '.join(GRADE_RANK)})."
+                tr(
+            f"{where}: min_grade inválido '{raw['min_grade']}' (aceitos: {', '.join(GRADE_RANK)}).",
+            f"{where}: invalid min_grade '{raw['min_grade']}' (accepted: {', '.join(GRADE_RANK)}).",
+        )
             )
     return SLORules(max_ttfb_ms=ttfb, max_total_ms=total, min_grade=grade)
 
@@ -239,13 +266,19 @@ def parse_config(raw: Any) -> MonitorConfig:
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        cfg.errors.append("O arquivo de configuração deve ser um mapa YAML na raiz.")
+        cfg.errors.append(tr(
+            "O arquivo de configuração deve ser um mapa YAML na raiz.",
+            "The configuration file must be a YAML mapping at the root.",
+        ))
         cfg.load_failed = True
         return cfg
 
     for key in raw:
         if key not in _KNOWN_TOP_LEVEL:
-            cfg.warnings.append(f"Chave desconhecida ignorada: '{key}' (erro de digitação?).")
+            cfg.warnings.append(tr(
+            f"Chave desconhecida ignorada: '{key}' (erro de digitação?).",
+            f"Unknown key ignored: '{key}' (typo?).",
+        ))
 
     if "interval_seconds" in raw:
         cfg.interval_seconds = _as_int(
@@ -269,7 +302,10 @@ def parse_config(raw: Any) -> MonitorConfig:
                     cfg.warnings.append(f"alerting: chave desconhecida ignorada: '{key}'.")
             cooldown = alerting.get("cooldown_seconds", cfg.policy.cooldown_seconds)
             if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or not math.isfinite(cooldown) or cooldown < 0:
-                cfg.errors.append(f"alerting.cooldown_seconds: valor inválido {cooldown!r}; usando 3600.")
+                cfg.errors.append(tr(
+            f"alerting.cooldown_seconds: valor inválido {cooldown!r}; usando 3600.",
+            f"alerting.cooldown_seconds: invalid value {cooldown!r}; using 3600.",
+        ))
                 cooldown = 3600.0
             cfg.policy = AlertPolicy(
                 failure_threshold=_as_int(
@@ -313,7 +349,10 @@ def parse_config(raw: Any) -> MonitorConfig:
         elif isinstance(item, dict) and isinstance(item.get("url"), str):
             spec_raw = item
         else:
-            cfg.errors.append(f"{where}: esperado string ou mapa com 'url'; descartado.")
+            cfg.errors.append(tr(
+            f"{where}: esperado string ou mapa com 'url'; descartado.",
+            f"{where}: expected a string or a mapping with 'url'; discarded.",
+        ))
             continue
         url = spec_raw["url"].strip()
         err = _valid_target_url(url)
@@ -325,7 +364,10 @@ def parse_config(raw: Any) -> MonitorConfig:
 
         key = target_key(url)
         if key in seen:
-            cfg.warnings.append(f"{where}: alvo duplicado '{url}' ignorado (mesmo alvo que '{key}').")
+            cfg.warnings.append(tr(
+            f"{where}: alvo duplicado '{url}' ignorado (mesmo alvo que '{key}').",
+            f"{where}: duplicate target '{url}' ignored (same target as '{key}').",
+        ))
             continue
         seen.add(key)
         samples = (
@@ -342,7 +384,10 @@ def parse_config(raw: Any) -> MonitorConfig:
             )
         )
     if not cfg.targets:
-        cfg.warnings.append("Nenhum alvo válido configurado.")
+        cfg.warnings.append(tr(
+            "Nenhum alvo válido configurado.",
+            "No valid target configured.",
+        ))
 
     # webhooks
     raw_hooks = raw.get("webhooks") or []
@@ -353,22 +398,34 @@ def parse_config(raw: Any) -> MonitorConfig:
         where = f"webhooks[{idx}]"
         entry = {"url": item} if isinstance(item, str) else item
         if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
-            cfg.errors.append(f"{where}: esperado string ou mapa com 'url'; descartado.")
+            cfg.errors.append(tr(
+            f"{where}: esperado string ou mapa com 'url'; descartado.",
+            f"{where}: expected a string or a mapping with 'url'; discarded.",
+        ))
             continue
         url = entry["url"].strip()
         if not url:
             cfg.errors.append(
-                f"{where}: URL vazia (variável de ambiente ${{...}} não definida?); descartado."
+                tr(
+            f"{where}: URL vazia (variável de ambiente ${{...}} não definida?); descartado.",
+            f"{where}: empty URL (environment variable ${{...}} not set?); discarded.",
+        )
             )
             continue
         parsed_hook = safe_urlparse(url)
         if parsed_hook is None or parsed_hook.scheme.lower() not in ("http", "https") or not parsed_hook.hostname:
-            cfg.errors.append(f"{where}: URL de webhook inválida (http/https com host); descartado.")
+            cfg.errors.append(tr(
+            f"{where}: URL de webhook inválida (http/https com host); descartado.",
+            f"{where}: invalid webhook URL (http/https with a host); discarded.",
+        ))
             continue
         provider = str(entry.get("provider", "auto")).lower()
         if provider not in WEBHOOK_PROVIDERS:
             cfg.errors.append(
-                f"{where}: provider inválido '{provider}' (aceitos: {', '.join(WEBHOOK_PROVIDERS)}); descartado."
+                tr(
+            f"{where}: provider inválido '{provider}' (aceitos: {', '.join(WEBHOOK_PROVIDERS)}); descartado.",
+            f"{where}: invalid provider '{provider}' (accepted: {', '.join(WEBHOOK_PROVIDERS)}); discarded.",
+        )
             )
             continue
         chat_id = entry.get("chat_id", entry.get("telegram_chat_id"))
@@ -412,13 +469,19 @@ def load_config(path: Path | None) -> MonitorConfig:
             raw = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
         cfg = MonitorConfig()
-        cfg.errors.append(f"Falha ao ler {path}: {exc}")
+        cfg.errors.append(tr(
+            f"Falha ao ler {path}: {exc}",
+            f"Failed to read {path}: {exc}",
+        ))
         cfg.load_failed = True
         return cfg
     try:
         return parse_config(_interpolate_env_vars(raw))
     except Exception as exc:  # noqa: BLE001  (contrato: ler a configuração nunca derruba o monitor)
         cfg = MonitorConfig()
-        cfg.errors.append(f"Erro inesperado ao validar {path}: {type(exc).__name__}: {exc}")
+        cfg.errors.append(tr(
+            f"Erro inesperado ao validar {path}: {type(exc).__name__}: {exc}",
+            f"Unexpected error while validating {path}: {type(exc).__name__}: {exc}",
+        ))
         cfg.load_failed = True
         return cfg

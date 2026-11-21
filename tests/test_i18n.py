@@ -139,3 +139,18 @@ def test_alert_messages_and_webhook_dedup_work_in_english(english):
     assert tx(PROBLEM_LABELS["down"]) == "Target offline"
     text = str(build_slack_payload(result, violations=list(problems.values())))
     assert text.count("Target OFFLINE") >= 1 and "Alvo OFFLINE" not in text
+
+
+def test_config_and_duration_errors_follow_the_language(english):
+    from anhanga.engine.config import parse_duration_ms
+
+    with pytest.raises(ValueError, match="Invalid duration format"):
+        parse_duration_ms("abc")
+
+
+def test_config_errors_stay_in_portuguese_by_default(monkeypatch):
+    from anhanga.engine.config import parse_duration_ms
+
+    monkeypatch.delenv("ANHANGA_LANG", raising=False)
+    with pytest.raises(ValueError, match="Formato de duração inválido"):
+        parse_duration_ms("abc")

@@ -44,10 +44,11 @@ def test_polling_does_not_reprompt_for_api_key_every_cycle():
 
 
 def test_filter_chips_have_room_for_their_focus_ring_inside_the_paint_contained_section():
-    # `.cv-auto` (content-visibility:auto) clipa tudo que sai da caixa; o ring-2 do botão ativo sai 2px
+    # a seção .defer usa content-visibility:auto e clipa o que sai da caixa; o contorno do filtro ativo sai 2px
+    css = (Path(app_main.BASE_DIR) / "web" / "static" / "app.css").read_text(encoding="utf-8")
     assert 'class="filter-row ' in HTML
-    m = re.search(r"\.filter-row\s*\{\s*padding:\s*(\d+)px", HTML)
-    assert m and int(m.group(1)) >= 2, "sem folga >= 2px para o ring-2 dos filtros"
+    m = re.search(r"\.filter-row\s*\{\s*padding:\s*(\d+)px", css)
+    assert m and int(m.group(1)) >= 2, "sem folga >= 2px para o contorno dos filtros"
 
 
 def test_ui_shows_the_untested_legacy_ciphers_note_in_both_languages():

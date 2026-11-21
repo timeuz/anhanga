@@ -199,9 +199,9 @@ def _detect_system_dns_resolver() -> str:
     return "127.0.0.53 (systemd-resolved)"
 
 
-# True só dentro das sondagens da vigilância contínua (definido pelo loop do servidor). Scans avulsos
-# (API, /probe, CLI) não alimentam nem recebem o aviso: um terceiro varrendo 3 hosts ruins não pode
-# acusar "resolvedor quebrado" nos alvos monitorados.
+# só fica True dentro das sondagens do monitor contínuo (quem liga é o loop do servidor).
+# scan avulso (API, /probe, CLI) não entra nessa conta: se alguém varrer 3 hosts ruins, os
+# alvos monitorados não podem receber o aviso de 'resolvedor quebrado'.
 MONITORED_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar("anhanga_monitored_probe", default=False)
 
 
@@ -236,7 +236,7 @@ async def _check_port_80(
     if not is_ssrf_safe(target_ip, allow_private):
         return "Porta 80 não verificada (IP bloqueado pela política Anti-SSRF)"
 
-    # 1. Conectividade TCP: distingue recusada (fechada) de timeout (filtrada) e reset.
+    # primeiro a conexão TCP, só pra separar porta recusada, timeout (filtrada) e reset.
     writer = None
     try:
         _, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, 80), timeout)
@@ -254,7 +254,7 @@ async def _check_port_80(
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
-    # 2. Resposta HTTP, conectando ao IP já validado (sem nova resolução DNS).
+    # agora a requisição HTTP, indo direto no IP que já foi validado (não resolve DNS de novo).
     backend = InstrumentedPinnedNetworkBackend(allow_private=allow_private)
     backend.pinned_ips[host.lower()] = target_ip
     transport = _create_instrumented_transport(backend, verify=True, http2=False)
@@ -354,8 +354,9 @@ async def _evaluate_content_assertions(
             continue
         status, value = await _regex_search(pattern, body_text)
         if status == "unavailable":
-            # Falha do monitor, não do alvo: registra como "não avaliado" (visível) sem reprovar a asserção,
-            # senão um problema de fork/arquivo derrubaria e alertaria TODOS os alvos com regex ao mesmo tempo.
+            # o problema aqui é do monitor, não do alvo: marca como 'não avaliado' (aparece na tela) e não reprova
+            # a asserção. se reprovasse, uma falha de fork ou de arquivo derrubaria e alertaria todos os alvos
+            # com regex de uma vez.
             logger.warning(
                 "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
             )
@@ -384,7 +385,7 @@ async def _evaluate_content_assertions(
             f"Payload recebido ({payload_bytes} bytes) acima do máximo permitido ({max_payload_bytes} bytes)"
         )
     elif max_payload_bytes is not None and payload_truncated:
-        # A leitura parou no teto (max_body_bytes): o tamanho real é desconhecido e `payload_bytes` é só o teto.
+        # a leitura parou no limite (max_body_bytes), então não dá pra saber o tamanho real; payload_bytes é só o teto.
         not_evaluated.append(
             f"max_payload_bytes: a resposta foi truncada em {payload_bytes} bytes (limite de leitura); o máximo de "
             f"{max_payload_bytes} bytes não pôde ser avaliado"
@@ -421,7 +422,7 @@ async def resolve_and_validate_host(
             f"Bloqueado pelo Guardião Anti-SSRF: zona IPv6 não permitida ({clean_host}).",
         )
 
-    # Suporte a override explícito de resolução (--resolve host:port:ip)
+    # dá pra forçar a resolução na mão (--resolve host:porta:ip)
     if resolve_override:
         override_ip = (
             resolve_override.get(f"{clean_host.lower()}:{port}")
@@ -437,7 +438,7 @@ async def resolve_and_validate_host(
                 return override_ip, 0.0, [override_ip]
             return override_ip, 0.0
 
-    # Se já for literal de IP, valida antes mesmo de invocar o resolvedor
+    # se já for um IP literal, valida antes de chamar o resolvedor
     try:
         ipaddress.ip_address(clean_host.split("%", 1)[0])
         if not is_ssrf_safe(clean_host, allow_private):
@@ -539,7 +540,7 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         round(statistics.mean(warm_totals), 2) if warm_totals else None
     )
 
-    # DNS/TCP/TLS só existem em conexões novas: amostras reaproveitadas (0 ms) distorceriam a mediana.
+    # DNS, TCP e TLS só existem em conexão nova. amostra com conexão reaproveitada (0 ms) puxaria a mediana pra baixo.
     cold_samples = [s for s in raw_samples if not s.connection_reused] or raw_samples[:1]
     phase_series: dict[str, list[float]] = {
         "dns": [s.timings.dns_ms for s in cold_samples],
@@ -669,7 +670,7 @@ async def _execute_single_http_step(
     return resp, timings, connection_reused, payload_bytes, payload_truncated, b"".join(body_chunks)
 
 
-STAGE_RESERVE_SECONDS = 1.0  # folga reservada para montar o resultado depois das etapas
+STAGE_RESERVE_SECONDS = 1.0  # tempo guardado para montar o resultado depois das etapas
 
 
 def _overall_timeout(timeout: float, samples: int) -> float:
@@ -697,9 +698,9 @@ async def _bounded(
         return await asyncio.wait_for(factory(), timeout=remaining)
     except asyncio.TimeoutError:
         if time.monotonic() >= deadline - 0.05:
-            skipped.append(label)  # o prazo da sondagem acabou de fato
+            skipped.append(label)  # o prazo da sondagem acabou de verdade
         else:
-            # Timeout PRÓPRIO da etapa (socket/OCSP...) que vazou: não é falta de prazo, e a etapa não concluiu.
+            # esse timeout é da própria etapa (socket, OCSP...) e vazou pra cá: não é falta de prazo, a etapa só não terminou.
             logger.warning("etapa '%s' levantou TimeoutError antes do prazo da sondagem", label)
             skipped.append(f"{label} (timeout da própria etapa)")
         return default
@@ -752,7 +753,7 @@ async def _run_probe_session(
         timeout=step_timeout,
         headers=headers,
     ) as client:
-        # 1. Seguir cadeia de redirects manualmente (Amostra 1 / Fria)
+        # primeiro: segue os redirects na mão (amostra 1, a conexão fria)
         final_resp: httpx.Response | None = None
         final_timings: TimingBreakdown = TimingBreakdown()
         final_payload_bytes = 0
@@ -895,7 +896,6 @@ async def _run_probe_session(
                 current_url = next_url
                 continue
 
-            # Chegou na resposta final!
             final_actual_total_ms = step_timings.total_ms
             inherited_setup = False
             if conn_reused and origin_key in origin_conn_timings:
@@ -931,7 +931,7 @@ async def _run_probe_session(
             )
         ]
 
-        # 2. Amostras adicionais (2..samples) reutilizando a mesma conexão Keep-Alive
+        # depois: amostras 2..N, reaproveitando a mesma conexão keep-alive
         extra_sample_failure: str | None = None
         for sample_idx in range(2, max(1, samples) + 1):
             try:
@@ -944,13 +944,14 @@ async def _run_probe_session(
                     reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
                 )
             except Exception as exc:  # noqa: BLE001
-                # A 1ª amostra já provou que o alvo responde: uma conexão keep-alive fechada/resetada ou o timeout de
-                # uma amostra quente não pode descartá-la nem marcar o alvo como OFFLINE. Encerra as amostras aqui.
+                # a 1ª amostra já mostrou que o alvo responde. se uma conexão keep-alive fechou ou resetou, ou se uma amostra
+                # quente estourou o tempo, isso não pode jogar a amostra fora nem marcar o alvo como OFFLINE.
+                # então as amostras param por aqui.
                 extra_sample_failure = f"Amostra {sample_idx} falhou ({type(exc).__name__}); amostras restantes interrompidas."
                 logger.warning("amostra %d de %s falhou: %s", sample_idx, current_url, exc)
                 break
             if s_reused:
-                # Conexão reaproveitada: TCP=0, então o RTT vem da conexão fria (senão o TTFB inteiro viraria "servidor")
+                # com conexão reaproveitada o TCP é 0, então o RTT vem da conexão fria (senão o TTFB inteiro viraria 'tempo do servidor')
                 s_timings.estimated_rtt_ms = final_timings.estimated_rtt_ms
                 s_timings.server_processing_ms = max(
                     0.0, round(s_timings.ttfb_ms - final_timings.estimated_rtt_ms, 2)
@@ -967,7 +968,7 @@ async def _run_probe_session(
         if extra_sample_failure:
             final_timings.timing_notes.append(extra_sample_failure)
 
-        # Tempo de processamento do servidor: só a partir de TTFB confiável.
+        # tempo de processamento do servidor: só conta se o TTFB for confiável.
         warm_ttfbs = sorted(s.timings.ttfb_ms for s in raw_samples[1:] if s.connection_reused)
         if warm_ttfbs:
             final_timings.server_processing_ms = max(
@@ -1002,9 +1003,9 @@ async def _run_probe_session(
             final_port = final_parsed.port or 443
             target_ip_for_tls = backend.pinned_ips.get(final_host.lower(), resolved_ip or final_host)
 
-            # Cadeia/OCSP via openssl (o módulo ssl não os expõe), porta 80 e enumeração de
-            # protocolos/cifras (em cache por 6 h), em paralelo.
-            # Cada etapa tem o SEU prazo: se a cadeia TLS estourar, a porta 80 e a enumeração que já terminaram são mantidas.
+            # cadeia e OCSP vêm do openssl (o módulo ssl não expõe), e a porta 80 e a enumeração de protocolos/cifras
+            # (com cache de 6 h) rodam juntas, em paralelo. cada etapa tem o próprio prazo: se a cadeia TLS estourar,
+            # o que a porta 80 e a enumeração já terminaram fica guardado.
             (chain_der, ocsp_stapled), http_port_80_status, tls_enum = await asyncio.gather(
                 _bounded(
                     lambda: fetch_tls_extras(
@@ -1038,7 +1039,7 @@ async def _run_probe_session(
                     for v in ("TLSv1", "TLSv1.1")
                 )
                 if not legacy_tls_accepted:
-                    # Enumeração concluída, mas com TLS 1.0/1.1 "unknown" (timeout, erro de rede) ou ausente: não há prova.
+                    # enumeração terminou, mas TLS 1.0/1.1 ficou 'unknown' (timeout, erro de rede) ou nem apareceu: sem prova.
                     legacy_unknown = any(
                         tls_enum.get(v) is None or tls_enum.get(v).status == "unknown"  # type: ignore[union-attr]
                         for v in ("TLSv1", "TLSv1.1")
@@ -1054,7 +1055,7 @@ async def _run_probe_session(
                     stage_deadline, None, skipped_stages, "TLS 1.0/1.1 legado",
                 )
                 if legacy_probe is None:
-                    legacy_unknown = True  # não houve verificação: "não aceito" seria uma afirmação sem prova
+                    legacy_unknown = True  # não houve verificação; dizer 'não aceito' seria afirmar sem prova
                 else:
                     legacy_tls_accepted = bool(legacy_probe)
 
@@ -1077,11 +1078,11 @@ async def _run_probe_session(
                     enumeration=tls_enum,
                 )
 
-            # Revogação (OCSP ativo, CRL de fallback): só faz sentido se o certificado ainda é válido.
+            # revogação (OCSP ativo, CRL como reserva): só faz sentido se o certificado ainda é válido
             if tls_info.valid and revocation.enabled():
                 rev_result = await _bounded(
                     lambda: revocation.check_revocation(
-                        # OCSP/CRL/AIA vêm do certificado do alvo: nunca herdam o allow_private dele.
+                        # OCSP/CRL/AIA vêm do certificado do alvo, então nunca herdam o allow_private dele
                         chain_der, allow_private=revocation.endpoints_allow_private(),
                         timeout=min(timeout, 5.0), deadline=min(timeout, 4.0),
                     ),
@@ -1090,7 +1091,7 @@ async def _run_probe_session(
                 if rev_result is not None:
                     _apply_revocation(tls_info, rev_result)
 
-        # Sonda ativa de CORS enviando Origin hostil
+        # sonda ativa de CORS mandando um Origin hostil
         cors_result = await _bounded(
             lambda: audit_cors_active(client=client, target_url=current_url, timeout=min(timeout, 2.0)),
             stage_deadline,
@@ -1107,10 +1108,10 @@ async def _run_probe_session(
             evaluated_url=str(final_resp.url),
         )
 
-        # Avaliação de Asserções de Conteúdo
+        # checagem das asserções de conteúdo
         body_text = final_body_bytes.decode("utf-8", errors="replace")
-        # URL final e tamanho do payload são instantâneos: calculados SEMPRE e primeiro, para que uma falha definitiva
-        # nunca se perca se o regex (subprocesso lento) estourar o prazo.
+        # a URL final e o tamanho do corpo saem na hora, então calculo sempre e primeiro: assim uma falha
+        # definitiva não se perde se o regex (subprocesso lento) estourar o prazo.
         assertions_res = await _evaluate_content_assertions(
             body_text=body_text,
             payload_bytes=final_payload_bytes,
@@ -1151,16 +1152,16 @@ async def _run_probe_session(
 
         is_up = (200 <= final_resp.status_code < 400) and assertions_res.passed
 
-        # Detecção de Falha em Modo Comum
-        # Houve resposta HTTP: 5xx ou asserção reprovada são falhas da APLICAÇÃO, não do resolvedor/rede da sonda.
-        # Só a latência de DNS conta aqui; as falhas reais de DNS/timeout/conexão entram em `_flag_connectivity_failure`.
+        # falha em modo comum. aqui houve resposta HTTP, então 5xx ou asserção reprovada são problema da
+        # aplicação, não do resolvedor ou da rede da sonda. só a latência de DNS entra nessa conta; falha real
+        # de DNS/timeout/conexão vai para `_flag_connectivity_failure`.
         cmf_warning = _check_common_mode_failure(
             current_host=final_parsed.hostname or "",
             dns_ms=final_timings.dns_ms,
             has_error=False,
         )
 
-        # Suporte a protocolos modernos e compressão
+        # suporte a protocolos modernos e compressão
         http2_supported = final_resp.http_version in ("HTTP/2", "h2")
         http3_alt_svc = final_resp.headers.get("alt-svc")
         compression = final_resp.headers.get("content-encoding")
@@ -1283,8 +1284,8 @@ async def _diagnose_tls_failure(
             parsed.hostname, port, allow_private=allow_private, dns_timeout=min(3.0, timeout),
             resolve_override=resolve_override,
         ))[0]
-        # Roda fora do prazo global: o orçamento acompanha o `timeout` pedido (antes era 10 s fixos,
-        # então `?timeout=1` num host com handshake ruim levava 15-20 s).
+        # roda fora do prazo global: o orçamento segue o `timeout` pedido. antes eram 10 s fixos, e `?timeout=1`
+        # num host com handshake ruim levava 15-20 s.
         enum = await enumerate_tls_bounded(
             ip, port, parsed.hostname, budget=min(10.0, max(1.0, 2 * timeout)), timeout=min(3.0, timeout)
         )
@@ -1362,7 +1363,7 @@ def _normalize_scheme_only(raw_url: str) -> tuple[str, str | None]:
             )
         return url, None
 
-    # Detecta esquemas sem '://' como javascript:, data:, file:, mailto:, etc.
+    # pega esquemas sem '://' como javascript:, data:, file:, mailto: etc.
     m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$", url)
     if m:
         candidate_scheme = m.group(1).lower()
@@ -1437,8 +1438,8 @@ async def _execute_probe_inner(
     timeout = max(0.5, min(float(timeout), 30.0))
     samples = max(1, min(int(samples), 50))
     max_body_bytes = max(1, min(int(max_body_bytes), ABSOLUTE_MAX_BODY_BYTES))
-    # Folga para o que roda após a sondagem HTTP. As etapas pós-HTTP têm orçamento combinado (`_bounded` até
-    # `stage_deadline`): se faltar prazo elas são puladas (resultado parcial) e a resposta HTTP já obtida é mantida.
+    # folga pro que roda depois da sondagem HTTP. essas etapas dividem um orçamento (`_bounded` até
+    # `stage_deadline`): se o prazo faltar, são puladas (resultado parcial) e a resposta HTTP que já veio é mantida.
     overall_timeout = _overall_timeout(timeout, samples)
 
     started = time.monotonic()
@@ -1484,8 +1485,8 @@ async def _execute_probe_inner(
             verify_reason = (
                 reason_match.group(1).strip() if reason_match else "falha na verificação do certificado"
             )
-            # prazo RESTANTE do total (o retry não pode dobrar o tempo máximo da requisição). Sem folga
-            # suficiente nem tenta, em vez de forçar um piso que estoura o prazo global.
+            # usa o prazo que RESTA do total: o retry não pode dobrar o tempo máximo da requisição. se não sobrar
+            # folga, nem tenta, em vez de forçar um mínimo que estoura o prazo global.
             remaining = overall_timeout - (time.monotonic() - started)
             if remaining < 1.0:
                 return ProbeResult(

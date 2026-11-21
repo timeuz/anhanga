@@ -18,7 +18,7 @@ import re
 
 from anhanga.engine.models import CSPAnalysis, CSPIssue
 
-# Hosts que servem JSONP/bibliotecas com gadgets de execução: liberá-los em script-src derruba a proteção.
+# hosts que servem JSONP ou bibliotecas com gadgets de execução: liberar eles no script-src derruba a proteção.
 BYPASS_HOSTS = (
     "ajax.googleapis.com", "cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com", "www.google.com",
     "accounts.google.com", "raw.githubusercontent.com", "*.googleapis.com", "*.cloudfront.net",

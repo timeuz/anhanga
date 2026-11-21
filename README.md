@@ -15,6 +15,7 @@ Anhangá is a self-hosted, asynchronous diagnostics and monitoring tool for web 
 - [Features](#features)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Deployment](#deployment)
 - [Configuration](#configuration)
 - [Command-line interface](#command-line-interface)
 - [HTTP API](#http-api)
@@ -59,6 +60,7 @@ Anhangá is a self-hosted, asynchronous diagnostics and monitoring tool for web 
 Requires Python 3.11 or later and the `openssl` binary (used for the certificate chain, OCSP stapling and revocation checks; without it those fields are reported as "not verified").
 
 ```bash
+git clone https://github.com/timeuz/anhanga.git && cd anhanga
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e .
@@ -70,10 +72,33 @@ With plain `pip`: `python -m venv .venv && . .venv/bin/activate && pip install -
 
 ```bash
 docker build -t anhanga .
-docker run -d -p 7890:7890 --env-file .env -v "$PWD/data:/data" anhanga
+
+# 1. create the API key (the container refuses to start without one)
+echo "ANHANGA_API_KEY=$(openssl rand -hex 32)" > .env && chmod 600 .env
+
+# 2. state directory: targets.yaml and anhanga.db live here
+mkdir -p data && cp targets.example.yaml data/targets.yaml
+
+# 3. run, publishing the port on loopback only
+docker run -d --name anhanga --restart unless-stopped \
+  -p 127.0.0.1:7890:7890 --env-file .env \
+  --user "$(id -u):$(id -g)" -v "$PWD/data:/data" anhanga
 ```
 
-Put `targets.yaml` in `data/` (the directory must be writable by uid 10001). The container runs as an unprivileged user, has a `HEALTHCHECK`, and refuses to start without `ANHANGA_API_KEY` because it listens on a non-loopback address.
+`--user` makes the container write to `data/` as your own user. As an alternative, drop `--user` and give the directory to the image's user instead: `sudo chown 10001:10001 data`. The container has a `HEALTHCHECK` and refuses to start without `ANHANGA_API_KEY`, because it listens on a non-loopback address inside the container.
+
+The same setup with Docker Compose:
+
+```yaml
+services:
+  anhanga:
+    build: .
+    restart: unless-stopped
+    ports: ["127.0.0.1:7890:7890"]
+    env_file: .env
+    user: "1000:1000"          # your uid:gid; or remove it and chown data/ to 10001
+    volumes: ["./data:/data"]
+```
 
 ## Quick start
 
@@ -81,13 +106,29 @@ Put `targets.yaml` in `data/` (the directory must be writable by uid 10001). The
 anhanga serve                  # http://127.0.0.1:7890
 ```
 
-- Dashboard (Portuguese and English): `http://127.0.0.1:7890`
+- Dashboard (Portuguese and English, light and dark theme): `http://127.0.0.1:7890`
 - Health check: `GET /healthz`
 - OpenAPI documentation: disabled by default; set `ANHANGA_DOCS=1` to enable `/docs`.
 
 The dashboard runs on-demand scans, simulates remediation, compares re-scans, and exports a shareable analysis link, JSON and Markdown. It auto-refreshes every 15 seconds, filters and sorts targets by status, and shows 24-hour uptime and recent incidents.
 
 `anhanga serve` always runs a single worker. Each worker would run its own monitoring loop and duplicate alerts, so do not use `uvicorn --workers` or `WEB_CONCURRENCY` greater than 1.
+
+## Deployment
+
+- **Network:** Anhangá needs outbound access to the targets (TCP 443 and 80, plus DNS), to the OCSP and CRL URLs found in their certificates, and to your webhook endpoints. The only inbound port is the dashboard's (7890 by default).
+- **TLS and reverse proxy:** Anhangá speaks plain HTTP. To reach it from other machines, publish it behind a reverse proxy that terminates TLS, and keep `ANHANGA_API_KEY` set. For example, with Caddy:
+
+  ```
+  anhanga.example.com {
+      reverse_proxy 127.0.0.1:7890
+  }
+  ```
+
+  Then set `ANHANGA_TRUSTED_PROXIES` to the address Anhangá sees the proxy connecting from, so the per-IP rate limit uses the real client address. With Docker's default bridge that is usually the bridge gateway (for example `172.17.0.1`; check with `docker network inspect bridge`).
+- **State:** everything Anhangá keeps (database, `targets.yaml`) is in one directory. Mount it as a volume and schedule `anhanga backup` (see [Persistence](#persistence)).
+- **Updating:** take a backup, `git pull`, rebuild the image (or reinstall with `pip install -e .`) and restart the service.
+- **One instance per state:** run a single instance per database. A second one would duplicate monitoring and alerts.
 
 ## Configuration
 
@@ -288,7 +329,7 @@ Back up with `anhanga backup`, or `sqlite3 anhanga.db ".backup out.db"`.
 - **Certificate-supplied URLs:** OCSP, CRL and AIA URLs come from the target's certificate, which is third-party input. They go through the same SSRF policy, do not inherit the target's `allow_private`, are size-limited (OCSP 64 KB, CRL 3 MB) and time-limited. Internal PKI needs an explicit `ANHANGA_REVOCATION_ALLOW_PRIVATE=1`.
 - **Webhooks:** `POST /api/v1/webhooks/notify` only sends to URLs declared in `targets.yaml`, the alert body is always built by the server, and a `provider` or `chat_id` different from the configured one is rejected.
 - **Regex assertions** run in an isolated subprocess with a 2 s timeout and a 512-character pattern limit (ReDoS protection).
-- **Process:** the Docker image runs as an unprivileged user. `/healthz` returns only `{"status":"alive"}`. The UI loads no external resources (system fonts, vendored Alpine and Tailwind).
+- **Process:** the Docker image runs as an unprivileged user. `/healthz` returns only `{"status":"alive"}`. The UI loads no external resources (system fonts, vendored Alpine and its own stylesheet).
 - **Review:** an automated code reading (subprocesses, SSRF, authentication, SQL, XSS, YAML) found no high-confidence vulnerability. This is not a penetration test.
 
 Do not expose `/probe` and `/api/v1/scan` without a key: they connect to hosts chosen by the caller.

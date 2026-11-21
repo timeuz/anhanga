@@ -66,8 +66,8 @@ def _collect_violations(
     def covered(*needles: str) -> bool:
         return any(all(n in v.lower() for n in needles) for v in items)
 
-    # O motivo do OFFLINE vale em alerta e lembrete (não na recuperação: o selo seria RECUPERADO ao lado de OFFLINE): um lembrete/reenvio cujas mensagens estejam vazias ou
-    # genéricas não pode mostrar o selo vermelho sem razão.
+    # o motivo do OFFLINE vale em alerta e lembrete (na recuperação não: o selo ficaria RECUPERADO do lado de OFFLINE).
+    # lembrete ou reenvio com mensagens vazias ou genéricas não pode mostrar o selo vermelho sem motivo.
     if event != "recovery" and not result.is_up and not any("offline" in v.lower() or "down" in v.lower() for v in items):
         reason = result.error or f"HTTP {result.status_code or 'ERR'}"
         items.insert(0, f"Alvo OFFLINE: {reason}")
@@ -141,7 +141,7 @@ def build_slack_payload(
         status_label += " — LEMBRETE (problema persiste)"
 
     tls_status = _format_tls_status(result)
-    # P95 só com amostras suficientes (n >= 20); antes, sem amostragem, a latência total saía rotulada como "P95".
+    # P95 só com amostras suficientes (n >= 20); antes, sem amostragem, a latência total saía com o rótulo 'P95'.
     p95_suffix = (
         f" (P95: {_ms(result, result.sampling.p95_ms)})" if (result.sampling and result.sampling.p95_valid) else ""
     )
@@ -162,7 +162,7 @@ def build_slack_payload(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                # `plain_text` de header: no máx. 150 caracteres (senão o Slack recusa o payload inteiro, 400 invalid_blocks)
+                # `plain_text` do header: no máximo 150 caracteres (senão o Slack recusa o payload inteiro, 400 invalid_blocks)
                 "text": _clip(f"Anhangá SRE & DevSecOps — {result.target_url}", 150),
             },
         },
@@ -331,7 +331,7 @@ def build_telegram_payload(
     ]
     if all_violations:
         lines.append("<b>Violações:</b>")
-        # orçamento = 4096 menos o já usado; cada violação é medida DEPOIS de escapada (aspas e < & expandem 4-6x)
+        # orçamento = 4096 menos o que já foi usado; cada violação é medida DEPOIS de escapada (aspas, < e & expandem de 4 a 6 vezes)
         budget = 4000 - len("\n".join(lines))
         lines.extend(_fit_violations(all_violations, budget, per_item=300, render=lambda v: f"• {html.escape(v)}"))
 

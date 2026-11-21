@@ -1015,7 +1015,10 @@ def _compile_sensitive_cookie_regex(custom: str | None) -> "tuple[re.Pattern[str
             return re.compile(custom, re.I), True
         except re.error as exc:
             logging.getLogger("anhanga").error(
-                f"ANHANGA_SENSITIVE_COOKIE_REGEX inválida ({exc}); usando o padrão."
+                tr(
+                    f"ANHANGA_SENSITIVE_COOKIE_REGEX inválida ({exc}); usando o padrão.",
+                    f"ANHANGA_SENSITIVE_COOKIE_REGEX is invalid ({exc}); using the default.",
+                )
             )
     return re.compile(_DEFAULT_SENSITIVE_COOKIE_PATTERN, re.I), False
 

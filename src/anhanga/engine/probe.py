@@ -380,7 +380,12 @@ async def _evaluate_content_assertions(
             # a asserção. se reprovasse, uma falha de fork ou de arquivo derrubaria e alertaria todos os alvos
             # com regex de uma vez.
             logger.warning(
-                "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
+                tr(
+                    "asserção %s não avaliada: avaliador de regex indisponível (%s)",
+                    "assertion %s not evaluated: regex evaluator unavailable (%s)",
+                ),
+                field,
+                value,
             )
             not_evaluated.append(
                 tr(

@@ -199,7 +199,10 @@ PROBE_DURATION_HISTOGRAM_SECONDS = Histogram(
 
 PROBE_SERVER_PROCESSING_SECONDS = Gauge(
     "anhanga_probe_server_processing_seconds",
-    "Tempo estimado de processamento do servidor (TTFB − RTT) em segundos",
+    tr(
+        "Tempo estimado de processamento do servidor (TTFB − RTT) em segundos",
+        "Estimated server processing time (TTFB − RTT) in seconds",
+    ),
     ["target"],
     registry=REGISTRY,
 )

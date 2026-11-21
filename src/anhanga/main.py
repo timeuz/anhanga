@@ -65,11 +65,11 @@ MAX_HISTORY_POINTS = 30
 
 class WebhookNotifyRequest(BaseModel):
     webhook_url: str = Field(
-        ..., description="URL de destino. Deve estar declarada em 'webhooks' no targets.yaml (allowlist)."
+        ..., description=tr("URL de destino. Deve estar declarada em 'webhooks' no targets.yaml (allowlist).", "Destination URL. Must be declared under 'webhooks' in targets.yaml (allowlist).")
     )
-    url: str = Field(..., description="URL alvo a ser sondada pelo servidor para compor o alerta")
+    url: str = Field(..., description=tr("URL alvo a ser sondada pelo servidor para compor o alerta", "Target URL the server probes to build the alert"))
     provider: Literal["auto", "slack", "teams", "telegram"] = Field(default="auto")
-    chat_id: str | None = Field(default=None, description="Chat ID para Telegram")
+    chat_id: str | None = Field(default=None, description=tr("Chat ID para Telegram", "Chat ID for Telegram"))
     violations: list[str] = Field(default_factory=list)
     timeout: float = Field(default=5.0, ge=1.0, le=30.0)
 
@@ -230,9 +230,9 @@ def _current_config() -> MonitorConfig:
 def _log_config_issues(cfg: MonitorConfig, path: Path | None) -> None:
     origin = f" ({path})" if path else ""
     for msg in cfg.errors:
-        logger.error(f"Configuração{origin}: {msg}")
+        logger.error(tr(f"Configuração{origin}: {msg}", f"Configuration{origin}: {msg}"))
     for msg in cfg.warnings:
-        logger.warning(f"Configuração{origin}: {msg}")
+        logger.warning(tr(f"Configuração{origin}: {msg}", f"Configuration{origin}: {msg}"))
 
 
 _STORE: Store | None = None
@@ -272,7 +272,8 @@ async def _store_try(fn, *args) -> tuple[bool, object]:
         return True, await asyncio.to_thread(fn, *args)
     except Exception as exc:  # noqa: BLE001
         STORAGE_ERRORS_TOTAL.inc()
-        logger.error(f"Persistência SQLite falhou ({getattr(fn, '__name__', fn)}): {exc}")
+        fn_name = getattr(fn, "__name__", fn)
+        logger.error(tr(f"Persistência SQLite falhou ({fn_name}): {exc}", f"SQLite persistence failed ({fn_name}): {exc}"))
         return False, None
 
 
@@ -316,7 +317,7 @@ async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[
             _STORE.enqueue(webhook_key(wh.url), event.target, event.kind, event.messages, result.model_dump_json())
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"Falha ao salvar notificação na outbox: {exc}")
+            logger.error(tr(f"Falha ao salvar notificação na outbox: {exc}", f"Failed to save the notification to the outbox: {exc}"))
             return False
 
     async def _one(wh: WebhookSpec) -> str:
@@ -333,7 +334,10 @@ async def _deliver_event(event: AlertEvent, result: ProbeResult, webhooks: list[
                 return "sent"
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    f"Webhook {event.kind} para {event.target} falhou (tentativa {attempt}/2): {exc}"
+                    tr(
+                        f"Webhook {event.kind} para {event.target} falhou (tentativa {attempt}/2): {exc}",
+                        f"Webhook {event.kind} for {event.target} failed (attempt {attempt}/2): {exc}",
+                    )
                 )
                 if attempt == 1:
                     await asyncio.sleep(2.0)
@@ -375,10 +379,15 @@ async def _process_outbox(cfg: MonitorConfig) -> None:
                 await _send_to_webhook(wh, kind, messages, result, WEBHOOK_DELIVERY_TIMEOUT)
             except Exception as exc:  # noqa: BLE001
                 gave_up = await _store_call(_STORE.reschedule, row["id"])
-                logger.warning(f"Reenvio de {kind} ({row['target']}) falhou: {exc}")
+                logger.warning(tr(f"Reenvio de {kind} ({row['target']}) falhou: {exc}", f"Resend of {kind} ({row['target']}) failed: {exc}"))
                 if gave_up:
                     ALERT_NOTIFICATIONS_TOTAL.labels(kind=kind, result="dropped").inc()
-                    logger.error(f"Desistindo de {kind} para {row['target']}: tentativas esgotadas ou alerta antigo.")
+                    logger.error(
+                        tr(
+                            f"Desistindo de {kind} para {row['target']}: tentativas esgotadas ou alerta antigo.",
+                            f"Giving up on {kind} for {row['target']}: retries exhausted or alert too old.",
+                        )
+                    )
             else:
                 await _store_call(_STORE.mark_done, row["id"])
                 ALERT_NOTIFICATIONS_TOTAL.labels(kind=kind, result="sent").inc()
@@ -406,7 +415,7 @@ def _spawn(coro) -> None:
 def _dispatch_events(events: list[AlertEvent], result: ProbeResult, webhooks: list[WebhookSpec]) -> None:
     """Agenda a entrega em background: webhook lento nunca atrasa o ciclo de sondagem."""
     for event in events:
-        logger.info(f"Alerta [{event.kind}] {event.target}: {'; '.join(event.messages)}")
+        logger.info(tr(f"Alerta [{event.kind}] {event.target}: {'; '.join(event.messages)}", f"Alert [{event.kind}] {event.target}: {'; '.join(event.messages)}"))
         if webhooks:
             _spawn(_deliver_event(event, result, webhooks))
 
@@ -431,7 +440,12 @@ async def _open_store(cfg: MonitorConfig, manager: AlertManager) -> None:
         store = await asyncio.to_thread(Store, cfg.storage.path, cfg.storage.retention_days)
     except Exception as exc:  # noqa: BLE001
         STORAGE_ERRORS_TOTAL.inc()
-        logger.error(f"Persistência desativada: não foi possível abrir '{cfg.storage.path}': {exc}")
+        logger.error(
+            tr(
+                f"Persistência desativada: não foi possível abrir '{cfg.storage.path}': {exc}",
+                f"Persistence disabled: could not open '{cfg.storage.path}': {exc}",
+            )
+        )
         return
     _STORE = store
     expected = [_normalize_and_validate_scheme(t.url)[0] for t in cfg.targets]
@@ -444,8 +458,12 @@ async def _open_store(cfg: MonitorConfig, manager: AlertManager) -> None:
     pending = await _store_call(store.outbox_size) or 0
     ALERT_OUTBOX_PENDING.set(pending)
     logger.info(
-        f"Persistência SQLite ativa em '{cfg.storage.path}' (retenção {cfg.storage.retention_days}d): "
-        f"{len(rows)} estado(s) de alerta restaurado(s), {pending} notificação(ões) pendente(s)."
+        tr(
+            f"Persistência SQLite ativa em '{cfg.storage.path}' (retenção {cfg.storage.retention_days}d): "
+            f"{len(rows)} estado(s) de alerta restaurado(s), {pending} notificação(ões) pendente(s).",
+            f"SQLite persistence active at '{cfg.storage.path}' ({cfg.storage.retention_days}d retention): "
+            f"{len(rows)} alert state(s) restored, {pending} pending notification(s).",
+        )
     )
 
 
@@ -460,7 +478,7 @@ async def background_guardian_loop():
     manager = AlertManager(cfg.policy)
 
     if not cfg.targets and path is None:
-        logger.info("Nenhum targets.yaml detectado. Operando apenas em modo On-Demand/API.")
+        logger.info(tr("Nenhum targets.yaml detectado. Operando apenas em modo On-Demand/API.", "No targets.yaml found. Running in on-demand/API mode only."))
 
     while True:
         cycle_start = time.monotonic()
@@ -475,13 +493,26 @@ async def background_guardian_loop():
                 if new_cfg.load_failed:
                     # YAML quebrado ou salvo pela metade não significa 'zero alvos': mantém a config anterior. senão o ciclo
                     # seguinte apagaria alvos e estado de alertas e fecharia incidentes como se tivessem se recuperado.
-                    logger.error("Recarga rejeitada: configuração inválida; mantendo a configuração anterior.")
+                    logger.error(
+                        tr(
+                            "Recarga rejeitada: configuração inválida; mantendo a configuração anterior.",
+                            "Reload rejected: invalid configuration; keeping the previous one.",
+                        )
+                    )
                 else:
                     logger.info(
-                        f"Configuração recarregada: {len(new_cfg.targets)} alvo(s), {len(new_cfg.webhooks)} webhook(s)."
+                        tr(
+                            f"Configuração recarregada: {len(new_cfg.targets)} alvo(s), {len(new_cfg.webhooks)} webhook(s).",
+                            f"Configuration reloaded: {len(new_cfg.targets)} target(s), {len(new_cfg.webhooks)} webhook(s).",
+                        )
                     )
                     if new_cfg.storage != cfg.storage and _STORE is not None:
-                        logger.warning("Configuração 'storage' alterada: requer reiniciar o servidor para valer.")
+                        logger.warning(
+                            tr(
+                                "Configuração 'storage' alterada: requer reiniciar o servidor para valer.",
+                                "'storage' configuration changed: restart the server for it to take effect.",
+                            )
+                        )
                     cfg = new_cfg
                     _CONFIG = cfg
                     manager.policy = cfg.policy
@@ -501,7 +532,7 @@ async def background_guardian_loop():
                 batch: list[tuple[ProbeResult, Evaluation, list[dict]]] = []
                 for spec, res in zip(targets, results):
                     if not isinstance(res, ProbeResult):
-                        logger.error(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}")
+                        logger.error(tr(f"Sonda de {spec.url} falhou de forma inesperada: {res!r}", f"Probe of {spec.url} failed unexpectedly: {res!r}"))
                         continue
                     try:
                         _update_state_and_history(res, is_continuous=True)
@@ -511,7 +542,12 @@ async def background_guardian_loop():
                         batch.append((res, ev, manager.snapshot(res.target_url)))
                     except Exception:  # noqa: BLE001
                         # um alvo com resultado inesperado não pode deixar os outros sem leitura nem pular a gravação do lote.
-                        logger.exception(f"Falha ao processar o resultado de {spec.url}; alvo ignorado neste ciclo.")
+                        logger.exception(
+                            tr(
+                                f"Falha ao processar o resultado de {spec.url}; alvo ignorado neste ciclo.",
+                                f"Failed to process the result of {spec.url}; target skipped this cycle.",
+                            )
+                        )
                 if batch and _STORE is not None:
                     await _store_call(_persist_batch, _STORE, batch, time.time())
 
@@ -531,12 +567,12 @@ async def background_guardian_loop():
                     _LAST_PRUNE = time.monotonic()
                     deleted = await _store_call(_STORE.prune)
                     if deleted:
-                        logger.info(f"Retenção: {deleted} registro(s) de histórico expirado(s) removido(s).")
+                        logger.info(tr(f"Retenção: {deleted} registro(s) de histórico expirado(s) removido(s).", f"Retention: {deleted} expired history record(s) removed."))
         except asyncio.CancelledError:
-            logger.info("Desligando loop de vigilância do Anhangá.")
+            logger.info(tr("Desligando loop de vigilância do Anhangá.", "Shutting down the Anhangá watch loop."))
             break
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"Erro no loop de background: {exc}")
+            logger.error(tr(f"Erro no loop de background: {exc}", f"Background loop error: {exc}"))
 
         # taxa fixa: o intervalo conta do início do ciclo, não soma o tempo das sondas.
         elapsed = time.monotonic() - cycle_start
@@ -622,34 +658,36 @@ async def _guarded(request: Request, call_next):
     return response
 
 
-@app.get("/healthz", tags=["System"])
+@app.get("/healthz", tags=["System"], description=tr('Liveness/Readiness probe (público: não expõe nada além de "vivo").', 'Liveness/readiness probe (public: exposes nothing but "alive").'))
 async def healthcheck():
-    """Liveness/Readiness probe (público: não expõe nada além de "vivo")."""
     return {"status": "alive"}
 
 
-@app.get("/api/v1/scan", response_model=ProbeResult, tags=["Diagnostics"])
+@app.get("/api/v1/scan", response_model=ProbeResult, tags=["Diagnostics"], description=tr('Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects, Asserções e Security Headers.', 'Runs an instant diagnosis of DNS, TCP, TLS, TTFB, redirects, assertions and security headers.'))
 async def api_scan_url(
     request: Request,
-    url: str = Query(..., description="URL ou hostname alvo para inspeção profunda"),
+    url: str = Query(..., description=tr("URL ou hostname alvo para inspeção profunda", "Target URL or hostname for deep inspection")),
     timeout: float = Query(5.0, ge=1.0, le=30.0),
-    samples: int = Query(1, ge=1, le=20, description="Quantidade de amostras para cálculo de P50/P95/P99 e Jitter"),
+    samples: int = Query(1, ge=1, le=20, description=tr("Quantidade de amostras para cálculo de P50/P95/P99 e Jitter", "Number of samples for P50/P95/P99 and jitter")),
     max_body_bytes: int = Query(
         DEFAULT_MAX_BODY_BYTES,
         ge=1024,
         le=ABSOLUTE_MAX_BODY_BYTES,
-        description="Limite máximo de bytes lidos do corpo da resposta (máx 5 MiB)",
+        description=tr("Limite máximo de bytes lidos do corpo da resposta (máx 5 MiB)", "Maximum bytes read from the response body (max 5 MiB)"),
     ),
-    fail_if_body_not_matches_regexp: str | None = Query(None, description="Regexp que DEVE estar presente no corpo"),
-    fail_if_body_matches_regexp: str | None = Query(None, description="Regexp que NÃO PODE estar presente no corpo"),
-    min_payload_bytes: int | None = Query(None, description="Tamanho mínimo de payload em bytes"),
-    max_payload_bytes: int | None = Query(None, description="Tamanho máximo de payload em bytes"),
-    assert_final_url: str | None = Query(None, description="URL final esperada após redirects"),
+    fail_if_body_not_matches_regexp: str | None = Query(None, description=tr("Regexp que DEVE estar presente no corpo", "Regex that MUST be present in the body")),
+    fail_if_body_matches_regexp: str | None = Query(None, description=tr("Regexp que NÃO PODE estar presente no corpo", "Regex that MUST NOT be present in the body")),
+    min_payload_bytes: int | None = Query(None, description=tr("Tamanho mínimo de payload em bytes", "Minimum payload size in bytes")),
+    max_payload_bytes: int | None = Query(None, description=tr("Tamanho máximo de payload em bytes", "Maximum payload size in bytes")),
+    assert_final_url: str | None = Query(None, description=tr("URL final esperada após redirects", "Expected final URL after redirects")),
     lang: str = Query(
-        "pt-BR", description="Idioma dos textos devolvidos: pt-BR ou en-US (vale para toda a API; também lê Accept-Language)"
+        "pt-BR",
+        description=tr(
+            "Idioma dos textos devolvidos: pt-BR ou en-US (vale para toda a API; também lê Accept-Language)",
+            "Language of the returned texts: pt-BR or en-US (applies to the whole API; Accept-Language is also read)",
+        ),
     ),
 ):
-    """Executa diagnóstico instantâneo de DNS, TCP, TLS, TTFB, Redirects, Asserções e Security Headers."""
     _enforce_rate_limit(request, cost=samples)
     if not url.strip():
         raise HTTPException(status_code=400, detail=tr("O parâmetro 'url' é obrigatório.", "The 'url' parameter is required."))
@@ -670,9 +708,8 @@ async def api_scan_url(
     return _update_state_and_history(result, is_continuous=False)
 
 
-@app.post("/api/v1/webhooks/notify", tags=["Alerting"])
+@app.post("/api/v1/webhooks/notify", tags=["Alerting"], description=tr('Dispara alerta formatado para Slack, Microsoft Teams ou Telegram com proteção Anti-SSRF.', 'Sends a formatted alert to Slack, Microsoft Teams or Telegram, with Anti-SSRF protection.'))
 async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
-    """Dispara alerta formatado para Slack, Microsoft Teams ou Telegram com proteção Anti-SSRF."""
     _enforce_rate_limit(request)
     entries = {w.url: w for w in _current_config().webhooks}
     if body.webhook_url not in entries:
@@ -722,9 +759,8 @@ async def api_notify_webhook(request: Request, body: WebhookNotifyRequest):
         ) from exc
 
 
-@app.get("/api/v1/targets", response_model=list[ProbeResult], tags=["Diagnostics"])
+@app.get("/api/v1/targets", response_model=list[ProbeResult], tags=["Diagnostics"], description=tr('Retorna o último estado conhecido de todos os alvos monitorados.', 'Returns the last known state of every monitored target.'))
 async def list_cached_targets():
-    """Retorna o último estado conhecido de todos os alvos monitorados."""
     return list(STATE_CACHE.values())
 
 
@@ -741,7 +777,7 @@ def _require_store() -> Store:
 
 
 class ManagedTargetIn(BaseModel):
-    url: str = Field(..., min_length=1, max_length=2048, description="URL ou hostname a monitorar")
+    url: str = Field(..., min_length=1, max_length=2048, description=tr("URL ou hostname a monitorar", "URL or hostname to monitor"))
     samples: int = Field(1, ge=1, le=MAX_SAMPLES)
 
 
@@ -770,15 +806,13 @@ async def _store_for_managed_targets() -> Store:
     return _STORE
 
 
-@app.get("/api/v1/targets/managed", tags=["Diagnostics"])
+@app.get("/api/v1/targets/managed", tags=["Diagnostics"], description=tr('Alvos adicionados pela UI (removíveis). Os do targets.yaml não aparecem aqui.', 'Targets added through the UI (removable). Those from targets.yaml do not appear here.'))
 async def list_managed_targets():
-    """Alvos adicionados pela UI (removíveis). Os do targets.yaml não aparecem aqui."""
     return {"limit": MAX_MANAGED_TARGETS, "targets": [{"url": t.url, "samples": t.samples} for t in _MANAGED]}
 
 
-@app.post("/api/v1/targets/managed", status_code=201, tags=["Diagnostics"])
+@app.post("/api/v1/targets/managed", status_code=201, tags=["Diagnostics"], description=tr('Adiciona um alvo fixo de monitoramento (persistido no SQLite). Sempre com anti-SSRF (sem allow_private).', 'Adds a permanent monitoring target (persisted in SQLite). Always with anti-SSRF (no allow_private).'))
 async def add_managed_target(request: Request, body: ManagedTargetIn):
-    """Adiciona um alvo fixo de monitoramento (persistido no SQLite). Sempre com anti-SSRF (sem allow_private)."""
     _enforce_rate_limit(request, cost=body.samples)
     raw = body.url.strip()
     err = _valid_target_url(raw)
@@ -810,9 +844,8 @@ async def add_managed_target(request: Request, body: ManagedTargetIn):
     return {"url": url, "samples": body.samples}
 
 
-@app.delete("/api/v1/targets/managed", tags=["Diagnostics"])
+@app.delete("/api/v1/targets/managed", tags=["Diagnostics"], description=tr('Remove um alvo adicionado pela UI. Alvos do targets.yaml só se removem editando o arquivo.', 'Removes a target added through the UI. targets.yaml targets are only removed by editing the file.'))
 async def remove_managed_target(request: Request, url: str = Query(..., min_length=1, max_length=2048)):
-    """Remove um alvo adicionado pela UI. Alvos do targets.yaml só se removem editando o arquivo."""
     _enforce_rate_limit(request)
     err = _valid_target_url(url.strip())
     if err:
@@ -834,54 +867,49 @@ async def remove_managed_target(request: Request, url: str = Query(..., min_leng
     return {"removed": stored}
 
 
-@app.get("/api/v1/history", tags=["Persistence"])
+@app.get("/api/v1/history", tags=["Persistence"], description=tr('Série histórica agregada (checks, up/degraded/down e latência média/mín/máx por bucket).', 'Aggregated history series (checks, up/degraded/down and mean/min/max latency per bucket).'))
 async def api_history(
-    target: str = Query(..., description="target_url exatamente como aparece em /api/v1/targets"),
+    target: str = Query(..., description=tr("target_url exatamente como aparece em /api/v1/targets", "target_url exactly as it appears in /api/v1/targets")),
     hours: float = Query(24.0, ge=0.1, le=24 * 365),
     max_points: int = Query(300, ge=10, le=2000),
 ):
-    """Série histórica agregada (checks, up/degraded/down e latência média/mín/máx por bucket)."""
     store = _require_store()
     until = time.time()
     points = await asyncio.to_thread(store.history, target, until - hours * 3600, until, max_points)
     return {"target": target, "hours": hours, "points": points}
 
 
-@app.get("/api/v1/uptime", tags=["Persistence"])
-async def api_uptime(target: str | None = Query(None, description="Omitir = todos os alvos monitorados")):
-    """Uptime (health=up) e disponibilidade HTTP (up+degraded) em 24h, 7d e 30d, com a cobertura real dos dados."""
+@app.get("/api/v1/uptime", tags=["Persistence"], description=tr('Uptime (health=up) e disponibilidade HTTP (up+degraded) em 24h, 7d e 30d, com a cobertura real dos dados.', 'Uptime (health=up) and HTTP availability (up+degraded) over 24h, 7d and 30d, with the real data coverage.'))
+async def api_uptime(target: str | None = Query(None, description=tr("Omitir = todos os alvos monitorados", "Omit = every monitored target"))):
     store = _require_store()
     targets = [target] if target else sorted(STATE_CACHE)
     data = await asyncio.to_thread(lambda: {t: store.uptime(t) for t in targets})
     return {"targets": data}
 
 
-@app.get("/api/v1/incidents", tags=["Persistence"])
+@app.get("/api/v1/incidents", tags=["Persistence"], description=tr('Incidentes (alertas que passaram do limiar) abertos e encerrados, com duração.', 'Open and closed incidents (alerts that crossed the threshold), with duration.'))
 async def api_incidents(
     target: str | None = Query(None),
     open_only: bool = Query(False),
     limit: int = Query(100, ge=1, le=1000),
 ):
-    """Incidentes (alertas que passaram do limiar) abertos e encerrados, com duração."""
     store = _require_store()
     return {"incidents": await asyncio.to_thread(store.incidents, target, open_only, limit)}
 
 
-@app.get("/metrics", tags=["Observability"])
+@app.get("/metrics", tags=["Observability"], description=tr('Endpoint padrão de scrape para Prometheus / Grafana Alloy / VictoriaMetrics.', 'Standard scrape endpoint for Prometheus / Grafana Alloy / VictoriaMetrics.'))
 async def prometheus_metrics():
-    """Endpoint padrão de scrape para Prometheus / Grafana Alloy / VictoriaMetrics."""
     payload, content_type = render_prometheus_metrics()
     return Response(content=payload, media_type=content_type)
 
 
-@app.get("/probe", tags=["Observability"])
+@app.get("/probe", tags=["Observability"], description=tr('Compatível com relabel_configs do Prometheus Blackbox Exporter.', 'Compatible with the Prometheus Blackbox Exporter relabel_configs.'))
 async def blackbox_compatible_probe(
     request: Request,
-    target: str = Query(..., description="URL alvo no estilo Blackbox Exporter"),
-    module: str = Query("http_2xx", description="Módulo compatível com Blackbox Exporter"),
+    target: str = Query(..., description=tr("URL alvo no estilo Blackbox Exporter", "Target URL, Blackbox Exporter style")),
+    module: str = Query("http_2xx", description=tr("Módulo compatível com Blackbox Exporter", "Blackbox Exporter-compatible module")),
     samples: int = Query(1, ge=1, le=20),
 ):
-    """Compatível com relabel_configs do Prometheus Blackbox Exporter."""
     _enforce_rate_limit(request, cost=samples)
     result = await execute_probe(target, allow_private=_allow_private_api(), samples=samples)
     payload, content_type = render_adhoc_probe_metrics(result)

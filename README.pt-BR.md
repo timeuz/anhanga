@@ -125,7 +125,7 @@ O `anhanga serve` sempre roda com um único worker. Cada worker executaria o pr�
   }
   ```
 
-  Depois defina `ANHANGA_TRUSTED_PROXIES` com o endereço de onde o Anhangá vê o proxy conectar, para o limite de requisições por IP usar o endereço real do cliente. Na bridge padrão do Docker, costuma ser o gateway da bridge (por exemplo `172.17.0.1`; confira com `docker network inspect bridge`).
+  Só é preciso se você colocar um proxy reverso (Caddy, nginx...) na frente do Anhangá. O proxy repassa todas as requisições, então o Anhangá enxergaria todo mundo com o endereço do próprio proxy e o limite de requisições por IP trataria todos como um único cliente. `ANHANGA_TRUSTED_PROXIES` lista os endereços de proxy em que o Anhangá deve confiar quando mandam o IP real do cliente em `X-Forwarded-For`. Se o proxy roda na mesma rede Docker, use o endereço de onde o contêiner vê o proxy conectar (geralmente o gateway da rede, por exemplo `172.17.0.1`; confira com `docker network inspect bridge`). Sem proxy, deixe vazio.
 - **Estado:** tudo o que o Anhangá guarda (banco e `targets.yaml`) fica em um diretório só. Monte-o como volume e agende o `anhanga backup` (veja [Persistência](#persistência)).
 - **Atualização:** faça um backup, rode `git pull`, reconstrua a imagem (ou reinstale com `pip install -e .`) e reinicie o serviço.
 - **Uma instância por estado:** rode uma única instância por banco. Uma segunda duplicaria o monitoramento e os alertas.

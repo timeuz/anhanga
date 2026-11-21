@@ -19,14 +19,15 @@ from typing import Callable, Literal
 
 from anhanga.engine.config import GRADE_RANK, AlertPolicy, SLORules
 from anhanga.engine.models import ProbeResult
+from anhanga.i18n import LStr, tr, tx
 
 PROBLEM_LABELS: dict[str, str] = {
-    "down": "Alvo offline",
-    "degraded": "Certificado TLS inválido",
-    "tls_expiring": "Certificado TLS expirando",
-    "slo_ttfb": "SLO de TTFB",
-    "slo_total": "SLO de latência total",
-    "grade": "Nota de segurança abaixo do mínimo",
+    "down": LStr("Alvo offline", "Target offline"),
+    "degraded": LStr("Certificado TLS inválido", "Invalid TLS certificate"),
+    "tls_expiring": LStr("Certificado TLS expirando", "TLS certificate expiring"),
+    "slo_ttfb": LStr("SLO de TTFB", "TTFB SLO"),
+    "slo_total": LStr("SLO de latência total", "Total latency SLO"),
+    "grade": LStr("Nota de segurança abaixo do mínimo", "Security grade below the minimum"),
 }
 
 
@@ -92,33 +93,44 @@ def detect_problems(result: ProbeResult, rules: SLORules) -> dict[str, str]:
     problems: dict[str, str] = {}
     no_response = result.status_code is None
     if not result.is_up:
-        problems["down"] = f"Alvo OFFLINE: {result.error or f'HTTP {result.status_code}'}"
+        reason = result.error or f"HTTP {result.status_code}"
+        problems["down"] = tr(f"Alvo OFFLINE: {reason}", f"Target OFFLINE: {reason}")
     if no_response:
         return problems
 
     if result.health == "degraded":
-        reason = (result.tls.validation_error if result.tls else None) or "validação falhou"
-        problems["degraded"] = f"Certificado TLS inválido: {reason}"
+        reason = (result.tls.validation_error if result.tls else None) or tr("validação falhou", "validation failed")
+        problems["degraded"] = tr(f"Certificado TLS inválido: {reason}", f"Invalid TLS certificate: {reason}")
     if (
         result.tls is not None
         and result.tls.valid
         and result.tls.alert_expiring
         and result.tls.days_remaining is not None
     ):
-        problems["tls_expiring"] = f"Certificado TLS expira em {result.tls.days_remaining} dias"
+        days_left = result.tls.days_remaining
+        problems["tls_expiring"] = tr(f"Certificado TLS expira em {days_left} dias", f"TLS certificate expires in {days_left} days")
 
     if rules.max_ttfb_ms is not None:
         ttfb = effective_ttfb_ms(result)
         if ttfb > rules.max_ttfb_ms:
-            problems["slo_ttfb"] = f"TTFB {ttfb:.0f} ms excede o SLO de {rules.max_ttfb_ms:.0f} ms"
+            problems["slo_ttfb"] = tr(
+                f"TTFB {ttfb:.0f} ms excede o SLO de {rules.max_ttfb_ms:.0f} ms",
+                f"TTFB {ttfb:.0f} ms exceeds the {rules.max_ttfb_ms:.0f} ms SLO",
+            )
     if rules.max_total_ms is not None:
         total = effective_total_ms(result)
         if total > rules.max_total_ms:
-            problems["slo_total"] = f"Latência total {total:.0f} ms excede o SLO de {rules.max_total_ms:.0f} ms"
+            problems["slo_total"] = tr(
+                f"Latência total {total:.0f} ms excede o SLO de {rules.max_total_ms:.0f} ms",
+                f"Total latency {total:.0f} ms exceeds the {rules.max_total_ms:.0f} ms SLO",
+            )
     if rules.min_grade is not None:
         grade = result.security.grade
         if GRADE_RANK.get(grade, 1) < GRADE_RANK[rules.min_grade]:
-            problems["grade"] = f"Nota {grade} abaixo do mínimo exigido ({rules.min_grade})"
+            problems["grade"] = tr(
+                f"Nota {grade} abaixo do mínimo exigido ({rules.min_grade})",
+                f"Grade {grade} is below the required minimum ({rules.min_grade})",
+            )
     return problems
 
 
@@ -176,7 +188,7 @@ class AlertManager:
                     # um 'expirando' que some porque o certificado EXPIROU (ou foi revogado) não é recuperação: o problema escalou pra
                     # `degraded`. fecha o estado, mas sem a mensagem verde de 'resolvido'.
                     if not (key == "tls_expiring" and _cert_escalated(result)):
-                        recovered.append(f"{PROBLEM_LABELS.get(key, key)}: resolvido")
+                        recovered.append(f"{tx(PROBLEM_LABELS.get(key, key))}: {tr('resolvido', 'resolved')}")
             else:
                 del state.problems[key]  # problema que nunca chegou a alertar: some em silêncio
 

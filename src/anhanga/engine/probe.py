@@ -25,6 +25,7 @@ from collections import deque
 import os
 
 from anhanga import __version__
+from anhanga.i18n import tr
 from anhanga.engine import revocation
 from anhanga.engine.models import (
     ContentAssertionsResult,
@@ -144,7 +145,10 @@ class InstrumentedPinnedNetworkBackend(AsyncNetworkBackend):
         if not is_ssrf_safe(target_ip, self.allow_private):
             raise SSRFBlockedError(
                 target_ip,
-                f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({target_ip}).",
+                tr(
+                    f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({target_ip}).",
+                    f"Blocked by the Anti-SSRF guard: private/restricted IP ({target_ip}).",
+                ),
             )
 
         t0 = time.perf_counter()
@@ -170,7 +174,10 @@ class InstrumentedPinnedNetworkBackend(AsyncNetworkBackend):
         if not self.allow_private:
             raise SSRFBlockedError(
                 path,
-                "Bloqueado pelo Guardião Anti-SSRF: conexões Unix Socket não são permitidas.",
+                tr(
+                    "Bloqueado pelo Guardião Anti-SSRF: conexões Unix Socket não são permitidas.",
+                    "Blocked by the Anti-SSRF guard: Unix socket connections are not allowed.",
+                ),
             )
         stream = await self._inner.connect_unix_socket(
             path, timeout=timeout, socket_options=socket_options
@@ -217,10 +224,13 @@ def _check_common_mode_failure(current_host: str, dns_ms: float, has_error: bool
         if (d_ms > 500.0 or is_err) and host
     }
     if len(degraded_domains) >= 3:
-        return (
+        return tr(
             f"Alerta de Falha em Modo Comum: múltiplos alvos distintos ({len(degraded_domains)}) apresentaram "
             "alta latência de DNS (>500ms) ou timeout simultaneamente nos últimos 60s. "
-            "O gargalo pode estar no resolvedor ou na conectividade da sonda local."
+            "O gargalo pode estar no resolvedor ou na conectividade da sonda local.",
+            f"Common-mode failure alert: multiple distinct targets ({len(degraded_domains)}) showed "
+            "high DNS latency (>500ms) or timeouts at the same time over the last 60s. "
+            "The bottleneck may be the resolver or the local probe's connectivity.",
         )
     return None
 
@@ -234,20 +244,21 @@ async def _check_port_80(
     """Verifica a porta 80 e se ela redireciona para HTTPS, distinguindo a causa de cada falha."""
     target_ip = ip or host
     if not is_ssrf_safe(target_ip, allow_private):
-        return "Porta 80 não verificada (IP bloqueado pela política Anti-SSRF)"
+        return tr("Porta 80 não verificada (IP bloqueado pela política Anti-SSRF)", "Port 80 not checked (IP blocked by the Anti-SSRF policy)")
 
     # primeiro a conexão TCP, só pra separar porta recusada, timeout (filtrada) e reset.
     writer = None
     try:
         _, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, 80), timeout)
     except asyncio.TimeoutError:
-        return "Porta 80 sem resposta (timeout; possível filtro de firewall/egress)"
+        return tr("Porta 80 sem resposta (timeout; possível filtro de firewall/egress)", "Port 80 not responding (timeout; possible firewall/egress filter)")
     except ConnectionRefusedError:
-        return "Porta 80 fechada (conexão recusada)"
+        return tr("Porta 80 fechada (conexão recusada)", "Port 80 closed (connection refused)")
     except ConnectionResetError:
-        return "Porta 80 inacessível (conexão resetada)"
+        return tr("Porta 80 inacessível (conexão resetada)", "Port 80 unreachable (connection reset)")
     except OSError as err:
-        return f"Porta 80 inacessível ({err.strerror or type(err).__name__})"
+        reason = err.strerror or type(err).__name__
+        return tr(f"Porta 80 inacessível ({reason})", f"Port 80 unreachable ({reason})")
     finally:
         if writer is not None:
             writer.close()
@@ -270,15 +281,18 @@ async def _check_port_80(
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = resp.headers.get("location", "").strip()
                 if loc.lower().startswith("https://"):
-                    return f"{resp.status_code} Redireciona para HTTPS (Correto)"
-                return f"{resp.status_code} Redireciona para HTTP ({loc[:35]})"
+                    return tr(f"{resp.status_code} Redireciona para HTTPS (Correto)", f"{resp.status_code} Redirects to HTTPS (correct)")
+                return tr(f"{resp.status_code} Redireciona para HTTP ({loc[:35]})", f"{resp.status_code} Redirects to HTTP ({loc[:35]})")
             if 200 <= resp.status_code < 400:
-                return f"{resp.status_code} Sem Redirecionamento HTTPS (Inseguro)"
+                return tr(f"{resp.status_code} Sem Redirecionamento HTTPS (Inseguro)", f"{resp.status_code} No HTTPS redirect (insecure)")
             return f"HTTP {resp.status_code}"
     except httpx.TimeoutException:
-        return "Porta 80 aberta, mas o HTTP não respondeu a tempo"
+        return tr("Porta 80 aberta, mas o HTTP não respondeu a tempo", "Port 80 open, but HTTP did not answer in time")
     except Exception as err:  # noqa: BLE001
-        return f"Porta 80 aberta, mas a requisição HTTP falhou ({type(err).__name__})"
+        return tr(
+            f"Porta 80 aberta, mas a requisição HTTP falhou ({type(err).__name__})",
+            f"Port 80 open, but the HTTP request failed ({type(err).__name__})",
+        )
 
 
 MAX_REGEX_LENGTH: int = 512
@@ -303,7 +317,7 @@ def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     ("unavailable", msg: o avaliador em si falhou; isso NÃO é culpa do padrão do usuário).
     """
     if len(pattern) > MAX_REGEX_LENGTH:
-        return "invalid", f"padrão excede {MAX_REGEX_LENGTH} caracteres"
+        return "invalid", tr(f"padrão excede {MAX_REGEX_LENGTH} caracteres", f"pattern exceeds {MAX_REGEX_LENGTH} characters")
     try:
         proc = subprocess.run(
             _regex_worker_argv(),
@@ -315,20 +329,28 @@ def _regex_search_isolated(pattern: str, text: str) -> tuple[str, typing.Any]:
     except subprocess.TimeoutExpired:
         return "timeout", None
     except OSError as err:
-        return "unavailable", f"não foi possível iniciar o avaliador de regex: {err}"
+        return "unavailable", tr(
+            f"não foi possível iniciar o avaliador de regex: {err}",
+            f"could not start the regex evaluator: {err}",
+        )
     if proc.returncode != 0:
-        tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or ["sem detalhe"]
-        return "unavailable", f"o avaliador de regex encerrou com erro (código {proc.returncode}): {tail[0][:160]}"
+        tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or [tr("sem detalhe", "no detail")]
+        return "unavailable", tr(
+            f"o avaliador de regex encerrou com erro (código {proc.returncode}): {tail[0][:160]}",
+            f"the regex evaluator exited with an error (code {proc.returncode}): {tail[0][:160]}",
+        )
     try:
         status, value = json.loads(proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        return "unavailable", "resposta inválida do avaliador de regex"
+        return "unavailable", tr("resposta inválida do avaliador de regex", "invalid response from the regex evaluator")
     return status, value
 
 
 async def _regex_search(pattern: str, text: str) -> tuple[str, typing.Any]:
+    # o idioma vive num ContextVar, que o executor não herda sozinho
+    ctx = contextvars.copy_context()
     return await asyncio.get_running_loop().run_in_executor(
-        None, _regex_search_isolated, pattern, text
+        None, ctx.run, _regex_search_isolated, pattern, text
     )
 
 
@@ -361,39 +383,59 @@ async def _evaluate_content_assertions(
                 "asserção %s não avaliada: avaliador de regex indisponível (%s)", field, value
             )
             not_evaluated.append(
-                f"{field}: avaliador de regex indisponível ({value}); o padrão não foi avaliado "
-                "(falha do Anhangá, não do alvo)"
+                tr(
+                    f"{field}: avaliador de regex indisponível ({value}); o padrão não foi avaliado "
+                    "(falha do Anhangá, não do alvo)",
+                    f"{field}: regex evaluator unavailable ({value}); the pattern was not evaluated "
+                    "(an Anhangá failure, not the target's)",
+                )
             )
         elif status == "invalid":
-            failures.append(f"Regexp inválida em {field}: {value}")
+            failures.append(tr(f"Regexp inválida em {field}: {value}", f"Invalid regex in {field}: {value}"))
         elif status == "timeout":
             failures.append(
-                f"Regexp em {field} abortada após {REGEX_TIMEOUT_SECONDS:.0f}s (custo exponencial / ReDoS)"
+                tr(
+                    f"Regexp em {field} abortada após {REGEX_TIMEOUT_SECONDS:.0f}s (custo exponencial / ReDoS)",
+                    f"Regex in {field} aborted after {REGEX_TIMEOUT_SECONDS:.0f}s (exponential cost / ReDoS)",
+                )
             )
         elif must_match and not value:
-            failures.append(f"Corpo não contém o padrão esperado: '{pattern}'")
+            failures.append(tr(f"Corpo não contém o padrão esperado: '{pattern}'", f"Body does not contain the expected pattern: '{pattern}'"))
         elif not must_match and value:
-            failures.append(f"Corpo contém o padrão proibido: '{pattern}'")
+            failures.append(tr(f"Corpo contém o padrão proibido: '{pattern}'", f"Body contains the forbidden pattern: '{pattern}'"))
 
     if min_payload_bytes is not None and payload_bytes < min_payload_bytes:
         failures.append(
-            f"Payload recebido ({payload_bytes} bytes) abaixo do mínimo exigido ({min_payload_bytes} bytes)"
+            tr(
+                f"Payload recebido ({payload_bytes} bytes) abaixo do mínimo exigido ({min_payload_bytes} bytes)",
+                f"Payload received ({payload_bytes} bytes) is below the required minimum ({min_payload_bytes} bytes)",
+            )
         )
 
     if max_payload_bytes is not None and payload_bytes > max_payload_bytes:
         failures.append(
-            f"Payload recebido ({payload_bytes} bytes) acima do máximo permitido ({max_payload_bytes} bytes)"
+            tr(
+                f"Payload recebido ({payload_bytes} bytes) acima do máximo permitido ({max_payload_bytes} bytes)",
+                f"Payload received ({payload_bytes} bytes) is above the allowed maximum ({max_payload_bytes} bytes)",
+            )
         )
     elif max_payload_bytes is not None and payload_truncated:
         # a leitura parou no limite (max_body_bytes), então não dá pra saber o tamanho real; payload_bytes é só o teto.
         not_evaluated.append(
-            f"max_payload_bytes: a resposta foi truncada em {payload_bytes} bytes (limite de leitura); o máximo de "
-            f"{max_payload_bytes} bytes não pôde ser avaliado"
+            tr(
+                f"max_payload_bytes: a resposta foi truncada em {payload_bytes} bytes (limite de leitura); o máximo de "
+                f"{max_payload_bytes} bytes não pôde ser avaliado",
+                f"max_payload_bytes: the response was truncated at {payload_bytes} bytes (read limit); the "
+                f"{max_payload_bytes}-byte maximum could not be evaluated",
+            )
         )
 
     if assert_final_url and final_url != assert_final_url:
         failures.append(
-            f"URL final obtida ('{final_url}') diverge da URL esperada ('{assert_final_url}')"
+            tr(
+                f"URL final obtida ('{final_url}') diverge da URL esperada ('{assert_final_url}')",
+                f"Final URL obtained ('{final_url}') differs from the expected URL ('{assert_final_url}')",
+            )
         )
 
     return ContentAssertionsResult(passed=(len(failures) == 0), failures=failures, not_evaluated=not_evaluated)
@@ -419,7 +461,10 @@ async def resolve_and_validate_host(
     if "%" in clean_host and not allow_private:
         raise SSRFBlockedError(
             clean_host,
-            f"Bloqueado pelo Guardião Anti-SSRF: zona IPv6 não permitida ({clean_host}).",
+            tr(
+                f"Bloqueado pelo Guardião Anti-SSRF: zona IPv6 não permitida ({clean_host}).",
+                f"Blocked by the Anti-SSRF guard: IPv6 zone not allowed ({clean_host}).",
+            ),
         )
 
     # dá pra forçar a resolução na mão (--resolve host:porta:ip)
@@ -432,7 +477,10 @@ async def resolve_and_validate_host(
             if not is_ssrf_safe(override_ip, allow_private):
                 raise SSRFBlockedError(
                     override_ip,
-                    f"Bloqueado pelo Guardião Anti-SSRF: IP de override privado/restrito ({override_ip}).",
+                    tr(
+                        f"Bloqueado pelo Guardião Anti-SSRF: IP de override privado/restrito ({override_ip}).",
+                        f"Blocked by the Anti-SSRF guard: private/restricted override IP ({override_ip}).",
+                    ),
                 )
             if return_all_ips:
                 return override_ip, 0.0, [override_ip]
@@ -444,7 +492,10 @@ async def resolve_and_validate_host(
         if not is_ssrf_safe(clean_host, allow_private):
             raise SSRFBlockedError(
                 clean_host,
-                f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({clean_host}).",
+                tr(
+                    f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({clean_host}).",
+                    f"Blocked by the Anti-SSRF guard: private/restricted IP ({clean_host}).",
+                ),
             )
     except ValueError:
         pass
@@ -460,7 +511,7 @@ async def resolve_and_validate_host(
     dns_ms = round((time.perf_counter() - t0) * 1000, 2)
 
     if not addr_info:
-        raise socket.gaierror(f"Nenhum registro DNS encontrado para {host}")
+        raise socket.gaierror(tr(f"Nenhum registro DNS encontrado para {host}", f"No DNS records found for {host}"))
 
     resolved_ips: list[str] = []
     preferred_ipv4: str | None = None
@@ -475,13 +526,20 @@ async def resolve_and_validate_host(
         if not is_ssrf_safe(ip_str, allow_private):
             raise SSRFBlockedError(
                 ip_str,
-                f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({ip_str}).",
+                tr(
+                    f"Bloqueado pelo Guardião Anti-SSRF: IP privado/restrito ({ip_str}).",
+                    f"Blocked by the Anti-SSRF guard: private/restricted IP ({ip_str}).",
+                ),
             )
 
     chosen_ip = preferred_ipv4 or resolved_ips[0]
     if return_all_ips:
         return chosen_ip, dns_ms, resolved_ips
     return chosen_ip, dns_ms
+
+
+def _cold_sample_label() -> str:
+    return tr("Amostra 1 (Conexão Fria)", "Sample 1 (cold connection)")
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
@@ -559,13 +617,16 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
     p95_valid = n_samples >= 20
     p99_valid = n_samples >= 100
     if not p95_valid:
-        sample_size_notice = (
-            "Amostragem com n < 20: P95 e P99 requerem amostragem maior (n ≥ 20 para P95, n ≥ 100 para P99) para validade estatística."
+        sample_size_notice = tr(
+            "Amostragem com n < 20: P95 e P99 requerem amostragem maior (n ≥ 20 para P95, n ≥ 100 para P99) para validade estatística.",
+            "Sampling with n < 20: P95 and P99 need a larger sample (n ≥ 20 for P95, n ≥ 100 for P99) to be statistically valid.",
         )
     elif not p99_valid:
-        sample_size_notice = (
+        sample_size_notice = tr(
             "P99 requer n ≥ 100; um scan avulso é limitado a 20 amostras (para não sobrecarregar o alvo). "
-            "Para a cauda extrema ao longo do tempo, use o histograma de /metrics (histogram_quantile no Prometheus)."
+            "Para a cauda extrema ao longo do tempo, use o histograma de /metrics (histogram_quantile no Prometheus).",
+            "P99 needs n ≥ 100; a one-off scan is capped at 20 samples (to avoid overloading the target). "
+            "For the extreme tail over time, use the /metrics histogram (histogram_quantile in Prometheus).",
         )
     else:
         sample_size_notice = None
@@ -573,7 +634,7 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
     return SamplingStats(
         samples_count=n_samples,
         headline_total_ms=p50_total,
-        headline_label="Latência Típica (Mediana P50)",
+        headline_label=tr("Latência Típica (Mediana P50)", "Typical latency (median P50)"),
         cold_total_ms=cold_total_ms,
         warm_avg_total_ms=warm_avg_total_ms,
         p50_ms=p50_total,
@@ -588,9 +649,11 @@ def _build_sampling_stats(raw_samples: list[SampleMeasurement]) -> SamplingStats
         p99_valid=p99_valid,
         sample_size_notice=sample_size_notice,
         phase_stats=phase_stats,
-        phase_stats_note=(
+        phase_stats_note=tr(
             f"DNS/TCP/TLS calculados apenas sobre as {len(cold_samples)} amostra(s) com conexão nova; "
-            "TTFB, transferência e total usam todas."
+            "TTFB, transferência e total usam todas.",
+            f"DNS/TCP/TLS computed only over the {len(cold_samples)} sample(s) with a new connection; "
+            "TTFB, transfer and total use all of them.",
         ),
         raw_samples=raw_samples,
     )
@@ -612,7 +675,7 @@ async def _execute_single_http_step(
     url: str,
     dns_ms: float,
     max_body_bytes: int,
-    reference_sample: str = "Amostra 1 (Conexão Fria)",
+    reference_sample: str | None = None,
 ) -> tuple[httpx.Response, TimingBreakdown, bool, int, bool, bytes]:
     """
     Executa um único GET com streaming e mede de forma estritamente não-cumulativa:
@@ -665,7 +728,7 @@ async def _execute_single_http_step(
         tls_ms=tls_ms,
         ttfb_ms=ttfb_ms,
         transfer_ms=transfer_ms,
-        reference_sample=reference_sample,
+        reference_sample=reference_sample or _cold_sample_label(),
     )
     return resp, timings, connection_reused, payload_bytes, payload_truncated, b"".join(body_chunks)
 
@@ -702,7 +765,7 @@ async def _bounded(
         else:
             # esse timeout é da própria etapa (socket, OCSP...) e vazou pra cá: não é falta de prazo, a etapa só não terminou.
             logger.warning("etapa '%s' levantou TimeoutError antes do prazo da sondagem", label)
-            skipped.append(f"{label} (timeout da própria etapa)")
+            skipped.append(tr(f"{label} (timeout da própria etapa)", f"{label} (stage's own timeout)"))
         return default
 
 
@@ -745,7 +808,7 @@ async def _run_probe_session(
     )
 
     dns_resolver = _detect_system_dns_resolver()
-    probe_origin = os.getenv("ANHANGA_PROBE_ORIGIN", "Sonda Local (Linux)")
+    probe_origin = os.getenv("ANHANGA_PROBE_ORIGIN") or tr("Sonda Local (Linux)", "Local probe (Linux)")
 
     async with httpx.AsyncClient(
         transport=transport,
@@ -771,7 +834,10 @@ async def _run_probe_session(
                     redirect_chain=redirect_chain,
                     dns_resolver=dns_resolver,
                     probe_origin=probe_origin,
-                    error=f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+                    error=tr(
+                        f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+                        f"Blocked by the Anti-SSRF guard: scheme '{scheme}' not allowed (http/https only).",
+                    ),
                 )
 
             host = parsed.hostname
@@ -780,7 +846,7 @@ async def _run_probe_session(
                     target_url=initial_url,
                     dns_resolver=dns_resolver,
                     probe_origin=probe_origin,
-                    error="URL inválida: hostname não encontrado.",
+                    error=tr("URL inválida: hostname não encontrado.", "Invalid URL: hostname not found."),
                 )
             port = parsed.port or (443 if scheme == "https" else 80)
 
@@ -832,7 +898,7 @@ async def _run_probe_session(
                     url=current_url,
                     dns_ms=dns_ms,
                     max_body_bytes=max_body_bytes,
-                    reference_sample="Amostra 1 (Conexão Fria)",
+                    reference_sample=_cold_sample_label(),
                 )
             )
 
@@ -859,7 +925,10 @@ async def _run_probe_session(
                         redirect_hops=len(redirect_chain),
                         redirect_chain=redirect_chain,
                         timings=step_timings,
-                        error=f"Limite máximo de redirecionamentos ({max_redirects}) excedido.",
+                        error=tr(
+                            f"Limite máximo de redirecionamentos ({max_redirects}) excedido.",
+                            f"Maximum number of redirects ({max_redirects}) exceeded.",
+                        ),
                     )
 
                 raw_location = resp.headers["location"].strip()
@@ -877,7 +946,10 @@ async def _run_probe_session(
                         redirect_hops=len(redirect_chain),
                         redirect_chain=redirect_chain,
                         timings=step_timings,
-                        error=f"Bloqueado pelo Guardião Anti-SSRF: redirecionamento para esquema proibido ('{next_scheme}').",
+                        error=tr(
+                            f"Bloqueado pelo Guardião Anti-SSRF: redirecionamento para esquema proibido ('{next_scheme}').",
+                            f"Blocked by the Anti-SSRF guard: redirect to a forbidden scheme ('{next_scheme}').",
+                        ),
                     )
 
                 redirect_chain.append(
@@ -907,7 +979,7 @@ async def _run_probe_session(
                     tls_ms=o_tls,
                     ttfb_ms=step_timings.ttfb_ms,
                     transfer_ms=step_timings.transfer_ms,
-                    reference_sample="Amostra 1 (Conexão Fria)",
+                    reference_sample=_cold_sample_label(),
                 )
 
             final_resp = resp
@@ -941,13 +1013,19 @@ async def _run_probe_session(
                     url=current_url,
                     dns_ms=0.0,
                     max_body_bytes=max_body_bytes,
-                    reference_sample=f"Amostra {sample_idx} (Conexão Reaproveitada)",
+                    reference_sample=tr(
+                        f"Amostra {sample_idx} (Conexão Reaproveitada)",
+                        f"Sample {sample_idx} (reused connection)",
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 # a 1ª amostra já mostrou que o alvo responde. se uma conexão keep-alive fechou ou resetou, ou se uma amostra
                 # quente estourou o tempo, isso não pode jogar a amostra fora nem marcar o alvo como OFFLINE.
                 # então as amostras param por aqui.
-                extra_sample_failure = f"Amostra {sample_idx} falhou ({type(exc).__name__}); amostras restantes interrompidas."
+                extra_sample_failure = tr(
+                    f"Amostra {sample_idx} falhou ({type(exc).__name__}); amostras restantes interrompidas.",
+                    f"Sample {sample_idx} failed ({type(exc).__name__}); remaining samples stopped.",
+                )
                 logger.warning("amostra %d de %s falhou: %s", sample_idx, current_url, exc)
                 break
             if s_reused:
@@ -976,18 +1054,29 @@ async def _run_probe_session(
                 round(_percentile(warm_ttfbs, 50.0) - final_timings.estimated_rtt_ms, 2),
             )
             final_timings.timing_notes.append(
-                "Processamento do servidor estimado pela mediana do TTFB das amostras quentes menos o RTT."
+                tr(
+                    "Processamento do servidor estimado pela mediana do TTFB das amostras quentes menos o RTT.",
+                    "Server processing estimated as the median TTFB of the warm samples minus the RTT.",
+                )
             )
         elif final_resp.http_version in ("HTTP/2", "h2"):
             final_timings.server_processing_ms = None
             final_timings.timing_notes.append(
-                "TTFB frio em HTTP/2 pode incluir ~1 RTT extra (o servidor aguarda o ACK de SETTINGS): "
-                "use samples ≥ 2 para estimar o processamento do servidor."
+                tr(
+                    "TTFB frio em HTTP/2 pode incluir ~1 RTT extra (o servidor aguarda o ACK de SETTINGS): "
+                    "use samples ≥ 2 para estimar o processamento do servidor.",
+                    "Cold TTFB on HTTP/2 may include ~1 extra RTT (the server waits for the SETTINGS ACK): "
+                    "use samples ≥ 2 to estimate server processing.",
+                )
             )
         if inherited_setup:
             final_timings.timing_notes.append(
-                "DNS/TCP/TLS herdados da conexão aberta em hop anterior (reaproveitada); "
-                f"tempo total incluindo redirects: {end_to_end_ms} ms."
+                tr(
+                    "DNS/TCP/TLS herdados da conexão aberta em hop anterior (reaproveitada); "
+                    f"tempo total incluindo redirects: {end_to_end_ms} ms.",
+                    "DNS/TCP/TLS inherited from the connection opened on an earlier hop (reused); "
+                    f"total time including redirects: {end_to_end_ms} ms.",
+                )
             )
 
         sampling_stats = _build_sampling_stats(raw_samples)
@@ -1012,7 +1101,7 @@ async def _run_probe_session(
                         target_ip_for_tls, final_port, final_host, timeout=min(4.0, timeout),
                         expected_leaf=_peer_leaf_der(ssl_obj),
                     ),
-                    stage_deadline, ([], None), skipped_stages, "cadeia TLS/OCSP grampeado",
+                    stage_deadline, ([], None), skipped_stages, tr("cadeia TLS/OCSP grampeado", "TLS chain/stapled OCSP"),
                 ),
                 _bounded(
                     lambda: _check_port_80(
@@ -1021,13 +1110,15 @@ async def _run_probe_session(
                         timeout=min(timeout, 2.0),
                         ip=target_ip_for_tls,
                     ),
-                    stage_deadline, "Porta 80 não verificada (prazo da sondagem esgotado)", skipped_stages, "porta 80",
+                    stage_deadline,
+                    tr("Porta 80 não verificada (prazo da sondagem esgotado)", "Port 80 not checked (probe deadline reached)"),
+                    skipped_stages, tr("porta 80", "port 80"),
                 ),
                 _bounded(
                     lambda: enumerate_tls_bounded(
                         target_ip_for_tls, final_port, final_host, budget=min(3.0, timeout), timeout=min(3.0, timeout)
                     ),
-                    stage_deadline, None, skipped_stages, "enumeração TLS",
+                    stage_deadline, None, skipped_stages, tr("enumeração TLS", "TLS enumeration"),
                 ),
             )
 
@@ -1052,7 +1143,7 @@ async def _run_probe_session(
                         port=final_port,
                         timeout=min(0.8, timeout * 0.25),
                     ),
-                    stage_deadline, None, skipped_stages, "TLS 1.0/1.1 legado",
+                    stage_deadline, None, skipped_stages, tr("TLS 1.0/1.1 legado", "legacy TLS 1.0/1.1"),
                 )
                 if legacy_probe is None:
                     legacy_unknown = True  # não houve verificação; dizer 'não aceito' seria afirmar sem prova
@@ -1073,7 +1164,7 @@ async def _run_probe_session(
             else:
                 tls_info = TLSInspection(
                     valid=False,
-                    validation_error=tls_validation_error or "handshake TLS sem objeto SSL",
+                    validation_error=tls_validation_error or tr("handshake TLS sem objeto SSL", "TLS handshake without an SSL object"),
                     tls10_11_accepted=legacy_tls_accepted,
                     enumeration=tls_enum,
                 )
@@ -1086,7 +1177,7 @@ async def _run_probe_session(
                         chain_der, allow_private=revocation.endpoints_allow_private(),
                         timeout=min(timeout, 5.0), deadline=min(timeout, 4.0),
                     ),
-                    stage_deadline, None, skipped_stages, "revogação",
+                    stage_deadline, None, skipped_stages, tr("revogação", "revocation"),
                 )
                 if rev_result is not None:
                     _apply_revocation(tls_info, rev_result)
@@ -1095,7 +1186,9 @@ async def _run_probe_session(
         cors_result = await _bounded(
             lambda: audit_cors_active(client=client, target_url=current_url, timeout=min(timeout, 2.0)),
             stage_deadline,
-            CORSInspection(tested=False, status="Não testado (prazo da sondagem esgotado)"),
+            CORSInspection(
+                tested=False, status=tr("Não testado (prazo da sondagem esgotado)", "Not tested (probe deadline reached)")
+            ),
             skipped_stages,
             "CORS",
         )
@@ -1133,10 +1226,15 @@ async def _run_probe_session(
                 stage_deadline,
                 ContentAssertionsResult(
                     passed=True,
-                    not_evaluated=["asserções de regex não avaliadas: prazo da sondagem esgotado antes da avaliação"],
+                    not_evaluated=[
+                        tr(
+                            "asserções de regex não avaliadas: prazo da sondagem esgotado antes da avaliação",
+                            "regex assertions not evaluated: probe deadline reached before evaluation",
+                        )
+                    ],
                 ),
                 skipped_stages,
-                "asserções de regex",
+                tr("asserções de regex", "regex assertions"),
             )
             assertions_res = ContentAssertionsResult(
                 passed=assertions_res.passed and regex_res.passed,
@@ -1146,7 +1244,10 @@ async def _run_probe_session(
 
         if skipped_stages:
             final_timings.timing_notes.append(
-                "Resultado parcial: etapas não concluídas (prazo da sondagem ou timeout da própria etapa): "
+                tr(
+                    "Resultado parcial: etapas não concluídas (prazo da sondagem ou timeout da própria etapa): ",
+                    "Partial result: stages not completed (probe deadline or the stage's own timeout): ",
+                )
                 + ", ".join(skipped_stages) + "."
             )
 
@@ -1168,7 +1269,10 @@ async def _run_probe_session(
 
         err_msg: str | None = None
         if not assertions_res.passed:
-            err_msg = f"Falha em Content Assertion: {'; '.join(assertions_res.failures)}"
+            err_msg = tr(
+                f"Falha em Content Assertion: {'; '.join(assertions_res.failures)}",
+                f"Content assertion failed: {'; '.join(assertions_res.failures)}",
+            )
 
         return ProbeResult(
             target_url=initial_url,
@@ -1203,15 +1307,25 @@ async def _run_probe_session(
 def _format_dns_error(exc: BaseException, host: str) -> str:
     """Mensagem de DNS consistente (mesmo formato e causa explícita) para qualquer falha de resolução."""
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-        return f"Erro de DNS: tempo esgotado ao resolver '{host}'"
+        return tr(f"Erro de DNS: tempo esgotado ao resolver '{host}'", f"DNS error: timed out resolving '{host}'")
     if isinstance(exc, socket.gaierror):
         code = exc.errno
         if code in (socket.EAI_NONAME, getattr(socket, "EAI_NODATA", None)):
-            return f"Erro de DNS: o domínio '{host}' não existe ou não possui registros (NXDOMAIN)"
+            return tr(
+                f"Erro de DNS: o domínio '{host}' não existe ou não possui registros (NXDOMAIN)",
+                f"DNS error: the domain '{host}' does not exist or has no records (NXDOMAIN)",
+            )
         if code == socket.EAI_AGAIN:
-            return f"Erro de DNS: falha temporária do resolvedor ao consultar '{host}'"
-        return f"Erro de DNS: não foi possível resolver '{host}' ({exc.strerror or exc})"
-    return f"Erro de DNS: não foi possível resolver '{host}' ({exc})"
+            return tr(
+                f"Erro de DNS: falha temporária do resolvedor ao consultar '{host}'",
+                f"DNS error: temporary resolver failure while querying '{host}'",
+            )
+        detail = exc.strerror or exc
+        return tr(
+            f"Erro de DNS: não foi possível resolver '{host}' ({detail})",
+            f"DNS error: could not resolve '{host}' ({detail})",
+        )
+    return tr(f"Erro de DNS: não foi possível resolver '{host}' ({exc})", f"DNS error: could not resolve '{host}' ({exc})")
 
 
 _HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
@@ -1225,16 +1339,22 @@ def _validate_hostname_syntax(host: str) -> str | None:
         return None
     name = host.rstrip(".")
     if not name or len(name) > 253:
-        return "URL inválida: hostname vazio ou longo demais."
+        return tr("URL inválida: hostname vazio ou longo demais.", "Invalid URL: hostname is empty or too long.")
     if not name.isascii():  # nome internacionalizado (münchen.de): valida a forma Punycode (IDNA 2008, a do httpx)
         try:
             name = httpx.URL(f"http://{name}/").raw_host.decode("ascii")
         except (httpx.InvalidURL, ValueError):
-            return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
+            return tr(
+                f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos.",
+                f"Invalid URL: hostname '{host}' contains invalid characters or format.",
+            )
         if len(name) > 253:
-            return "URL inválida: hostname vazio ou longo demais."
+            return tr("URL inválida: hostname vazio ou longo demais.", "Invalid URL: hostname is empty or too long.")
     if not all(_HOST_LABEL_RE.match(label) for label in name.split(".")):
-        return f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos."
+        return tr(
+                f"URL inválida: hostname '{host}' contém caracteres ou formato inválidos.",
+                f"Invalid URL: hostname '{host}' contains invalid characters or format.",
+            )
     return None
 
 
@@ -1252,7 +1372,10 @@ def _failure_result(url: str, exc: BaseException, timeout: float) -> ProbeResult
     if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({timeout:.1f}s): {str(exc) or 'limite de tempo esgotado'}",
+            error=tr(
+                f"Timeout rígido excedido ({timeout:.1f}s): {str(exc) or 'limite de tempo esgotado'}",
+                f"Hard timeout exceeded ({timeout:.1f}s): {str(exc) or 'time limit reached'}",
+            ),
         )
     return None
 
@@ -1296,19 +1419,26 @@ async def _diagnose_tls_failure(
     accepted = [p for p in enum.protocols if p.status == "accepted"]
     if accepted:
         detail = "; ".join(
-            f"{p.protocol}" + (f" ({len(p.weak_ciphers)} cifra(s) fraca(s))" if p.weak_ciphers else "")
+            f"{p.protocol}"
+            + (tr(f" ({len(p.weak_ciphers)} cifra(s) fraca(s))", f" ({len(p.weak_ciphers)} weak cipher(s))") if p.weak_ciphers else "")
             for p in accepted
         )
-        hint = f"servidor aceita apenas: {detail}"
+        hint = tr(f"servidor aceita apenas: {detail}", f"server accepts only: {detail}")
     elif any(p.status == "unknown" for p in enum.protocols):
-        hint = "não foi possível determinar os protocolos aceitos"
+        hint = tr("não foi possível determinar os protocolos aceitos", "could not determine the accepted protocols")
     else:
-        hint = "nenhum protocolo TLS 1.0–1.3 testável é aceito (cifras/curvas incompatíveis com este cliente?)"
+        hint = tr(
+            "nenhum protocolo TLS 1.0–1.3 testável é aceito (cifras/curvas incompatíveis com este cliente?)",
+            "no testable TLS 1.0–1.3 protocol is accepted (ciphers/curves incompatible with this client?)",
+        )
     return ProbeResult(
         target_url=url,
         resolved_ip=ip,
-        error=f"Erro HTTP/Conexão: falha no handshake TLS ({hint}). Detalhe: {exc_str}",
-        tls=TLSInspection(valid=False, validation_error="handshake TLS falhou", enumeration=enum,
+        error=tr(
+            f"Erro HTTP/Conexão: falha no handshake TLS ({hint}). Detalhe: {exc_str}",
+            f"HTTP/Connection error: TLS handshake failed ({hint}). Detail: {exc_str}",
+        ),
+        tls=TLSInspection(valid=False, validation_error=tr("handshake TLS falhou", "TLS handshake failed"), enumeration=enum,
                           tls10_11_accepted=any(p.protocol in ("TLSv1", "TLSv1.1") for p in accepted)),
     )
 
@@ -1352,14 +1482,17 @@ def _normalize_scheme_only(raw_url: str) -> tuple[str, str | None]:
     """
     url = raw_url.strip()
     if not url:
-        return url, "URL inválida: vazia."
+        return url, tr("URL inválida: vazia.", "Invalid URL: empty.")
 
     if "://" in url:
         scheme = url.split("://", 1)[0].strip().lower()
         if scheme not in ALLOWED_SCHEMES:
             return (
                 url,
-                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+                tr(
+                    f"Bloqueado pelo Guardião Anti-SSRF: esquema '{scheme}' não permitido (apenas http/https).",
+                    f"Blocked by the Anti-SSRF guard: scheme '{scheme}' not allowed (http/https only).",
+                ),
             )
         return url, None
 
@@ -1371,7 +1504,10 @@ def _normalize_scheme_only(raw_url: str) -> tuple[str, str | None]:
         if candidate_scheme not in ALLOWED_SCHEMES and not re.match(r"^\d+(/.*)?$", rest):
             return (
                 url,
-                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{candidate_scheme}' não permitido (apenas http/https).",
+                tr(
+                    f"Bloqueado pelo Guardião Anti-SSRF: esquema '{candidate_scheme}' não permitido (apenas http/https).",
+                    f"Blocked by the Anti-SSRF guard: scheme '{candidate_scheme}' not allowed (http/https only).",
+                ),
             )
 
     return f"https://{url}", None
@@ -1417,20 +1553,26 @@ async def _execute_probe_inner(
 
     parsed = safe_urlparse(url)
     if parsed is None:
-        return ProbeResult(target_url=url, error="URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar).")
+        return ProbeResult(target_url=url, error=tr(
+            "URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar).",
+            "Invalid URL: malformed address (e.g. unclosed IPv6 bracket).",
+        ))
     if parsed.scheme.lower() not in ALLOWED_SCHEMES:
         return ProbeResult(
             target_url=url,
-            error=f"Bloqueado pelo Guardião Anti-SSRF: esquema '{parsed.scheme}' não permitido.",
+            error=tr(
+                f"Bloqueado pelo Guardião Anti-SSRF: esquema '{parsed.scheme}' não permitido.",
+                f"Blocked by the Anti-SSRF guard: scheme '{parsed.scheme}' not allowed.",
+            ),
         )
     if not parsed.hostname:
         return ProbeResult(
-            target_url=url, error="URL inválida: hostname não encontrado."
+            target_url=url, error=tr("URL inválida: hostname não encontrado.", "Invalid URL: hostname not found.")
         )
     try:
         _ = parsed.port
     except ValueError:
-        return ProbeResult(target_url=url, error="URL inválida: porta fora do intervalo 1-65535.")
+        return ProbeResult(target_url=url, error=tr("URL inválida: porta fora do intervalo 1-65535.", "Invalid URL: port out of range 1-65535."))
     host_err = _validate_hostname_syntax(parsed.hostname)
     if host_err:
         return ProbeResult(target_url=url, error=host_err)
@@ -1472,7 +1614,10 @@ async def _execute_probe_inner(
     except (asyncio.TimeoutError, httpx.TimeoutException) as timeout_err:
         return ProbeResult(
             target_url=url,
-            error=f"Timeout rígido excedido ({overall_timeout:.1f}s): {str(timeout_err) or 'limite de tempo esgotado'}",
+            error=tr(
+                f"Timeout rígido excedido ({overall_timeout:.1f}s): {str(timeout_err) or 'limite de tempo esgotado'}",
+                f"Hard timeout exceeded ({overall_timeout:.1f}s): {str(timeout_err) or 'time limit reached'}",
+            ),
         )
     except Exception as exc:
         exc_str = str(exc)
@@ -1483,7 +1628,7 @@ async def _execute_probe_inner(
         if is_ssl_verify_err:
             reason_match = re.search(r"certificate verify failed:\s*([^(]+?)\s*(?:\(|$)", exc_str)
             verify_reason = (
-                reason_match.group(1).strip() if reason_match else "falha na verificação do certificado"
+                reason_match.group(1).strip() if reason_match else tr("falha na verificação do certificado", "certificate verification failed")
             )
             # usa o prazo que RESTA do total: o retry não pode dobrar o tempo máximo da requisição. se não sobrar
             # folga, nem tenta, em vez de forçar um mínimo que estoura o prazo global.
@@ -1491,9 +1636,11 @@ async def _execute_probe_inner(
             if remaining < 1.0:
                 return ProbeResult(
                     target_url=url,
-                    error=(
+                    error=tr(
                         f"Timeout rígido excedido ({overall_timeout:.0f}s): prazo total esgotado antes de "
-                        f"repetir sem verificação do certificado ({verify_reason})"
+                        f"repetir sem verificação do certificado ({verify_reason})",
+                        f"Hard timeout exceeded ({overall_timeout:.0f}s): total deadline reached before "
+                        f"retrying without certificate verification ({verify_reason})",
                     ),
                 )
             try:
@@ -1519,7 +1666,7 @@ async def _execute_probe_inner(
             except Exception as inner_exc:
                 return _failure_result(url, inner_exc, overall_timeout) or ProbeResult(
                     target_url=url,
-                    error=f"Erro HTTP/Conexão: {inner_exc}",
+                    error=tr(f"Erro HTTP/Conexão: {inner_exc}", f"HTTP/Connection error: {inner_exc}"),
                 )
 
         if _is_tls_handshake_error(exc):
@@ -1532,5 +1679,5 @@ async def _execute_probe_inner(
 
         return ProbeResult(
             target_url=url,
-            error=f"Erro HTTP/Conexão: {exc}",
+            error=tr(f"Erro HTTP/Conexão: {exc}", f"HTTP/Connection error: {exc}"),
         )

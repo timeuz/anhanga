@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from anhanga.i18n import tr
+
 GRADE_RANK: dict[str, int] = {"A+": 6, "A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
 
 MIN_INTERVAL_SECONDS = 5
@@ -211,13 +213,16 @@ def _valid_target_url(raw_url: str) -> str | None:
         return err
     parsed = safe_urlparse(normalized)
     if parsed is None:
-        return "URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar)."
+        return tr(
+            "URL inválida: endereço malformado (ex.: colchete IPv6 sem fechar).",
+            "Invalid URL: malformed address (e.g. unclosed IPv6 bracket).",
+        )
     if not parsed.hostname:
-        return "URL inválida: hostname não encontrado."
+        return tr("URL inválida: hostname não encontrado.", "Invalid URL: hostname not found.")
     try:
         _ = parsed.port
     except ValueError:
-        return "URL inválida: porta fora do intervalo 1-65535."
+        return tr("URL inválida: porta fora do intervalo 1-65535.", "Invalid URL: port out of range 1-65535.")
     return _validate_hostname_syntax(parsed.hostname)
 
 

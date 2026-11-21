@@ -205,6 +205,7 @@ The "Add target" field in the dashboard stores permanent targets in SQLite (up t
 | `ANHANGA_SENSITIVE_COOKIE_REGEX` | Overrides which cookie names require `HttpOnly`. |
 | `ANHANGA_DOCS` | `1` enables `/docs`, `/redoc` and `/openapi.json`. |
 | `ANHANGA_PROBE_ORIGIN` | Label for the probe's vantage point in results. |
+| `ANHANGA_LANG` | Language of the CLI, alerts and metric descriptions: `pt-BR` (default) or `en-US`. The dashboard and the API follow the screen's language on their own (`?lang=en-US` or `Accept-Language`). |
 
 The `.env` file is read only by the server entrypoints (`anhanga serve`, `uvicorn anhanga.main:app`), never by `anhanga check`. Variables already set in the environment take precedence.
 

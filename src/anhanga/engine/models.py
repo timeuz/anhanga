@@ -3,6 +3,8 @@ import re
 from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
+from anhanga.i18n import LStr, tr, tx
+
 
 PHASE_SLO_THRESHOLDS: dict[str, tuple[float, float]] = {
     "dns": (50.0, 150.0),
@@ -16,8 +18,8 @@ PHASE_LABELS: dict[str, str] = {
     "dns": "DNS Lookup",
     "tcp": "TCP Handshake",
     "tls": "TLS Handshake",
-    "ttfb": "TTFB (Espera do Servidor)",
-    "transfer": "Transferência de Conteúdo",
+    "ttfb": LStr("TTFB (Espera do Servidor)", "TTFB (Server Wait)"),
+    "transfer": LStr("Transferência de Conteúdo", "Content Transfer"),
 }
 
 
@@ -44,7 +46,7 @@ class TimingBreakdown(BaseModel):
     estimated_rtt_ms: float = 0.0
     # None = indisponível (ex.: o TTFB frio em HTTP/2 embute ~1 RTT de handshake e não mede o servidor)
     server_processing_ms: float | None = 0.0
-    reference_sample: str = "Amostra 1 (Conexão Fria)"
+    reference_sample: str = Field(default_factory=lambda: tr("Amostra 1 (Conexão Fria)", "Sample 1 (cold connection)"))
     timing_notes: list[str] = Field(default_factory=list)
 
 
@@ -63,7 +65,7 @@ def build_timing_breakdown(
     tls_ms: float = 0.0,
     ttfb_ms: float = 0.0,
     transfer_ms: float = 0.0,
-    reference_sample: str = "Amostra 1 (Conexão Fria)",
+    reference_sample: str | None = None,
 ) -> TimingBreakdown:
     """Constrói um TimingBreakdown real e não-cumulativo com offsets exatos para o Waterfall."""
     d_dns = round(max(0.0, dns_ms), 2)
@@ -96,7 +98,7 @@ def build_timing_breakdown(
         phases_list.append(
             PhaseOffset(
                 phase=p_name,
-                label=PHASE_LABELS[p_name],
+                label=tx(PHASE_LABELS[p_name]),
                 start_ms=start,
                 duration_ms=p_dur,
                 end_ms=end,
@@ -120,7 +122,7 @@ def build_timing_breakdown(
         phases=phases_list,
         estimated_rtt_ms=round(estimated_rtt, 2),
         server_processing_ms=server_processing,
-        reference_sample=reference_sample,
+        reference_sample=reference_sample or tr("Amostra 1 (Conexão Fria)", "Sample 1 (cold connection)"),
     )
 
 
@@ -144,7 +146,7 @@ class SampleMeasurement(BaseModel):
 class SamplingStats(BaseModel):
     samples_count: int = 1
     headline_total_ms: float = 0.0
-    headline_label: str = "Latência Total (Mediana P50)"
+    headline_label: str = Field(default_factory=lambda: tr("Latência Total (Mediana P50)", "Total latency (median P50)"))
     cold_total_ms: float = 0.0
     warm_avg_total_ms: float | None = None
     p50_ms: float = 0.0
@@ -250,7 +252,7 @@ class TLSInspection(BaseModel):
     chain_source: str | None = None  # "verificada" | "enviada pelo servidor" | None (indisponível)
     revocation: RevocationInspection | None = None
     ocsp_stapling: bool | None = None  # None = não verificado
-    ocsp_status: str = "Não verificado"
+    ocsp_status: str = Field(default_factory=lambda: tr("Não verificado", "Not checked"))
 
 
 class CookieAuditItem(BaseModel):
@@ -264,7 +266,7 @@ class CookieAuditItem(BaseModel):
 
 class CORSInspection(BaseModel):
     tested: bool = False
-    status: str = "Não testado"
+    status: str = Field(default_factory=lambda: tr("Não testado", "Not tested"))
     reflects_origin: bool = False
     wildcard: bool = False
     allow_credentials: bool = False
@@ -401,22 +403,23 @@ _TLS_ALERT_RE = re.compile(r"\b(?:tls|ssl)v?\d+(?:\.\d+)? alert\b")
 def classify_error_message(message: str) -> str:
     """Código estável e legível por máquina para a mensagem de erro de uma sondagem."""
     m = message.lower()
-    if m.startswith("bloqueado pelo guardião"):
+    # os prefixos existem em pt-BR e en-US (o idioma muda por requisição), então os dois contam
+    if m.startswith(("bloqueado pelo guardião", "blocked by the anti-ssrf")):
         return "ssrf_blocked"
-    if m.startswith("url inválida"):
+    if m.startswith(("url inválida", "invalid url")):
         return "invalid_url"
-    if m.startswith("erro de dns"):
+    if m.startswith(("erro de dns", "dns error")):
         return "dns_error"
-    if m.startswith("timeout"):
+    if m.startswith(("timeout", "hard timeout")):
         return "timeout"
-    if m.startswith("falha em content assertion"):
+    if m.startswith(("falha em content assertion", "content assertion failed")):
         return "assertion_failed"
-    if m.startswith("limite máximo de redirecionamentos"):
+    if m.startswith(("limite máximo de redirecionamentos", "maximum number of redirects")):
         return "redirect_loop"
     # marcadores específicos de erro de TLS, não substring solta: um hostname 'classless.example' ou
     # 'tls-proxy.example' numa falha de conexão não pode virar `tls_error`.
     if any(k in m for k in _TLS_ERROR_MARKERS) or _TLS_ALERT_RE.search(m):
         return "tls_error"
-    if m.startswith("erro http/conexão"):
+    if m.startswith(("erro http/conexão", "http/connection error")):
         return "connect_error"
     return "unknown_error"

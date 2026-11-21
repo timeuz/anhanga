@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import httpx
 
 from anhanga.engine.models import RevocationInspection
+from anhanga.i18n import get_lang, tr
 
 MAX_OCSP_BYTES = 64 * 1024
 MAX_CRL_BYTES = 3 * 1024 * 1024
@@ -92,7 +93,7 @@ def _parse_openssl_time(raw: str) -> datetime | None:
 async def _openssl(args: list[str], timeout: float = 8.0) -> tuple[int, str]:
     exe = shutil.which("openssl")
     if not exe:
-        raise FileNotFoundError("binário openssl indisponível")
+        raise FileNotFoundError(tr("binário openssl indisponível", "openssl binary unavailable"))
     proc = await asyncio.create_subprocess_exec(
         exe, *args,
         stdin=asyncio.subprocess.DEVNULL,
@@ -129,7 +130,12 @@ async def _fetch(
     for _ in range(MAX_REDIRECTS + 1):
         parsed = urlparse(current)
         if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
-            raise ValueError(f"URL de revogação inválida ou com esquema proibido: {current[:80]}")
+            raise ValueError(
+                tr(
+                    f"URL de revogação inválida ou com esquema proibido: {current[:80]}",
+                    f"Invalid revocation URL or forbidden scheme: {current[:80]}",
+                )
+            )
         port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
         ip, _dns = await resolve_and_validate_host(
             parsed.hostname, port, allow_private=allow_private, dns_timeout=min(timeout, 3.0)
@@ -177,7 +183,7 @@ async def _ocsp_check(leaf_pem: str, issuer_pem: str, url: str, *, allow_private
             ["ocsp", "-issuer", files["iss.pem"], "-cert", files["leaf.pem"], "-reqout", files["req.der"], "-no_nonce"]
         )
         if rc != 0 or not os.path.exists(files["req.der"]):
-            raise ValueError("não foi possível montar a requisição OCSP")
+            raise ValueError(tr("não foi possível montar a requisição OCSP", "could not build the OCSP request"))
         with open(files["req.der"], "rb") as fh:
             request = fh.read()
         response = await _fetch(
@@ -190,22 +196,22 @@ async def _ocsp_check(leaf_pem: str, issuer_pem: str, url: str, *, allow_private
             ["ocsp", "-respin", files["resp.der"], "-issuer", files["iss.pem"], "-cert", files["leaf.pem"]]
         )
     if "Response verify OK" not in out:
-        raise ValueError("assinatura da resposta OCSP não verificada")
+        raise ValueError(tr("assinatura da resposta OCSP não verificada", "OCSP response signature not verified"))
     m = re.search(r"leaf\.pem:\s*(good|revoked|unknown)", out)
     if not m:
-        raise ValueError("resposta OCSP sem status do certificado")
+        raise ValueError(tr("resposta OCSP sem status do certificado", "OCSP response without a certificate status"))
     status = m.group(1)
     nxt = re.search(r"Next Update:\s*(.+)", out)
     next_update = _parse_openssl_time(nxt.group(1)) if nxt else None
     if next_update is not None and next_update < now:
-        raise ValueError("resposta OCSP expirada (Next Update no passado)")
+        raise ValueError(tr("resposta OCSP expirada (Next Update no passado)", "OCSP response expired (Next Update in the past)"))
     revoked_at = None
     if status == "revoked":
         rt = re.search(r"Revocation Time:\s*(.+)", out)
         revoked_at = _parse_openssl_time(rt.group(1)) if rt else None
     return RevocationInspection(
         status=status, method="ocsp", revoked_at=revoked_at, responder=urlparse(url).hostname,
-        next_update=next_update, detail=None if status != "unknown" else "o respondedor OCSP não conhece este serial",
+        next_update=next_update, detail=None if status != "unknown" else tr("o respondedor OCSP não conhece este serial", "the OCSP responder does not know this serial"),
     )
 
 
@@ -226,14 +232,14 @@ async def _crl_revoked_map(url: str, issuer_pem: str, *, allow_private: bool, ti
             fh.write(issuer_pem)
         rc, out = await _openssl(["crl", "-inform", "DER", "-in", crl, "-CAfile", iss, "-noout", "-verify", "-nextupdate"], 10.0)
         if rc != 0 or "verify OK" not in out:
-            raise ValueError("assinatura do CRL não verificada")
+            raise ValueError(tr("assinatura do CRL não verificada", "CRL signature not verified"))
         nm = re.search(r"nextUpdate=(.+)", out)
         next_update = _parse_openssl_time(nm.group(1)) if nm else None
         if next_update is not None and next_update.timestamp() < now:
-            raise ValueError("CRL expirado (nextUpdate no passado)")
+            raise ValueError(tr("CRL expirado (nextUpdate no passado)", "CRL expired (nextUpdate in the past)"))
         rc, text = await _openssl(["crl", "-inform", "DER", "-in", crl, "-noout", "-text"], 20.0)
         if rc != 0:
-            raise ValueError("CRL ilegível")
+            raise ValueError(tr("CRL ilegível", "unreadable CRL"))
     revoked: dict[str, datetime | None] = {}
     for m in re.finditer(r"Serial Number:\s*([0-9A-Fa-f]+)\s*\n\s*Revocation Date:\s*(.+)", text):
         revoked[_norm_serial(m.group(1))] = _parse_openssl_time(m.group(2))
@@ -254,9 +260,12 @@ async def check_revocation(
     `deadline` é o orçamento TOTAL (vários fetches em sequência): estourar vira um resultado "error" em cache
     (nova tentativa em 5 min), nunca derruba a sondagem nem repete o mesmo trabalho a cada ciclo."""
     if not chain_der:
-        return RevocationInspection(status="unavailable", detail="cadeia do servidor indisponível")
+        return RevocationInspection(
+            status="unavailable", detail=tr("cadeia do servidor indisponível", "server chain unavailable")
+        )
     leaf_der = chain_der[0]
-    key = hashlib.sha256(leaf_der).hexdigest()
+    # o idioma entra na chave: o texto do resultado fica em cache e não pode vazar de um idioma para o outro
+    key = f"{hashlib.sha256(leaf_der).hexdigest()}|{get_lang()}"
     now_ts = time.time()
     cached = _RESULT_CACHE.get(key)
     if cached and cached[0] > now_ts:
@@ -266,7 +275,10 @@ async def check_revocation(
         task = None  # herdada de outro event loop (testes/reinício): aguardar travaria ou levantaria
     if task is None:
         if len(_inflight) >= MAX_QUEUED_CHECKS:
-            return RevocationInspection(status="unavailable", detail="fila de verificação cheia; tenta no próximo ciclo")
+            return RevocationInspection(
+                status="unavailable",
+                detail=tr("fila de verificação cheia; tenta no próximo ciclo", "check queue full; will retry next cycle"),
+            )
         task = asyncio.ensure_future(_compute_and_cache(key, chain_der, allow_private, timeout))
         _inflight[key] = task
 
@@ -285,10 +297,13 @@ async def check_revocation(
         # então um CRL grande nunca chegava a dar resultado.)
         return RevocationInspection(
             status="unavailable",
-            detail=f"verificação em andamento (>{deadline:.0f}s); conclui em segundo plano",
+            detail=tr(
+                f"verificação em andamento (>{deadline:.0f}s); conclui em segundo plano",
+                f"check in progress (>{deadline:.0f}s); finishing in the background",
+            ),
         )
     except Exception as exc:  # noqa: BLE001
-        return RevocationInspection(status="error", detail=f"falha na checagem: {exc}"[:300])
+        return RevocationInspection(status="error", detail=tr(f"falha na checagem: {exc}", f"check failed: {exc}")[:300])
 
 
 async def _compute_and_cache(
@@ -301,14 +316,21 @@ async def _compute_and_cache(
         await asyncio.wait_for(sem.acquire(), timeout=QUEUE_WAIT_SECONDS)
     except asyncio.TimeoutError:
         # sem vaga a tempo: o resultado já estaria velho. não cacheia, pro próximo ciclo tentar de novo.
-        return RevocationInspection(status="unavailable", detail="fila de verificação saturada; tenta no próximo ciclo")
+        return RevocationInspection(
+            status="unavailable",
+            detail=tr("fila de verificação saturada; tenta no próximo ciclo", "check queue saturated; will retry next cycle"),
+        )
     try:
         result = await asyncio.wait_for(
             _check_uncached(chain_der, allow_private=allow_private, timeout=timeout), timeout=BACKGROUND_DEADLINE
         )
     except asyncio.TimeoutError:
         result = RevocationInspection(
-            status="error", detail=f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL"
+            status="error",
+            detail=tr(
+                f"tempo esgotado ({BACKGROUND_DEADLINE:.0f}s) ao consultar OCSP/CRL",
+                f"timed out ({BACKGROUND_DEADLINE:.0f}s) querying OCSP/CRL",
+            ),
         )
     finally:
         sem.release()
@@ -325,7 +347,9 @@ async def _compute_and_cache(
 
 async def _check_uncached(chain_der: list[bytes], *, allow_private: bool, timeout: float) -> RevocationInspection:
     if not shutil.which("openssl"):
-        return RevocationInspection(status="unavailable", detail="binário openssl indisponível")
+        return RevocationInspection(
+            status="unavailable", detail=tr("binário openssl indisponível", "openssl binary unavailable")
+        )
     leaf = _cert_fields(chain_der[0])
     leaf_issuer = leaf.get("issuer")
     ocsp_urls = [u for u in (leaf.get("OCSP") or ()) if u.lower().startswith(("http://", "https://"))]
@@ -342,11 +366,16 @@ async def _check_uncached(chain_der: list[bytes], *, allow_private: bool, timeou
                 if _cert_fields(fetched).get("subject") == leaf_issuer:
                     issuer_der = fetched
     if issuer_der is None:
-        return RevocationInspection(status="unavailable", detail="certificado do emissor indisponível")
+        return RevocationInspection(
+            status="unavailable", detail=tr("certificado do emissor indisponível", "issuer certificate unavailable")
+        )
     if not ocsp_urls and not crl_urls:
         return RevocationInspection(
             status="unavailable",
-            detail="certificado sem OCSP nem CRL (sem como checar revogação)",
+            detail=tr(
+                "certificado sem OCSP nem CRL (sem como checar revogação)",
+                "certificate has neither OCSP nor CRL (no way to check revocation)",
+            ),
         )
 
     leaf_pem = ssl.DER_cert_to_PEM_cert(chain_der[0])
@@ -380,4 +409,4 @@ async def _check_uncached(chain_der: list[bytes], *, allow_private: bool, timeou
 
     if ocsp_unknown is not None:
         return ocsp_unknown
-    return RevocationInspection(status="error", detail="; ".join(errors)[:300] or "nenhum endpoint respondeu")
+    return RevocationInspection(status="error", detail="; ".join(errors)[:300] or tr("nenhum endpoint respondeu", "no endpoint answered"))

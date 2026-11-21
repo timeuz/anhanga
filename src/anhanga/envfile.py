@@ -7,6 +7,8 @@ import os
 import secrets
 from pathlib import Path
 
+from anhanga.i18n import tr
+
 KEY_NAME = "ANHANGA_API_KEY"
 
 
@@ -55,7 +57,7 @@ def generate_api_key(path: Path | None = None, force: bool = False) -> tuple[Pat
     except OSError:
         pass
     if KEY_NAME in _parse(existing) and not force:
-        raise FileExistsError(f"{target} já define {KEY_NAME}; use --force para substituir")
+        raise FileExistsError(tr(f"{target} já define {KEY_NAME}; use --force para substituir", f"{target} already defines {KEY_NAME}; use --force to replace it"))
     key = secrets.token_urlsafe(32)
     kept = [ln for ln in existing.splitlines() if _parse(ln).get(KEY_NAME) is None]
     body = "\n".join(kept + [f"{KEY_NAME}={key}"]) + "\n"

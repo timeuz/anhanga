@@ -11,6 +11,7 @@ from prometheus_client import (
 )
 
 from anhanga.engine.models import ProbeResult
+from anhanga.i18n import tr
 
 # registry próprio, pra manter as métricas limpas e previsíveis
 REGISTRY = CollectorRegistry(auto_describe=True)
@@ -75,90 +76,94 @@ BLACKBOX_PROBE_HTTP_VERSION = Gauge(
 # série estendida do Anhangá (em segundos)
 PROBE_UP = Gauge(
     "anhanga_probe_up",
-    "Indica se o alvo respondeu com sucesso (1 = UP, 0 = DOWN)",
+    tr("Indica se o alvo respondeu com sucesso (1 = UP, 0 = DOWN)", "Whether the target answered successfully (1 = UP, 0 = DOWN)"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_STATUS_CODE = Gauge(
     "anhanga_probe_http_status_code",
-    "Último HTTP Status Code retornado pelo alvo",
+    tr("Último HTTP Status Code retornado pelo alvo", "Last HTTP status code returned by the target"),
     ["target", "http_version"],
     registry=REGISTRY,
 )
 
 PROBE_DURATION_SECONDS = Gauge(
     "anhanga_probe_duration_seconds",
-    "Decomposição de latência da sondagem em segundos por fase",
+    tr("Decomposição de latência da sondagem em segundos por fase", "Probe latency breakdown in seconds, per phase"),
     ["target", "phase"],
     registry=REGISTRY,
 )
 
 PROBE_LATENCY_QUANTILE_SECONDS = Gauge(
     "anhanga_probe_latency_quantile_seconds",
-    "Quantis estatísticos de latência total da sondagem em segundos (P50, P95, P99)",
+    tr("Quantis estatísticos de latência total da sondagem em segundos (P50, P95, P99)", "Statistical quantiles of the probe total latency in seconds (P50, P95, P99)"),
     ["target", "quantile"],
     registry=REGISTRY,
 )
 
 PROBE_JITTER_SECONDS = Gauge(
     "anhanga_probe_jitter_seconds",
-    "Jitter médio entre amostras consecutivas em segundos",
+    tr("Jitter médio entre amostras consecutivas em segundos", "Mean jitter between consecutive samples in seconds"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_CONNECTION_COLD_SECONDS = Gauge(
     "anhanga_probe_connection_cold_seconds",
-    "Latência total da primeira amostra (conexão fria com DNS+TCP+TLS) em segundos",
+    tr("Latência total da primeira amostra (conexão fria com DNS+TCP+TLS) em segundos", "Total latency of the first sample (cold connection with DNS+TCP+TLS) in seconds"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_CONNECTION_WARM_SECONDS = Gauge(
     "anhanga_probe_connection_warm_seconds",
-    "Latência média das amostras subsequentes (conexão Keep-Alive reaproveitada) em segundos",
+    tr("Latência média das amostras subsequentes (conexão Keep-Alive reaproveitada) em segundos", "Mean latency of the following samples (reused keep-alive connection) in seconds"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_TLS_EXPIRY_DAYS = Gauge(
     "anhanga_probe_tls_cert_expiry_days",
-    "Dias restantes até a expiração do certificado TLS/SSL",
+    tr("Dias restantes até a expiração do certificado TLS/SSL", "Days left until the TLS/SSL certificate expires"),
     ["target", "issuer", "protocol"],
     registry=REGISTRY,
 )
 
 ALERT_NOTIFICATIONS_TOTAL = Counter(
     "anhanga_alert_notifications_total",
-    "Notificações de alerta aos webhooks (kind: alert|reminder|recovery; "
-    "result: sent|queued (falhou, na outbox p/ reenvio)|dropped (desistiu)|failed (falhou, sem persistência))",
+    tr(
+        "Notificações de alerta aos webhooks (kind: alert|reminder|recovery; "
+        "result: sent|queued (falhou, na outbox p/ reenvio)|dropped (desistiu)|failed (falhou, sem persistência))",
+        "Alert notifications to webhooks (kind: alert|reminder|recovery; "
+        "result: sent|queued (failed, in the outbox for retry)|dropped (gave up)|failed (failed, no persistence))",
+    ),
     ["kind", "result"],
     registry=REGISTRY,
 )
 
 ALERT_OUTBOX_PENDING = Gauge(
     "anhanga_alert_outbox_pending",
-    "Notificações aguardando reenvio na outbox persistente",
+    tr("Notificações aguardando reenvio na outbox persistente", "Notifications waiting to be resent in the persistent outbox"),
     registry=REGISTRY,
 )
 
 STORAGE_ERRORS_TOTAL = Counter(
     "anhanga_storage_errors_total",
-    "Erros de leitura/escrita na persistência SQLite (o monitoramento continua sem persistir)",
+    tr("Erros de leitura/escrita na persistência SQLite (o monitoramento continua sem persistir)", "SQLite persistence read/write errors (monitoring continues without persisting)"),
     registry=REGISTRY,
 )
 
 PROBE_TLS_VALID = Gauge(
     "anhanga_probe_tls_valid",
-    "1 se a cadeia/hostname/validade do certificado TLS foram validados com sucesso",
+    tr("1 se a cadeia/hostname/validade do certificado TLS foram validados com sucesso", "1 if the TLS certificate chain/hostname/validity were validated successfully"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_SECURITY_SCORE = Gauge(
     "anhanga_probe_security_score",
-    "Pontuação de auditoria de headers de segurança DevSecOps (0 a 100)",
+    tr("Pontuação de auditoria de headers de segurança DevSecOps (0 a 100)", "DevSecOps security header audit score (0 to 100)"),
     ["target", "grade"],
     registry=REGISTRY,
 )
@@ -172,21 +177,21 @@ PROBE_REDIRECTS = Gauge(
 
 PROBE_EXECUTIONS_TOTAL = Counter(
     "anhanga_probe_executions_total",
-    "Total de sondagens executadas pelo motor do Anhangá",
+    tr("Total de sondagens executadas pelo motor do Anhangá", "Total probes executed by the Anhangá engine"),
     ["target", "result"],
     registry=REGISTRY,
 )
 
 PROBE_ASSERTIONS_NOT_EVALUATED_TOTAL = Counter(
     "anhanga_assertions_not_evaluated_total",
-    "Asserções de corpo (regex) que o Anhangá NÃO conseguiu avaliar (falha do monitor, não do alvo). Alerte em rate() > 0",
+    tr("Asserções de corpo (regex) que o Anhangá NÃO conseguiu avaliar (falha do monitor, não do alvo). Alerte em rate() > 0", "Body (regex) assertions Anhangá could NOT evaluate (a monitor failure, not the target's). Alert on rate() > 0"),
     ["target"],
     registry=REGISTRY,
 )
 
 PROBE_DURATION_HISTOGRAM_SECONDS = Histogram(
     "anhanga_probe_duration_seconds_histogram",
-    "Histograma de distribuição de latência total da sondagem em segundos para uso com histogram_quantile()",
+    tr("Histograma de distribuição de latência total da sondagem em segundos para uso com histogram_quantile()", "Histogram of the probe total latency distribution in seconds, for use with histogram_quantile()"),
     ["target"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
     registry=REGISTRY,
@@ -201,7 +206,7 @@ PROBE_SERVER_PROCESSING_SECONDS = Gauge(
 
 PROBE_ESTIMATED_RTT_SECONDS = Gauge(
     "anhanga_probe_estimated_rtt_seconds",
-    "RTT físico de rede estimado (handshake TCP / TLS) em segundos",
+    tr("RTT físico de rede estimado (handshake TCP / TLS) em segundos", "Estimated physical network RTT (TCP / TLS handshake) in seconds"),
     ["target"],
     registry=REGISTRY,
 )
@@ -463,13 +468,13 @@ def render_adhoc_probe_metrics(result: ProbeResult) -> tuple[bytes, str]:
         (g.labels(**labels) if labels else g).set(value)
 
     t = result.timings
-    gauge("probe_success", "1 se a sondagem foi bem-sucedida (HTTP ok e TLS válido)", 1.0 if result.health == "up" else 0.0)
+    gauge("probe_success", tr("1 se a sondagem foi bem-sucedida (HTTP ok e TLS válido)", "1 if the probe succeeded (HTTP ok and valid TLS)"), 1.0 if result.health == "up" else 0.0)
     if result.status_code is None:
         return generate_latest(reg), CONTENT_TYPE_LATEST
-    gauge("probe_duration_seconds", "Duração total da sondagem", round(t.total_ms / 1000.0, 6))
-    gauge("probe_http_status_code", "Código HTTP final", float(result.status_code or 0))
+    gauge("probe_duration_seconds", tr("Duração total da sondagem", "Total probe duration"), round(t.total_ms / 1000.0, 6))
+    gauge("probe_http_status_code", tr("Código HTTP final", "Final HTTP status code"), float(result.status_code or 0))
     gauge("probe_http_redirects", "Quantidade de redirecionamentos", float(result.redirect_hops))
-    gauge("probe_http_ssl", "1 se a conexão final usou TLS válido", 1.0 if (result.tls and result.tls.valid) else 0.0)
+    gauge("probe_http_ssl", tr("1 se a conexão final usou TLS válido", "1 if the final connection used valid TLS"), 1.0 if (result.tls and result.tls.valid) else 0.0)
     phases = {
         "resolve": t.dns_ms,
         "connect": t.tcp_ms,
@@ -477,7 +482,7 @@ def render_adhoc_probe_metrics(result: ProbeResult) -> tuple[bytes, str]:
         "processing": t.ttfb_ms,
         "transfer": t.transfer_ms,
     }
-    g = Gauge("probe_http_duration_seconds", "Duração por fase", ["phase"], registry=reg)
+    g = Gauge("probe_http_duration_seconds", tr("Duração por fase", "Duration per phase"), ["phase"], registry=reg)
     for phase, ms in phases.items():
         g.labels(phase=phase).set(round(ms / 1000.0, 6))
     return generate_latest(reg), CONTENT_TYPE_LATEST

@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="{{ current_lang() }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
-    <title>Anhangá – auditoria de TLS, latência e cabeçalhos de segurança</title>
+    <title>{{ tr('Anhangá – auditoria de TLS, latência e cabeçalhos de segurança', 'Anhangá – TLS, latency and security header audit') }}</title>
     <!-- o tema escolhido é aplicado antes da primeira pintura, senão a página pisca -->
     <script>
         try {
@@ -20,11 +20,12 @@
         async function apiFetch(url, retried = false, init = {}) {
             let key = '';
             try { key = sessionStorage.getItem('anhanga_key') || ''; } catch (_) {}
-            const headers = Object.assign({}, init.headers || {}, key ? { Authorization: 'Bearer ' + key } : {});
+            // a API responde no idioma da tela (achados, avisos e erros)
+            const headers = Object.assign({ 'Accept-Language': document.documentElement.lang || 'pt-BR' }, init.headers || {}, key ? { Authorization: 'Bearer ' + key } : {});
             const resp = await fetch(url, Object.assign({}, init, { headers }));
             if (resp.status === 401 && !retried && !keyPromptShown) {
                 keyPromptShown = true;
-                const entered = window.prompt('API key do Anhangá (ANHANGA_API_KEY):');
+                const entered = window.prompt(document.documentElement.lang === 'en-US' ? 'Anhangá API key (ANHANGA_API_KEY):' : 'API key do Anhangá (ANHANGA_API_KEY):');
                 if (entered) {
                     try { sessionStorage.setItem('anhanga_key', entered.trim()); } catch (_) {}
                     return apiFetch(url, true, init);
@@ -144,8 +145,8 @@
                         </div>
 
                         <div class="meta-line">
-                            <span><span x-text="t('resolvedIp')">IP resolvido</span>: <strong x-text="result?.resolved_ip || 'N/D'"></strong></span>
-                            <span><span x-text="t('httpProtocol')">Protocolo HTTP</span>: <strong x-text="result?.http_version || 'N/D'"></strong></span>
+                            <span><span x-text="t('resolvedIp')">IP resolvido</span>: <strong x-text="result?.resolved_ip || t('notAvailableShort')"></strong></span>
+                            <span><span x-text="t('httpProtocol')">Protocolo HTTP</span>: <strong x-text="result?.http_version || t('notAvailableShort')"></strong></span>
                             <span x-show="result?.http_port_80_status"><span x-text="t('port80Label')">Porta 80</span>: <strong x-text="result?.http_port_80_status"></strong></span>
                             <span><span x-text="t('payloadRead')">Corpo lido</span>: <strong x-text="(result?.payload_bytes || 0) + ' B'"></strong></span>
                             <span x-show="result?.redirect_hops > 0"><span x-text="t('redirectsCount')">Redirects</span>: <strong class="txt-warn" x-text="result?.redirect_hops"></strong></span>
@@ -305,12 +306,12 @@
                         <div class="tile" :title="result?.sampling?.sample_size_notice || ''">
                             <span class="k" x-text="t('p95Label')">P95 (cauda)</span>
                             <strong class="v nowrap" :class="result?.sampling?.p95_valid ? '' : 'txt-muted'"
-                                    x-text="result?.sampling?.p95_valid ? (result.sampling.p95_ms + ' ms') : 'N/D (n<20)'"></strong>
+                                    x-text="result?.sampling?.p95_valid ? (result.sampling.p95_ms + ' ms') : t('notAvailableShort') + ' (n<20)'"></strong>
                         </div>
                         <div class="tile" :title="result?.sampling?.sample_size_notice || ''">
                             <span class="k" x-text="t('p99Label')">P99 (extremo)</span>
                             <strong class="v nowrap" :class="result?.sampling?.p99_valid ? '' : 'txt-muted'"
-                                    x-text="result?.sampling?.p99_valid ? (result.sampling.p99_ms + ' ms') : 'N/D (n<100)'"></strong>
+                                    x-text="result?.sampling?.p99_valid ? (result.sampling.p99_ms + ' ms') : t('notAvailableShort') + ' (n<100)'"></strong>
                         </div>
                         <div class="tile">
                             <span class="k" x-text="t('jitterLabel')">Jitter (variação)</span>
@@ -421,14 +422,14 @@
 
                                     <div class="tile">
                                         <span class="k" x-text="t('tlsProtocolCipher')">Protocolo e cifra</span>
-                                        <strong class="v" x-text="(result.tls.protocol || 'N/D') + (result.tls.cipher_bits ? ' (' + result.tls.cipher_bits + ' bits)' : '')"></strong>
-                                        <span class="mono tiny muted break" x-text="result.tls.cipher || 'N/D'"></span>
+                                        <strong class="v" x-text="(result.tls.protocol || t('notAvailableShort')) + (result.tls.cipher_bits ? ' (' + result.tls.cipher_bits + ' bits)' : '')"></strong>
+                                        <span class="mono tiny muted break" x-text="result.tls.cipher || t('notAvailableShort')"></span>
                                     </div>
 
                                     <div class="tile">
                                         <span class="k" x-text="t('tlsIssuerSubject')">Emissor e titular</span>
-                                        <strong class="break" style="display: block; margin-top: 2px;" x-text="result.tls.issuer || 'N/D'"></strong>
-                                        <span class="mono tiny muted break" x-text="'CN: ' + (result.tls.subject || 'N/D')"></span>
+                                        <strong class="break" style="display: block; margin-top: 2px;" x-text="result.tls.issuer || t('notAvailableShort')"></strong>
+                                        <span class="mono tiny muted break" x-text="'CN: ' + (result.tls.subject || t('notAvailableShort'))"></span>
                                     </div>
 
                                     <div class="tile">
@@ -525,12 +526,12 @@
                                             <div class="row">
                                                 <span class="badge mono sq tone-warn" x-text="'Hop #' + hop.hop"></span>
                                                 <span class="badge mono sq tone-neutral" x-text="'HTTP ' + hop.status_code"></span>
-                                                <span class="mono muted small" x-text="'IP: ' + (hop.resolved_ip || 'N/D')"></span>
+                                                <span class="mono muted small" x-text="'IP: ' + (hop.resolved_ip || t('notAvailableShort'))"></span>
                                             </div>
                                             <strong class="mono" x-text="(hop.timings?.total_ms || 0) + ' ms'"></strong>
                                         </div>
                                         <div class="path"><span class="muted"><span x-text="t('fromWord')">De</span>:</span> <span x-text="hop.url"></span></div>
-                                        <div class="path"><span class="muted"><span x-text="t('toWord')">Para</span>:</span> <span class="txt-ok" x-text="hop.target_url || hop.location || 'N/D'"></span></div>
+                                        <div class="path"><span class="muted"><span x-text="t('toWord')">Para</span>:</span> <span class="txt-ok" x-text="hop.target_url || hop.location || t('notAvailableShort')"></span></div>
                                     </div>
                                 </template>
                             </div>
@@ -799,7 +800,7 @@
                                 </td>
                                 <td>
                                     <div class="url truncate" :title="item.target_url" x-text="item.target_url"></div>
-                                    <div class="tiny muted">IP: <span class="mono" x-text="item.resolved_ip || 'N/D'"></span></div>
+                                    <div class="tiny muted">IP: <span class="mono" x-text="item.resolved_ip || t('notAvailableShort')"></span></div>
                                     <p x-show="!hasMeasurements(item)" class="tiny txt-bad break" x-text="item.error || t('noData')"></p>
                                 </td>
                                 <td class="num" x-text="hasMeasurements(item) ? item.timings.total_ms + ' ms' : '—'"></td>
@@ -849,9 +850,9 @@
                                 <td>
                                     <span class="badge {{ 'tone-ok' if item.health == 'up' else ('tone-warn' if item.health == 'degraded' else 'tone-bad') }}">
                                         <span class="dot" aria-hidden="true"></span>
-                                        {{ 'Online (' ~ item.status_code ~ ')' if item.health == 'up' else ('Degradado (TLS inválido)' if item.health == 'degraded' else 'Offline') }}
+                                        {{ 'Online (' ~ item.status_code ~ ')' if item.health == 'up' else (tr('Degradado (TLS inválido)', 'Degraded (invalid TLS)') if item.health == 'degraded' else 'Offline') }}
                                     </span>
-                                    <span class="badge mono sq {{ 'tone-ok' if item.security.grade in ['A+', 'A'] else 'tone-warn' }}">Nota {{ item.security.grade }}</span>
+                                    <span class="badge mono sq {{ 'tone-ok' if item.security.grade in ['A+', 'A'] else 'tone-warn' }}">{{ tr('Nota', 'Grade') }} {{ item.security.grade }}</span>
                                 </td>
                                 <td>
                                     <div class="url truncate" title="{{ item.target_url }}">{{ item.target_url }}</div>
@@ -870,7 +871,7 @@
                 </div>
                 {% else %}
                 <div class="panel empty" x-text="t('emptyTargets')">
-                    Nenhum alvo em monitoramento. Analise um endereço acima ou liste os alvos em targets.yaml, na raiz do projeto, para o Anhangá acompanhá-los em segundo plano.
+                    {{ tr('Nenhum alvo em monitoramento. Analise um endereço acima ou liste os alvos em targets.yaml, na raiz do projeto, para o Anhangá acompanhá-los em segundo plano.', 'No targets are being monitored. Analyze an address above or list targets in targets.yaml, at the project root, for Anhangá to watch them in the background.') }}
                 </div>
                 {% endif %}
             </div>
@@ -891,7 +892,7 @@
                             <div class="grow">
                                 <div style="font-weight: 600;" x-text="t('problem_' + inc.problem)"></div>
                                 <div class="mono muted truncate" :title="inc.target" x-text="inc.target"></div>
-                                <div class="muted break" x-text="inc.message"></div>
+                                <div class="muted break" x-text="storedMessage(inc.message)"></div>
                             </div>
                             <div class="mono muted" style="text-align: right;">
                                 <div x-text="incidentTime(inc.started_ts)"></div>
@@ -915,6 +916,7 @@
     <script>
         const I18N_DICTIONARY = {
             'pt-BR': {
+                pageTitle: 'Anhangá – auditoria de TLS, latência e cabeçalhos de segurança',
                 subtitle: 'Auditoria de TLS, latência e cabeçalhos de segurança',
                 themeLabel: 'Tema',
                 themeAuto: 'automático',
@@ -1105,6 +1107,7 @@
                 analysisFailed: 'Falha ao executar a análise.'
             },
             'en-US': {
+                pageTitle: 'Anhangá – TLS, latency and security header audit',
                 subtitle: 'TLS, latency and security header auditor',
                 themeLabel: 'Theme',
                 themeAuto: 'automatic',
@@ -1371,10 +1374,42 @@
 
                 setLocale(lang) {
                     if (I18N_DICTIONARY[lang]) {
+                        const changed = this.locale !== lang;
                         this.locale = lang;
                         document.documentElement.lang = lang;
+                        document.title = this.t('pageTitle');
                         try { localStorage.setItem('anhanga_locale', lang); } catch (_) {}
+                        // os textos da análise vêm do servidor: ao trocar o idioma, a análise aberta é refeita no novo idioma
+                        if (changed && this.result) this.refreshResultLanguage();
                     }
+                },
+
+                // incidentes antigos ficam guardados no idioma em que foram gerados; em inglês os modelos conhecidos são traduzidos na tela
+                storedMessage(msg) {
+                    if (!msg || this.locale !== 'en-US') return msg;
+                    const rules = [
+                        [/^Alvo OFFLINE: /, 'Target OFFLINE: '],
+                        [/^Certificado TLS inválido: /, 'Invalid TLS certificate: '],
+                        [/^Certificado TLS expira em (\d+) dias$/, 'TLS certificate expires in $1 days'],
+                        [/^Certificado TLS expirado há (\d+) dias$/, 'TLS certificate expired $1 days ago'],
+                        [/^TTFB ([\d.]+) ms excede o SLO de ([\d.]+) ms$/, 'TTFB $1 ms exceeds the $2 ms SLO'],
+                        [/^Latência total ([\d.]+) ms excede o SLO de ([\d.]+) ms$/, 'Total latency $1 ms exceeds the $2 ms SLO'],
+                        [/^Nota (\S+) abaixo do mínimo exigido \((\S+)\)$/, 'Grade $1 is below the required minimum ($2)'],
+                        [/Timeout rígido excedido/, 'Hard timeout exceeded'],
+                        [/limite de tempo esgotado/, 'time limit reached'],
+                        [/Erro de DNS: /, 'DNS error: '],
+                        [/Erro HTTP\/Conexão: /, 'HTTP/Connection error: '],
+                        [/Bloqueado pelo Guardião Anti-SSRF: /, 'Blocked by the Anti-SSRF guard: '],
+                        [/: resolvido$/, ': resolved'],
+                    ];
+                    return rules.reduce((text, [re, to]) => text.replace(re, to), msg);
+                },
+
+                async refreshResultLanguage() {
+                    const url = this.result && this.result.target_url;
+                    if (!url || this.loading) return;
+                    this.targetUrl = url;
+                    await this.runScan(false);
                 },
 
                 // automático -> claro -> escuro -> automático
@@ -1542,7 +1577,7 @@
                     const prior = isRescan && this.result ? JSON.parse(JSON.stringify(this.result)) : null;
 
                     try {
-                        const query = `/api/v1/scan?url=${encodeURIComponent(this.targetUrl.trim())}&samples=${encodeURIComponent(this.samples)}`;
+                        const query = `/api/v1/scan?url=${encodeURIComponent(this.targetUrl.trim())}&samples=${encodeURIComponent(this.samples)}&lang=${encodeURIComponent(this.locale)}`;
                         const response = await apiFetch(query);
                         const data = await response.json();
 
@@ -1611,6 +1646,8 @@
                     const missingLen = (item.security?.missing_findings || []).length;
                     this.selectedFindings = missingLen > 0 ? [0, ...(missingLen > 1 ? [1] : [])] : [];
                     window.scrollTo({ top: 0, behavior: 'smooth' });
+                    // o monitor guarda os textos em pt-BR; em inglês a análise é refeita para vir traduzida
+                    if (this.locale !== 'pt-BR') this.refreshResultLanguage();
                 },
 
                 getWaterfallPhases() {
@@ -1669,7 +1706,7 @@
                         transfer: 'Content Transfer'
                     };
                     const map = this.locale === 'en-US' ? namesEn : namesPt;
-                    return map[phaseKey] || phaseKey || 'N/D';
+                    return map[phaseKey] || phaseKey || this.t('notAvailableShort');
                 },
 
                 getPhaseSloBadgeClass(status) {
@@ -1949,8 +1986,8 @@
                         `# ${this.L('Relatório de análise do Anhangá', 'Anhangá analysis report')} — ${r.final_url || r.target_url}`,
                         ``,
                         `- **Status**: ${r.health === 'degraded' ? this.L('DEGRADADO (TLS inválido: ', 'DEGRADED (invalid TLS: ') + (r.tls?.validation_error || 'N/D') + ')' : (r.is_up ? 'ONLINE (' + r.status_code + ')' : 'OFFLINE')}`,
-                        `- **${this.L('IP resolvido', 'Resolved IP')}**: \`${r.resolved_ip || 'N/D'}\``,
-                        `- **${this.L('Protocolo HTTP', 'HTTP protocol')}**: \`${r.http_version || 'N/D'}\``,
+                        `- **${this.L('IP resolvido', 'Resolved IP')}**: \`${r.resolved_ip || this.t('notAvailableShort')}\``,
+                        `- **${this.L('Protocolo HTTP', 'HTTP protocol')}**: \`${r.http_version || this.t('notAvailableShort')}\``,
                         `- **${this.L('Nota de segurança', 'Security grade')}**: **${r.security?.grade || 'F'}** (\`${r.security?.score || 0}/100\`)`,
                         `- **${this.L('Latência total', 'Total latency')}**: \`${r.timings?.total_ms || 0} ms\` (P50: \`${r.sampling?.p50_ms || 0} ms\`, P95: \`${r.sampling?.p95_valid ? r.sampling.p95_ms + ' ms' : 'N/D (n<20)'}\`, P99: \`${r.sampling?.p99_valid ? r.sampling.p99_ms + ' ms' : 'N/D (n<100)'}\`, Jitter: \`${r.sampling?.jitter_ms || 0} ms\`)`,
                         ``,
@@ -1961,7 +1998,7 @@
                         ``,
                         `## ${this.L('Certificado TLS', 'TLS certificate')}`,
                         r.tls
-                            ? `- **${this.L('Validade', 'Validity')}**: ${r.tls.days_remaining === null || r.tls.days_remaining === undefined ? 'N/D' : (r.tls.days_remaining < 0 ? this.L('expirado há ', 'expired ') + Math.abs(r.tls.days_remaining) + this.L(' dias', ' days ago') : r.tls.days_remaining + this.L(' dias restantes', ' days left'))}\n- **${this.L('Protocolo / Cifra', 'Protocol / Cipher')}**: \`${r.tls.protocol || 'N/D'}\` / \`${r.tls.cipher || 'N/D'}\`\n- **${this.L('Emissor', 'Issuer')}**: ${r.tls.issuer || 'N/D'}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **${this.L('Revogação', 'Revocation')}**: ${r.tls.revocation ? r.tls.revocation.status + (r.tls.revocation.method ? ' (' + r.tls.revocation.method.toUpperCase() + ')' : '') : 'N/D'}\n- **${this.L('Cadeia de certificados', 'Certificate chain')}**: ${(r.tls.cert_chain || []).join(' -> ')}`
+                            ? `- **${this.L('Validade', 'Validity')}**: ${r.tls.days_remaining === null || r.tls.days_remaining === undefined ? 'N/D' : (r.tls.days_remaining < 0 ? this.L('expirado há ', 'expired ') + Math.abs(r.tls.days_remaining) + this.L(' dias', ' days ago') : r.tls.days_remaining + this.L(' dias restantes', ' days left'))}\n- **${this.L('Protocolo / Cifra', 'Protocol / Cipher')}**: \`${r.tls.protocol || this.t('notAvailableShort')}\` / \`${r.tls.cipher || this.t('notAvailableShort')}\`\n- **${this.L('Emissor', 'Issuer')}**: ${r.tls.issuer || this.t('notAvailableShort')}\n- **OCSP Stapling**: ${r.tls.ocsp_status}\n- **${this.L('Revogação', 'Revocation')}**: ${r.tls.revocation ? r.tls.revocation.status + (r.tls.revocation.method ? ' (' + r.tls.revocation.method.toUpperCase() + ')' : '') : 'N/D'}\n- **${this.L('Cadeia de certificados', 'Certificate chain')}**: ${(r.tls.cert_chain || []).join(' -> ')}`
                             : `- ${this.L('TLS não aplicável.', 'TLS not applicable.')}`,
                         ``,
                         `## ${this.L('O que corrigir', 'What to fix')} (${this.getActiveServerLabel()})`,

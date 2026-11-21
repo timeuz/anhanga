@@ -60,3 +60,11 @@ def test_permalink_button_label_is_copy_analysis_link():
     assert "permalinkBtn: 'Copiar Link da Análise'" in HTML
     assert "permalinkBtn: 'Copy Analysis Link'" in HTML
     assert "Link Permanente" not in HTML.replace("<!-- Barra de Ferramentas: Re-escanear & Exportação (Link Permanente, JSON, Markdown) -->", "")
+
+
+def test_static_files_are_revalidated_so_an_upgrade_never_serves_a_stale_stylesheet():
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app_main.app).get("/static/app.css")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-cache"

@@ -94,10 +94,9 @@
             <form @submit.prevent="runScan(false)" class="row" style="align-items: stretch; gap: 10px;">
                 <div class="input-addon">
                     <label for="target-url-input" class="sr-only" x-text="t('targetUrlLabel')">Endereço ou hostname</label>
-                    <span>https://</span>
                     <input id="target-url-input" type="text" x-model="targetUrl"
                            :placeholder="t('urlPlaceholder')"
-                           placeholder="ex: github.com ou api.seudominio.com.br"
+                           placeholder="ex: https://github.com ou api.seudominio.com.br"
                            class="field field-lg">
                 </div>
 
@@ -926,7 +925,7 @@
                 scanSubtitle: 'Mede DNS, TCP, TLS, tempo até o primeiro byte e transferência, segue os redirects e confere os cabeçalhos de segurança.',
                 ssrfProtected: 'Bloqueio de SSRF e DNS fixado durante a análise',
                 targetUrlLabel: 'Endereço ou hostname',
-                urlPlaceholder: 'ex: github.com ou api.seudominio.com.br',
+                urlPlaceholder: 'ex: github.com ou https://api.seudominio.com.br',
                 samplesLabel: 'Amostras',
                 scanBtn: 'Analisar',
                 scanningBtn: 'Analisando…',
@@ -1116,7 +1115,7 @@
                 scanSubtitle: 'Measures DNS, TCP, TLS, time to first byte and transfer, follows redirects and checks the security headers.',
                 ssrfProtected: 'SSRF blocking and pinned DNS during the analysis',
                 targetUrlLabel: 'Address or hostname',
-                urlPlaceholder: 'e.g. github.com or api.yourdomain.com',
+                urlPlaceholder: 'e.g. github.com or https://api.yourdomain.com',
                 samplesLabel: 'Samples',
                 scanBtn: 'Analyze',
                 scanningBtn: 'Analyzing…',

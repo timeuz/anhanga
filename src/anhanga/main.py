@@ -597,7 +597,11 @@ async def api_key_guard(request: Request, call_next):
             },
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        # sem isso o navegador reaproveita um app.css antigo depois de um upgrade
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.get("/healthz", tags=["System"])
